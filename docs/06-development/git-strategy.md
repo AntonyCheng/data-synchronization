@@ -24,10 +24,7 @@
 
 ## 提交顺序
 
-1. `chore(repo): establish repository boundaries`：只提交忽略规则、文档索引和环境模板。
-2. `chore(scaffold): import ruoyi backend and react frontend`：提交经过忽略规则过滤的脚手架源码和锁文件。
-3. `chore(poc): add reproducible mysql cdc assets`：提交 POC 脚本、作业和测试 SQL，不提交运行数据。
-4. 后续按业务能力拆分提交，例如数据源管理、任务配置、SeaTunnel 适配器和前端页面，避免把生成物与功能代码混在一起。
+当前工作区已经用 `chore(repo): establish project baseline` 建立首个基线提交，包含经过过滤的后端、前端、POC、平台配置和开发文档。后续变更按业务能力拆分提交，例如数据源管理、任务配置、SeaTunnel 适配器和前端页面，避免把生成物与功能代码混在一起。
 
 ## 首次提交前检查
 
