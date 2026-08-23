@@ -1,0 +1,20 @@
+seatunnel:
+  engine:
+    backup-count: 0
+    print-execution-info-interval: 10
+    slot-service:
+      dynamic-slot: true
+    checkpoint:
+      interval: 5000
+      timeout: 60000
+      storage:
+        type: hdfs
+        max-retained: 10
+        plugin-config:
+          namespace: file:///opt/seatunnel/checkpoint/
+          storage.type: hdfs
+          fs.defaultFS: file:///
+    http:
+      enable-http: true
+      port: 8080
+      enable-dynamic-port: false

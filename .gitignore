@@ -1,0 +1,48 @@
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.iml
+
+# Java / Maven / Gradle build output
+**/target/
+**/build/
+**/.flattened-pom.xml
+*.class
+*.jar
+*.war
+
+# Node / frontend build output
+**/node_modules/
+**/.pnpm-store/
+**/dist/
+**/.umi/
+**/.umi-*/
+**/coverage/
+**/.run/
+**/.gitee/
+
+# Local configuration and credentials
+**/.env
+**/.env.local
+**/.env.development
+**/.env.production
+!**/.env.example
+**/application-local.yml
+**/application-ga.yml
+
+# Logs and local runtime state
+**/*.log
+**/*.log.gz
+server/logs/
+platform/runtime/
+test/runtime/
+
+# Generated POC evidence. Keep the directory marker only.
+test/results/*
+!test/results/.gitkeep
+
+# Local Git metadata from imported upstream projects
+**/.git/
