@@ -1,0 +1,16 @@
+:80 {
+    encode zstd gzip
+
+    route {
+        handle_path /prod-api/* {
+            reverse_proxy host.docker.internal:{$BACKEND_PORT:18082}
+        }
+
+        handle_path /dev-api/* {
+            reverse_proxy host.docker.internal:{$BACKEND_PORT:18082}
+        }
+
+        try_files {path} /index.html
+        file_server
+    }
+}

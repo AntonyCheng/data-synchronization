@@ -65,7 +65,9 @@ pwsh -File test/scripts/phase6-acceptance.ps1 -Token $env:PHASE6_TOKEN
 
 Phase 5 脚本创建并清理临时 FULL 草稿，验证字段默认补齐、同步键、配置版本快照脱敏、编辑递增和非法位点/字段/模式拒绝。Phase 6 脚本验证 Cron 下次执行时间、非法 Cron、源库保护上限及覆盖刷新配置的版本化 stage 表；不会自动提交新 SeaTunnel 作业。真实覆盖替换成功和失败回滚应在隔离 POC 表上另行执行，避免影响现有任务。
 
-覆盖刷新收口演练已在 `docs/03-poc/mvp-closeout-report.md` 记录：成功路径完成事务替换并清理 stage 标记，失败路径验证事务回滚和原表保留。平台重启对账、凭证加密迁移、50,000 行容量基线、最终清洁回归和登录态人工浏览器验收已完成；发布前剩余工作是按 [发布检查清单](release-checklist.md) 核对离线交付包并形成 Git 基线。
+覆盖刷新收口演练已在 `docs/03-poc/mvp-closeout-report.md` 记录：成功路径完成事务替换并清理 stage 标记，失败路径验证事务回滚和原表保留。平台重启对账、凭证加密迁移、50,000 行容量基线、最终清洁回归和登录态人工浏览器验收已完成；发布前须按 [发布检查清单](release-checklist.md) 完成离线交付包启动演练。离线包由 `test/scripts/build-offline-package.ps1` 装配，验证时在独立端口导入镜像、启动 Compose、启动 Java 21 后端，并访问前端与 `/prod-api/captchaImage`。
+
+离线启动演练已完成：包内 14 份增量 SQL 在后端启动前执行，避免 JAR 与元数据库结构不匹配；MySQL/Redis 健康、SeaTunnel/Caddy 正常，后端、静态前端及 `/prod-api/captchaImage` 均返回 HTTP 200。交付构建拒绝包含 `.env` 或运行数据的输出目录，防止测试凭证和数据库文件被误打包。
 ### Phase 4 数据质量核对完善
 
 - `COUNT` 模式保持既有单表/任务组行数核对兼容性。

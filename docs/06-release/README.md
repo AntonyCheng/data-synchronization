@@ -12,6 +12,16 @@
 
 脚本检查前端 `dist`、后端 JAR、平台 Compose、数据库迁移和文档是否齐全，并生成 `test/release/mvp/manifest.json`。它不会复制运行时数据库、checkpoint、测试结果、Node 依赖或凭证。
 
+## 实际离线包
+
+在可联网的构建机执行：
+
+```powershell
+.\test\scripts\build-offline-package.ps1
+```
+
+该命令装配前端、后端、SQL、SeaTunnel 配置以及已缓存的 MySQL、Redis、SeaTunnel、Caddy 镜像到 `test/release/mvp/`。离线环境的完整导入和启动步骤见 [offline/README.md](offline/README.md)。
+
 ## 启动顺序
 
 1. 使用平台 Compose 启动 `dbs-mysql` 和 `dbs-redis`。

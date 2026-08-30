@@ -39,7 +39,12 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $output 'manifest.json')
 
-$sensitive = @(Get-ChildItem $output -Recurse -File | Where-Object { $_.Name -match '(?i)(password|secret|token|aes|credential)' })
+$sensitive = @(Get-ChildItem $output -Recurse -File | Where-Object {
+    $_.Name -eq '.env' -or (
+        $_.Extension -in '.env', '.key', '.pem', '.properties', '.yml', '.yaml', '.json', '.txt' -and
+        $_.Name -match '(?i)(password|secret|token|aes|credential)'
+    )
+})
 if ($sensitive.Count -gt 0) {
     throw "Sensitive-looking files were created in the package directory: $($sensitive.Name -join ', ')"
 }

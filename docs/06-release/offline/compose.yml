@@ -1,0 +1,77 @@
+name: data-sync-mvp-offline
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ry-vue}
+    ports:
+      - "${MYSQL_PORT:-13316}:3306"
+    volumes:
+      - ./runtime/mysql:/var/lib/mysql
+      - ./database/001-ry-vue.sh:/docker-entrypoint-initdb.d/001-ry-vue.sh:ro
+      - ./database/ry_vue.sql:/docker-entrypoint-initdb.d/ry_vue.seed:ro
+      - ./database/ry_sync.sql:/docker-entrypoint-initdb.d/ry_sync.seed:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --explicit_defaults_for_timestamp=true
+      - --lower_case_table_names=1
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "${REDIS_PORT:-16389}:6379"
+    volumes:
+      - ./runtime/redis:/redis/data
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  seatunnel:
+    image: ${SEATUNNEL_IMAGE:-data-sync-poc/seatunnel:2.3.13}
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "${SEATUNNEL_PORT:-18084}:8080"
+    volumes:
+      - ./seatunnel/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml:ro
+      - ./runtime/seatunnel/checkpoint:/opt/seatunnel/checkpoint
+      - ./runtime/seatunnel/logs:/opt/seatunnel/logs
+
+  web:
+    image: ${CADDY_IMAGE:-caddy:2.8.4-alpine}
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      BACKEND_PORT: ${BACKEND_PORT:-18082}
+    ports:
+      - "${WEB_PORT:-18083}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./frontend:/srv:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro

@@ -60,3 +60,9 @@ POC、单表/多表同步、恢复边界、监控、数据核对、凭证迁移�
 前端 `web` 项目 TypeScript 检查和生产构建均通过；已使用登录态浏览器完成发布前人工验收：数据源迁移后 MySQL/PostgreSQL 连接测试成功，任务详情、目标兼容性、CDC 前置检查、KEY_RANGE 数据核对、配置预览和缓存监控均正常，控制台无错误。8003 preview 已重建并确认任务/任务组状态使用中文显示。
 
 本次收口复验还执行了 `ResourceProtectionPolicyTest` 2/2、`SyncTaskSchedulerTest` 2/2、稳定性检查（源端/目标端各 2 行且一致）和离线交付前置校验（9 项必需资产齐全）。
+
+## 离线交付启动演练补充
+
+2026-08-30 使用 `test/scripts/build-offline-package.ps1` 生成干净交付目录 `test/release/mvp-artifact`。该目录包含前端静态资源、后端 JAR、初始 SQL、14 份幂等同步模块迁移、SeaTunnel 配置及 MySQL、Redis、SeaTunnel、Caddy 的本地镜像归档；归档结构可读取，共 74 个条目。目录未包含 `.env`、运行数据、checkpoint、日志或测试结果。
+
+在独立端口的离线 Compose 演练中，MySQL 与 Redis 健康，SeaTunnel 和 Caddy 正常启动；执行包内迁移后，Java 21 后端在 `18082` 成功启动，静态前端 `18083`、后端根路径和经 `/prod-api` 转发的验证码接口均返回 HTTP 200。Compose 设置 `pull_policy: never`，演练未拉取公网镜像。演练栈在验证后已停止；此前临时运行目录仅保留于 Git 忽略的本地路径，不构成交付物。
