@@ -1,6 +1,10 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Local POC endpoints must not be sent through a developer HTTP proxy.
+$env:NO_PROXY = '127.0.0.1,localhost'
+$env:no_proxy = $env:NO_PROXY
+
 $script:TestRoot = Split-Path -Parent $PSScriptRoot
 $script:ComposeFile = Join-Path $script:TestRoot 'docker-compose.yml'
 $script:ProjectName = 'data-sync-poc'

@@ -7,3 +7,8 @@ mysql --protocol=socket \
   --default-character-set=utf8mb4 \
   -uroot -p"${MYSQL_ROOT_PASSWORD}" \
   "${MYSQL_DATABASE}" < /docker-entrypoint-initdb.d/ry_vue.seed
+
+mysql --protocol=socket \
+  --default-character-set=utf8mb4 \
+  -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+  "${MYSQL_DATABASE}" < /docker-entrypoint-initdb.d/ry_sync.seed

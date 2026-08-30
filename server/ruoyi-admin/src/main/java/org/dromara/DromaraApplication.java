@@ -3,6 +3,7 @@ package org.dromara;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.metrics.buffering.BufferingApplicationStartup;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 启动程序
@@ -11,6 +12,7 @@ import org.springframework.boot.context.metrics.buffering.BufferingApplicationSt
  */
 
 @SpringBootApplication
+@EnableScheduling
 public class DromaraApplication {
 
     /**

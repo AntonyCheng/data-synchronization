@@ -43,6 +43,7 @@ test/runtime/
 # Generated POC evidence. Keep the directory marker only.
 test/results/*
 !test/results/.gitkeep
+test/release/
 
 # Local Git metadata from imported upstream projects
 **/.git/

@@ -12,3 +12,4 @@
 | checkpoint 恢复 | 持久化目录 | 已验证 | 通过 | 引擎重启后由适配器 restore |
 | savepoint/restore | 官方任务控制能力 | 已验证 | 通过 | 同 jobId、同配置版本恢复 |
 | 新增字段 | 有条件支持 | 已验证边界 | 不自动变更 | `schema-changes.enabled=false` 时需人工处理 |
+| MySQL JSON -> PostgreSQL JSON/JSONB | 受限 | `profile` | 阻断 | SeaTunnel JDBC MVP 以字符串绑定，目标需使用 `text`；调整结构后重新校验 |

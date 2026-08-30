@@ -15,6 +15,7 @@ services:
       - ./runtime/mysql-v2:/var/lib/mysql
       - ./init/001-ry-vue.sh:/docker-entrypoint-initdb.d/001-ry-vue.sh:ro
       - ../server/script/sql/ry_vue.sql:/docker-entrypoint-initdb.d/ry_vue.seed:ro
+      - ../server/script/sql/ry_sync.sql:/docker-entrypoint-initdb.d/ry_sync.seed:ro
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci

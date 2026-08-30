@@ -12,5 +12,22 @@ foreach ($runtimeDirectory in $runtimeDirectories) {
     New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
 }
 
-Invoke-PocCompose up --detach --build
+$vendorReady = (Test-Path (Join-Path $script:TestRoot 'docker/seatunnel/vendor/connectors')) -and
+    (Test-Path (Join-Path $script:TestRoot 'docker/seatunnel/vendor/drivers'))
+$imageReady = $false
+try {
+    & docker image inspect 'data-sync-poc/seatunnel:2.3.13' *> $null
+    $imageReady = $LASTEXITCODE -eq 0
+} catch {
+    $imageReady = $false
+}
+
+if ($vendorReady) {
+    Invoke-PocCompose up --detach --build
+} elseif ($imageReady) {
+    Write-Host 'SeaTunnel vendor JARs are not present; reusing data-sync-poc/seatunnel:2.3.13.'
+    Invoke-PocCompose up --detach
+} else {
+    throw 'SeaTunnel vendor JARs are missing and data-sync-poc/seatunnel:2.3.13 is not available. Pull/build the POC image first.'
+}
 & (Join-Path $PSScriptRoot 'wait-ready.ps1')

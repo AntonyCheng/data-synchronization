@@ -168,7 +168,10 @@ redisson:
   # 线程池数量
   threads: 4
   # Netty线程池数量
-  nettyThreads: 8
+  # Keep the local Windows development profile lightweight; each Netty event
+  # loop opens a loopback selector and high counts can exhaust the desktop
+  # loopback provider after a restart.
+  nettyThreads: ${REDISSON_NETTY_THREADS:2}
   # 单节点配置
   singleServerConfig:
     # 客户端名称 不能用中文

@@ -184,7 +184,11 @@ export default function Login() {
                     uuid: captcha.uuid,
                     rememberMe: values.rememberMe
                   });
-                  setToken(res.data.access_token);
+                  const accessToken = res.data?.access_token;
+                  if (!accessToken) {
+                    throw new Error(res.msg || '登录接口未返回访问令牌，请检查前端 API 地址');
+                  }
+                  setToken(accessToken);
                   resetTags();
                   message.success(text.loginSuccess);
                   history.replace(normalizeLoginRedirect(redirect));

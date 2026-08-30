@@ -443,6 +443,13 @@
                 <version>${revision}</version>
             </dependency>
 
+            <!-- 数据同步模块 -->
+            <dependency>
+                <groupId>org.dromara</groupId>
+                <artifactId>ruoyi-sync</artifactId>
+                <version>${revision}</version>
+            </dependency>
+
             <!--  工作流模块  -->
             <dependency>
                 <groupId>org.dromara</groupId>

@@ -6,7 +6,7 @@ services:
     container_name: ds-poc-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-poc_root_pw}
       TZ: UTC
     command:
       - --server-id=223344
@@ -20,7 +20,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
     ports:
-      - "13306:3306"
+      - "${POC_MYSQL_PORT:-23306}:3306"
     volumes:
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
       - ./cases:/poc-cases:ro
@@ -39,13 +39,13 @@ services:
     container_name: ds-poc-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-poc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-poc_password}
+      POSTGRES_DB: ${POSTGRES_DB:-sink_db}
       TZ: UTC
       PGTZ: UTC
     ports:
-      - "15432:5432"
+      - "${POC_POSTGRES_PORT:-25432}:5432"
     volumes:
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
       - ./cases:/poc-cases:ro

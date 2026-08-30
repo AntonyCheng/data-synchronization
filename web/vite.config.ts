@@ -146,6 +146,7 @@ export function createUmiViteConfig() {
 export function createViteConfig(mode: string): ViteConfig {
   const env = getAppEnv(mode);
   const baseApi = env.VITE_APP_BASE_API || '/dev-api';
+  const apiTarget = env.VITE_APP_API_TARGET || 'http://localhost:8080';
 
   return {
     base: env.VITE_APP_CONTEXT_PATH || '/',
@@ -162,7 +163,7 @@ export function createViteConfig(mode: string): ViteConfig {
       open: true,
       proxy: {
         [baseApi]: {
-          target: 'http://localhost:8080',
+          target: apiTarget,
           changeOrigin: true,
           ws: true,
           rewrite: (path: string) => path.replace(new RegExp(`^${baseApi}`), '')
@@ -177,20 +178,41 @@ export function createUmiAppConfig() {
   const env = getAppEnv();
   const vite = createViteConfig(process.env.UMI_ENV || process.env.NODE_ENV || 'development');
   const baseApi = env.VITE_APP_BASE_API || '/dev-api';
+  const apiTarget = env.VITE_APP_API_TARGET || 'http://localhost:8080';
+  const proxyTarget = vite.server.proxy[baseApi];
+  const apiProxy = {
+    ...(proxyTarget
+      ? {
+          [baseApi]: {
+            target: proxyTarget.target,
+            changeOrigin: proxyTarget.changeOrigin,
+            ws: proxyTarget.ws,
+            pathRewrite: { [`^${baseApi}`]: '' }
+          }
+        }
+      : {}),
+    // The production build uses /prod-api, while local preview serves that build.
+    // Keep both prefixes pointed at the local backend so preview and dev behave alike.
+    '/prod-api': {
+      target: apiTarget,
+      changeOrigin: true,
+      ws: true,
+      pathRewrite: { '^/prod-api': '' }
+    },
+    '/dev-api': {
+      target: apiTarget,
+      changeOrigin: true,
+      ws: true,
+      pathRewrite: { '^/dev-api': '' }
+    }
+  };
 
   return {
     title: env.VITE_APP_TITLE || 'RuoYi-React-Plus后台管理系统',
     base: vite.base,
     publicPath: vite.base,
     vite: createUmiViteConfig(),
-    proxy: {
-      [baseApi]: {
-        target: vite.server.proxy[baseApi].target,
-        changeOrigin: vite.server.proxy[baseApi].changeOrigin,
-        ws: vite.server.proxy[baseApi].ws,
-        pathRewrite: { [`^${baseApi}`]: '' }
-      }
-    }
+    proxy: apiProxy
   };
 }
 

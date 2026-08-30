@@ -23,6 +23,12 @@
             <artifactId>mysql-connector-j</artifactId>
         </dependency>
 
+        <!-- 目标端连接测试 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+        </dependency>
+
 <!--        &lt;!&ndash; mp支持的数据库均支持 只需要增加对应的jdbc依赖即可 &ndash;&gt;-->
 <!--        &lt;!&ndash; Oracle &ndash;&gt;-->
 <!--        <dependency>-->
@@ -96,6 +102,12 @@
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-demo</artifactId>
+        </dependency>
+
+        <!-- 数据同步平台模块 -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-sync</artifactId>
         </dependency>
 
         <!--  工作流模块  -->

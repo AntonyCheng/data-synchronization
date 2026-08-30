@@ -9,7 +9,7 @@
 | VARCHAR(n) | varchar(n) | 字符长度语义需检查 | email、状态字段已验证 |
 | TEXT | text | 大字段性能 | `notes` 已验证 |
 | BLOB | bytea | 大字段性能 | 未验证 |
-| JSON | jsonb / text | 顺序与格式语义 | `profile` 已验证为 text 兼容写入 |
+| JSON | text（MVP） | JDBC 以字符串绑定；json/jsonb 需要显式 cast，当前生成器不输出 cast | `profile` text 已验证；json/jsonb 由兼容性检查阻断 |
 | DATE | date | MySQL 零日期不兼容 | 未验证 |
 | DATETIME(p) | timestamp(p) without time zone | 无时区本地时间 | `registered_at`/`ordered_at` 已验证 |
 | TIMESTAMP(p) | timestamp(p) with time zone | 明确源端时区 | `updated_at` 已验证，时区为 UTC |

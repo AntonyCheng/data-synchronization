@@ -1,7 +1,7 @@
 # 开发环境配置
 server:
   # 服务器的HTTP端口，默认为8080
-  port: 8080
+  port: 18081
   servlet:
     # 应用的访问路径
     context-path: /
@@ -133,13 +133,13 @@ mybatis-plus:
 # 数据加密
 mybatis-encryptor:
   # 是否开启加密
-  enable: false
+  enable: ${SYNC_CREDENTIAL_ENCRYPTION_ENABLED:false}
   # 默认加密算法
   algorithm: BASE64
   # 编码方式 BASE64/HEX。默认BASE64
   encode: BASE64
   # 安全秘钥 对称算法的秘钥 如：AES，SM4
-  password:
+  password: ${SYNC_CREDENTIAL_ENCRYPTION_PASSWORD:}
   # 公私钥 非对称算法的公私钥 如：SM2，RSA
   publicKey:
   privateKey:
@@ -153,6 +153,21 @@ api-decrypt:
   # 公钥和私钥仅通过环境变量提供，禁止写入版本库。
   publicKey: ${API_DECRYPT_PUBLIC_KEY:}
   privateKey: ${API_DECRYPT_PRIVATE_KEY:}
+
+# SeaTunnel job adapter
+sync:
+  engine:
+    endpoint: ${SEATUNNEL_ENDPOINT:http://localhost:18080}
+    request-timeout: ${SEATUNNEL_REQUEST_TIMEOUT:10s}
+    checkpoint-interval-ms: ${SEATUNNEL_CHECKPOINT_INTERVAL_MS:5000}
+    read-limit-rows-per-second: ${SEATUNNEL_READ_LIMIT_ROWS_PER_SECOND:1000}
+    read-limit-bytes-per-second: ${SEATUNNEL_READ_LIMIT_BYTES_PER_SECOND:10485760}
+    snapshot-parallelism: ${SEATUNNEL_SNAPSHOT_PARALLELISM:1}
+    source-connection-limit: ${SEATUNNEL_SOURCE_CONNECTION_LIMIT:2}
+    max-read-limit-rows-per-second: ${SEATUNNEL_MAX_READ_LIMIT_ROWS_PER_SECOND:100000}
+    max-read-limit-bytes-per-second: ${SEATUNNEL_MAX_READ_LIMIT_BYTES_PER_SECOND:1073741824}
+    max-snapshot-parallelism: ${SEATUNNEL_MAX_SNAPSHOT_PARALLELISM:4}
+    max-source-connection-limit: ${SEATUNNEL_MAX_SOURCE_CONNECTION_LIMIT:8}
 springdoc:
   api-docs:
     # 是否开启接口文档

@@ -11,6 +11,9 @@ import MonitorLoginInfoPage from '@/pages/monitor/logininfo';
 import MonitorOnlinePage from '@/pages/monitor/online';
 import MonitorOperlogPage from '@/pages/monitor/operlog';
 import MonitorSnailJobPage from '@/pages/monitor/snailjob';
+import SyncDataSourcePage from '@/pages/sync/data-source';
+import SyncTaskGroupPage from '@/pages/sync/group';
+import SyncTaskPage from '@/pages/sync/task';
 import SystemClientPage from '@/pages/system/client';
 import SystemConfigPage from '@/pages/system/config';
 import SystemDeptPage from '@/pages/system/dept';
@@ -51,6 +54,9 @@ const migratedPages: Record<string, React.ComponentType> = {
   'monitor/online/index': MonitorOnlinePage,
   'monitor/operlog/index': MonitorOperlogPage,
   'monitor/snailjob/index': MonitorSnailJobPage,
+  'sync/data-source/index': SyncDataSourcePage,
+  'sync/group/index': SyncTaskGroupPage,
+  'sync/task/index': SyncTaskPage,
   'system/client/index': SystemClientPage,
   'system/config/index': SystemConfigPage,
   'system/dept/index': SystemDeptPage,

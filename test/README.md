@@ -2,12 +2,14 @@
 
 本目录包含完全隔离、可重复执行的 POC 环境。它不会操作现有的 `mysql` 或 `pgvector` 容器。
 
+平台元数据库升级使用仓库根目录的 `test/scripts/migrate-platform-schema.ps1`，默认只连接 `dbs-mysql` 的 `ry-vue` 数据库；它与本 POC 的 `ds-poc-*` 数据库和容器隔离。
+
 ## 端口与容器
 
 | 服务 | 容器 | 主机端口 | 测试数据库 |
 |---|---|---|---|
-| MySQL | `ds-poc-mysql` | `13306` | `source_db` |
-| PostgreSQL | `ds-poc-postgres` | `15432` | `sink_db` |
+| MySQL | `ds-poc-mysql` | `23306` | `source_db` |
+| PostgreSQL | `ds-poc-postgres` | `25432` | `sink_db` |
 | SeaTunnel | `ds-poc-seatunnel` | `18080` | REST API |
 
 Compose 项目名固定为 `data-sync-poc`，所有持久化内容位于 `runtime/`，测试证据位于 `results/`。
@@ -15,6 +17,9 @@ Compose 项目名固定为 `data-sync-poc`，所有持久化内容位于 `runtim
 ## 使用
 
 ```powershell
+# 执行平台同步模块元数据库迁移（可重复执行）
+.\test\scripts\migrate-platform-schema.ps1
+
 # 构建镜像并启动环境
 .\test\scripts\up.ps1
 
@@ -27,8 +32,15 @@ Compose 项目名固定为 `data-sync-poc`，所有持久化内容位于 `runtim
 # 暂停、保存点、恢复，并验证暂停期间写入的数据
 .\test\scripts\pause-restore.ps1
 
+# 故障恢复演练（只操作 ds-poc-* 隔离环境）
+.\test\scripts\recovery-drill.ps1 -Scenario checkpoint
+.\test\scripts\recovery-drill.ps1 -Scenario binlog
+
 # 验证无主键、非空联合唯一键的全量和 CDC
 .\test\scripts\verify-unique-key.ps1
+
+# 验证 SeaTunnel 行数/字节限速与 MySQL CDC 连接池参数
+.\test\scripts\resource-protection-poc.ps1 -RowCount 500 -RowsPerSecond 100 -BytesPerSecond 1048576
 
 # 停止 POC 容器，保留所有数据
 .\test\scripts\down.ps1
@@ -47,6 +59,8 @@ Compose 项目名固定为 `data-sync-poc`，所有持久化内容位于 `runtim
 - `scripts/`：环境、提交和验证脚本。
 - `runtime/`：数据库、checkpoint 和日志挂载目录。
 - `results/`：每次执行的结果与证据。
+
+`resource-protection-poc.ps1` 使用独立 ID 区间写入测试数据，提交低速单表 CDC 作业，记录配置、实际耗时与吞吐，并在结束时停止作业、清理源端和目标端测试行。它要求 SeaTunnel 当前没有其他运行作业。
 
 ## 已知运行语义
 
