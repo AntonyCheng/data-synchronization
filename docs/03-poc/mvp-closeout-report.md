@@ -51,7 +51,7 @@ MyBatis-Plus 默认忽略 null 字段更新，导致替换成功后 `overwrite_s
 
 ## MVP 收口结论
 
-POC、单表/多表同步、恢复边界、监控、数据核对、凭证迁移、调度与覆盖刷新均已有可重复证据；平台重启状态对账和 50,000 行性能基线本轮补齐。Oracle、SQL Server、Kafka、Redis 目标端、主动告警和高可用仍属于 PRD Phase 2，不纳入当前 MVP。
+POC、单表/多表同步、恢复边界、监控、数据核对、凭证迁移、调度与覆盖刷新均已有可重复证据；平台重启状态对账和 50,000 行性能基线本轮补齐。Oracle、SQL Server 属于 PRD Phase 1.1；Kafka、Redis 等非关系型目标属于 Phase 2；主动告警和自动 DDL 范围完善属于 Phase 3，均不纳入当前 MVP。
 
 ## 最终清洁回归补充
 

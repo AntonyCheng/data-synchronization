@@ -1,0 +1,47 @@
+name: data-sync-oracle-poc
+
+services:
+  oracle:
+    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:23-slim-faststart}
+    container_name: ds-poc-oracle
+    restart: unless-stopped
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:?set ORACLE_PASSWORD in test/oracle/.env}
+      APP_USER: ${ORACLE_APP_USER:-poc}
+      APP_USER_PASSWORD: ${ORACLE_APP_PASSWORD:?set ORACLE_APP_PASSWORD in test/oracle/.env}
+    ports:
+      - "${ORACLE_PORT:-21521}:1521"
+    volumes:
+      - ./runtime/oracle:/opt/oracle/oradata
+      - ./cases:/poc-cases:ro
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'select 1 from dual;' | sqlplus -sL $${APP_USER}/$${APP_USER_PASSWORD}@//localhost:1521/FREEPDB1 | grep -q 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 36
+      start_period: 90s
+    networks:
+      - poc
+
+  seatunnel:
+    build:
+      context: ./docker/seatunnel
+    image: data-sync-poc/oracle-seatunnel:2.3.13
+    container_name: ds-poc-oracle-seatunnel
+    restart: unless-stopped
+    depends_on:
+      oracle:
+        condition: service_healthy
+    ports:
+      - "${ORACLE_SEATUNNEL_PORT:-18085}:8080"
+    volumes:
+      - ./jobs:/opt/seatunnel/config/oracle-jobs:ro
+      - ./runtime/seatunnel/checkpoint:/opt/seatunnel/checkpoint
+      - ./runtime/seatunnel/logs:/opt/seatunnel/logs
+    networks:
+      - poc
+
+networks:
+  poc:
+    external: true
+    name: data-sync-poc-network
