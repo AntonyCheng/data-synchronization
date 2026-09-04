@@ -26,6 +26,7 @@ public class SeaTunnelRestClient {
 
     private final SeaTunnelProperties properties;
     private final JsonMapper jsonMapper;
+    private volatile RestClient cachedClient;
 
     public SubmitResult submit(String jobName, String config, String jobId, boolean withSavepoint) {
         URI uri = uri("/submit-job", builder -> {
@@ -96,8 +97,24 @@ public class SeaTunnelRestClient {
             text(latest, "status"));
     }
 
+    /**
+     * RestClient is thread-safe and meant to be shared - rebuilding one per call (the
+     * previous behaviour) discards the underlying HTTP connection pool every time,
+     * forcing a fresh connection for every submit/status/stop/checkpoints call across
+     * every running task.
+     */
     private RestClient client() {
-        return RestClient.builder().baseUrl(trimEndpoint(properties.getEndpoint())).build();
+        RestClient client = cachedClient;
+        if (client == null) {
+            synchronized (this) {
+                client = cachedClient;
+                if (client == null) {
+                    client = RestClient.builder().baseUrl(trimEndpoint(properties.getEndpoint())).build();
+                    cachedClient = client;
+                }
+            }
+        }
+        return client;
     }
 
     private URI uri(String path, java.util.function.Consumer<UriComponentsBuilder> customizer) {

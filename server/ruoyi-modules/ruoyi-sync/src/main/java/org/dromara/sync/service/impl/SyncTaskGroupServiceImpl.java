@@ -1127,11 +1127,18 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return String.join(",", values);
     }
 
-    /** Keep multibyte engine errors within the varchar(2000) metadata column. */
+    /**
+     * Keep multibyte engine errors within the varchar(2000) metadata column. Walks back
+     * off any UTF-8 continuation byte at the cut point so a truncated Chinese message
+     * doesn't end in a garbled (replacement-character) trailing byte sequence - see the
+     * equivalent helper in SeaTunnelJobServiceImpl.
+     */
     private static String truncateForColumn(String value) {
         if (value == null) return null;
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         if (bytes.length <= 1800) return value;
-        return new String(bytes, 0, 1800, StandardCharsets.UTF_8);
+        int end = 1800;
+        while (end > 0 && (bytes[end] & 0xC0) == 0x80) end--;
+        return new String(bytes, 0, end, StandardCharsets.UTF_8);
     }
 }
