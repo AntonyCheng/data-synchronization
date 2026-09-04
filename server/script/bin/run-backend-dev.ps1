@@ -48,8 +48,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Get-RepoRoot
 $serverDirectory = Join-Path $repoRoot 'server'
 $adminDirectory = Join-Path $serverDirectory 'ruoyi-admin'
-$socketDirectory = Join-Path $repoRoot 'test\runtime\jdk-sockets'
-$runtimeDirectory = Join-Path $repoRoot 'test\runtime\backend'
+$socketDirectory = Join-Path $repoRoot '.dev-runtime\jdk-sockets'
+$runtimeDirectory = Join-Path $repoRoot '.dev-runtime\backend'
 $port = 18081
 $profiles = if ($Fast) { 'dev,dev-fast' } else { 'dev' }
 

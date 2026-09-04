@@ -16,7 +16,7 @@ Usage:
   .\dev.ps1 logs <backend|frontend>           tail the latest log
 
 Flags:
-  -Poc      also bring up test/docker-compose.yml (ds-poc-* stack; only needed to run sync jobs)
+  -Poc      also bring up deploy/local-stack/compose.yml (ds-poc-* stack; only needed to run sync jobs)
   -Fast     backend adds the dev-fast profile (workflow/LiteFlow off + lazy-init; faster, workflow pages 500)
   -NoBuild  backend = java -jar the existing fat jar (fastest, no devtools; falls back to a build if absent)
   -All      down only: also `docker compose stop`
@@ -49,7 +49,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = $PSScriptRoot
 $WebDir = Join-Path $RepoRoot 'web'
 $ServerDir = Join-Path $RepoRoot 'server'
-$RuntimeDir = Join-Path $RepoRoot 'test\runtime'
+$RuntimeDir = Join-Path $RepoRoot '.dev-runtime'
 $BackendLogDir = Join-Path $RuntimeDir 'backend'
 $FrontendLogDir = Join-Path $RuntimeDir 'frontend'
 $SocketDir = Join-Path $RuntimeDir 'jdk-sockets'
@@ -58,9 +58,9 @@ $MigrateHashFile = Join-Path $RuntimeDir '.migrate-hash'
 
 $PlatformCompose = Join-Path $RepoRoot 'platform\docker-compose.yml'
 $PlatformProject = 'data-sync-platform'
-$PocCompose = Join-Path $RepoRoot 'test\docker-compose.yml'
+$PocCompose = Join-Path $RepoRoot 'deploy\local-stack\compose.yml'
 $PocProject = 'data-sync-poc'
-$MigrateScript = Join-Path $RepoRoot 'test\scripts\migrate-platform-schema.ps1'
+$MigrateScript = Join-Path $RepoRoot 'deploy\migrate-platform-schema.ps1'
 $SqlDir = Join-Path $RepoRoot 'server\script\sql'
 
 $BackendPort = 18081

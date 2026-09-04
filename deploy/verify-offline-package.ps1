@@ -1,21 +1,19 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = 'test\release\mvp'
+    [string]$OutputDirectory = 'deploy\release\mvp'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $output = Join-Path $root $OutputDirectory
 $required = @(
-    'docs\01-product\数据同步平台_PRD.md',
-    'docs\05-testing\release-checklist.md',
     'server\script\bin\start-backend-dev.ps1',
     'server\script\sql\ry_sync.sql',
-    'test\scripts\migrate-platform-schema.ps1',
+    'deploy\migrate-platform-schema.ps1',
     'platform\docker-compose.yml',
-    'test\docker-compose.yml',
+    'deploy\local-stack\compose.yml',
     'web\dist\index.html',
     'server\ruoyi-admin\target\ruoyi-admin.jar'
 )
@@ -29,15 +27,16 @@ if ($missing.Count -gt 0) {
 $manifest = [ordered]@{
     generatedAt = (Get-Date).ToUniversalTime().ToString('o')
     product = 'data-synchronization-platform'
-    baseline = 'MVP / PRD v0.3'
+    baseline = 'MVP / PRD v0.4'
     java = '21'
     frontend = 'plus-ui-react 6.0.0'
     engine = 'Apache SeaTunnel 2.3.13'
     included = $required
-    excluded = @('platform\runtime', 'test\runtime', 'test\results', '**\node_modules', '**\.git', '*.env', '*secret*', '*password*')
+    excluded = @('platform\runtime', '.dev-runtime', 'deploy\local-stack\runtime', '**\node_modules', '**\.git', '*.env', '*secret*', '*password*')
     note = 'This manifest validates repository prerequisites; runtime data and credentials are never copied.'
 }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $output 'manifest.json')
+$verificationManifestPath = Join-Path $output 'verification-manifest.json'
+$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $verificationManifestPath
 
 $sensitive = @(Get-ChildItem $output -Recurse -File | Where-Object {
     $_.Name -eq '.env' -or (
@@ -50,4 +49,4 @@ if ($sensitive.Count -gt 0) {
 }
 
 Write-Host "OFFLINE_MANIFEST_PASS $($required.Count) prerequisites"
-Write-Host ("Manifest: " + (Join-Path $output 'manifest.json'))
+Write-Host ("Verification manifest: " + $verificationManifestPath)

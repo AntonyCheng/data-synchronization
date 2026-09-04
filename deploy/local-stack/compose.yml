@@ -1,0 +1,177 @@
+name: data-sync-poc
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ds-poc-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-poc_root_pw}
+      TZ: UTC
+    command:
+      - --server-id=223344
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-expire-logs-seconds=604800
+      - --default-time-zone=+00:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "${POC_MYSQL_PORT:-23306}:3306"
+    volumes:
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./runtime/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - poc
+
+  postgres:
+    image: postgres:17.6-bookworm
+    container_name: ds-poc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-poc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-poc_password}
+      POSTGRES_DB: ${POSTGRES_DB:-sink_db}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "${POC_POSTGRES_PORT:-25432}:5432"
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./runtime/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks:
+      - poc
+
+  mysql-target:
+    image: mysql:8.0
+    container_name: ds-poc-mysql-target
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_ROOT_PASSWORD:-poc_target_root_pw}
+      MYSQL_DATABASE: ${TARGET_MYSQL_DATABASE:-sink_mysql}
+      MYSQL_USER: ${TARGET_MYSQL_USER:-seatunnel}
+      MYSQL_PASSWORD: ${TARGET_MYSQL_PASSWORD:-seatunnel_pw}
+      TZ: UTC
+    command:
+      - --default-time-zone=+00:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "${POC_TARGET_MYSQL_PORT:-23307}:3306"
+    volumes:
+      - ./runtime/mysql-target:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - poc
+
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: ds-poc-kafka
+    # Kafka requires atomic log-directory renames that Windows bind mounts cannot provide.
+    # This local-only broker uses a dedicated Docker volume and runs as root for its ownership.
+    user: "0:0"
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: ${POC_KAFKA_CLUSTER_ID:-5L6g3nShT-eMCtK--X86sw}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://ds-poc-kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@ds-poc-kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms128m -Xmx256m
+      TZ: UTC
+    ports:
+      - "${POC_KAFKA_PORT:-29092}:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - poc
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: ds-poc-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: poc
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ds-poc-kafka:9092
+      KAFKA_CLUSTERS_0_READONLY: "true"
+      DYNAMIC_CONFIG_ENABLED: "false"
+      SERVER_PORT: 8080
+      TZ: UTC
+    ports:
+      - "${POC_KAFKA_UI_PORT:-18088}:8080"
+    networks:
+      - poc
+
+  seatunnel:
+    build:
+      context: ./seatunnel
+      args:
+        SEATUNNEL_VERSION: "2.3.13"
+    image: data-sync-poc/seatunnel:2.3.13
+    container_name: ds-poc-seatunnel
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mysql-target:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./seatunnel/config/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml:ro
+      - ./runtime/seatunnel/checkpoint:/opt/seatunnel/checkpoint
+      - ./runtime/seatunnel/logs:/opt/seatunnel/logs
+    networks:
+      - poc
+
+networks:
+  poc:
+    name: data-sync-poc-network
+
+volumes:
+  kafka-data:
+    name: ds-poc-kafka-data

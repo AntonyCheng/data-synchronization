@@ -1,4 +1,0 @@
-.env
-runtime/
-vendor/*
-!vendor/.gitkeep

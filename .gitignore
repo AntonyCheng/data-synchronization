@@ -38,12 +38,11 @@ Desktop.ini
 **/*.log.gz
 server/logs/
 platform/runtime/
-test/runtime/
+/.dev-runtime/
 
-# Generated POC evidence. Keep the directory marker only.
-test/results/*
-!test/results/.gitkeep
-test/release/
+# Local engine stack data and offline package build output
+deploy/local-stack/runtime/
+deploy/release/
 
 # Local Git metadata from imported upstream projects
 **/.git/

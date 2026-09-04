@@ -27,8 +27,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Get-RepoRoot
 $serverDirectory = Join-Path $projectRoot 'server'
 $adminDirectory = Join-Path $projectRoot 'server\ruoyi-admin'
-$socketDirectory = Join-Path $projectRoot 'test\runtime\jdk-sockets'
-$runtimeDirectory = Join-Path $projectRoot 'test\runtime\backend'
+$socketDirectory = Join-Path $projectRoot '.dev-runtime\jdk-sockets'
+$runtimeDirectory = Join-Path $projectRoot '.dev-runtime\backend'
 $port = 18081
 
 # Codex and long-lived terminals do not inherit user variables added after
