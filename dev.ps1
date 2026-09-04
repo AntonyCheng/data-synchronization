@@ -103,7 +103,11 @@ function Write-DevState {
 
 function Invoke-Compose {
     param([string]$Project, [string]$File, [string[]]$ComposeArgs)
-    & docker compose --project-name $Project --file $File @ComposeArgs | Out-Host
+    # No | Out-Host: docker compose writes its progress UI (e.g. "Container X Recreate")
+    # to stderr, and piping a native command's output under WinPS 5.1 turns those lines
+    # into terminating NativeCommandError records ($ErrorActionPreference = 'Stop').
+    # Nothing captures this function's return value, so plain passthrough is safe.
+    & docker compose --project-name $Project --file $File @ComposeArgs
     if ($LASTEXITCODE -ne 0) { throw "docker compose ($Project) failed with exit code $LASTEXITCODE" }
 }
 
@@ -128,7 +132,9 @@ function Invoke-MigrationsIfChanged {
         return
     }
     Write-Step "applying metadata migrations ($($files.Count) scripts)"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $MigrateScript | Out-Host
+    # No | Out-Host, same reason as Invoke-Compose: the migration script's own tool
+    # calls may write to stderr, and this function's return value isn't captured either.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $MigrateScript
     if ($LASTEXITCODE -ne 0) { throw "migration failed (see output above)" }
     New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
     Set-Content -Encoding UTF8 -Path $MigrateHashFile -Value $fingerprint
@@ -442,3 +448,9 @@ switch ($Command) {
     'logs' { Invoke-Logs }
     default { Show-Usage }
 }
+
+# Reached only when the command above didn't throw. Without this, the process exit
+# code falls back to whatever $LASTEXITCODE a native call (e.g. a transient
+# `docker inspect` during Wait-DockerHealthy) last left behind, which can be
+# nonzero even though everything above succeeded.
+exit 0

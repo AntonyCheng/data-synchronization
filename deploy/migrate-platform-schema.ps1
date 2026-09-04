@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0 -or ([int]($databaseExists | Select-Object -First 1)) -n
     throw "Metadata database '$MetadataDatabase' was not found in '$MetadataDbContainer'."
 }
 
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $migrationDirectory = Join-Path $projectRoot 'server\script\sql'
 $migrationFiles = @(Get-ChildItem (Join-Path $migrationDirectory 'ry_sync_migration_*.sql') | Sort-Object Name)
 if ($migrationFiles.Count -eq 0) {
