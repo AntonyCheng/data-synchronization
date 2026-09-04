@@ -1,0 +1,18 @@
+--- # 本地快速启动增量配置
+# profile: dev-fast，叠加在 dev 之上，由 `dev.ps1 up -Fast` 激活：
+#   --spring.profiles.active=dev,dev-fast
+# 目的：进一步压缩本地冷启动时间（约 -15s）。
+# 代价：本模式下工作流 / LiteFlow 相关页面不可用；不改动代码即可用普通
+#       `dev.ps1 up` 恢复完整功能。
+
+warm-flow:
+  # 关闭工作流模块。liteflow.enable 通过 ${warm-flow.enabled:true} 跟随此开关，
+  # 因此 LiteFlow 的任务办理链路也不再加载。
+  enabled: false
+
+--- # 延迟初始化
+spring:
+  main:
+    # bean 首次被使用时才创建，缩短启动。@Scheduled bean 由
+    # org.dromara.config.DevFastLazyInitConfig 强制保持 eager，避免定时任务丢失。
+    lazy-initialization: true

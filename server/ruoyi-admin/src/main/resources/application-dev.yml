@@ -63,7 +63,9 @@ snail-ai:
   # ==================== OpenAPI Client 配置 ====================
   open-api:
     # 启用 OpenAPI Client
-    enabled: true
+    # 本地开发默认关闭：连接未运行的 web-port(8900) 会在启动期消耗约 10s 连接超时。
+    # 需要在本地联调 AI 聊天面板时，改回 true 或用环境变量覆盖。
+    enabled: ${SNAIL_AI_OPENAPI_ENABLED:false}
     # Server HTTP 端口
     web-port: 8900
     # 是否使用 HTTPS
@@ -78,10 +80,20 @@ snail-ai:
 --- # MyBatis Plus 配置
 mybatis-plus:
   sql-log:
-    # 完整 SQL 输出开关
-    enabled: true
+    # 完整 SQL 输出开关（本地默认关闭，需要看 SQL 时用 MYBATIS_SQL_LOG=true 覆盖）
+    enabled: ${MYBATIS_SQL_LOG:false}
     # 输出方式，可选 console、log
     output: console
+
+sync:
+  engine:
+    # The Java backend reaches POC services through host ports; SeaTunnel runs
+    # in Docker and must use the compose-network endpoints instead.
+    connection-endpoint-overrides:
+      "[localhost:23306]": "ds-poc-mysql:3306"
+      "[localhost:23307]": "ds-poc-mysql-target:3306"
+      "[localhost:25432]": "ds-poc-postgres:5432"
+      "[localhost:29092]": "ds-poc-kafka:9092"
 
 --- # 数据源配置
 spring:

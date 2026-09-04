@@ -139,7 +139,15 @@ export function createUmiViteConfig() {
       extensions: ['.mjs', '.js', '.ts', '.jsx', '.tsx', '.json']
     },
     optimizeDeps: createViteOptimizeDepsConfig(),
-    build: createViteBuildConfig()
+    build: createViteBuildConfig(),
+    server: {
+      fs: {
+        // 关闭 Vite serving allow-list。pnpm 的 .pnpm 目录 + 非 ASCII 家目录
+        // 组合下，Umi 生成的入口会被误判为 "outside of Vite serving allow list"
+        // 而返回 404。开发服务器不对外，关掉即可。
+        strict: false
+      }
+    }
   };
 }
 
@@ -177,6 +185,14 @@ export function createViteConfig(mode: string): ViteConfig {
 export function createUmiAppConfig() {
   const env = getAppEnv();
   const vite = createViteConfig(process.env.UMI_ENV || process.env.NODE_ENV || 'development');
+
+  // Umi 的 dev server 端口只认 PORT 环境变量（不读 config.vite.server.port）。
+  // 这里把 .env 里的 VITE_APP_PORT 兜到 PORT 上，让它对 `pnpm dev` 真正生效。
+  const devServerPort = Number(env.VITE_APP_PORT || 8000);
+  if (!process.env.PORT) {
+    process.env.PORT = String(devServerPort);
+  }
+
   const baseApi = env.VITE_APP_BASE_API || '/dev-api';
   const apiTarget = env.VITE_APP_API_TARGET || 'http://localhost:8080';
   const proxyTarget = vite.server.proxy[baseApi];
@@ -208,9 +224,10 @@ export function createUmiAppConfig() {
   };
 
   return {
-    title: env.VITE_APP_TITLE || 'RuoYi-React-Plus后台管理系统',
+    title: env.VITE_APP_TITLE || '一站式实时计算平台',
     base: vite.base,
     publicPath: vite.base,
+    devServerPort,
     vite: createUmiViteConfig(),
     proxy: apiProxy
   };

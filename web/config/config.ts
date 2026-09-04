@@ -10,6 +10,10 @@ export default defineConfig({
   model: {},
   initialState: {},
   vite: appConfig.vite,
+  // 关闭 MFSU：使用 Vite 自带的 esbuild 依赖预构建即可。
+  // MFSU 的 eager worker 冷启动要 6~22s，且在非 ASCII 家目录下会触发
+  // "The request url \"C:/\" is outside of Vite serving allow list" 崩溃。
+  mfsu: false,
   npmClient: 'pnpm',
   hash: true,
   esbuildMinifyIIFE: true,
