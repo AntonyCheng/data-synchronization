@@ -22,7 +22,7 @@ Set-Location C:\projects\data-synchronization
 .\server\script\bin\start-backend-dev.ps1
 ```
 
-脚本会检查 Java 21、Maven、`dbs-mysql`、`dbs-redis` 与端口占用，自动创建 `test/runtime/jdk-sockets`。默认在前台启动；需要在后台运行并将日志写入 `test/runtime/backend` 时，使用：
+脚本会检查 Java 21、Maven、`dbs-mysql`、`dbs-redis` 与端口占用，自动创建 `.dev-runtime/jdk-sockets`。默认在前台启动；需要在后台运行并将日志写入 `.dev-runtime/backend` 时，使用：
 
 ```powershell
 .\server\script\bin\start-backend-dev.ps1 -Background

@@ -9,7 +9,7 @@
 确保 `dbs-mysql` 为 healthy 后，在仓库根目录执行：
 
 ```powershell
-.\test\scripts\migrate-platform-schema.ps1
+.\deploy\migrate-platform-schema.ps1
 ```
 
 如已通过环境变量设置元数据库密码，脚本会读取 `PLATFORM_MYSQL_ROOT_PASSWORD`；也可以显式传入 `-MetadataDbPassword`。脚本按 `ry_sync_migration_002.sql` 至最新编号顺序执行，SQL 本身按字段/表/菜单存在性设计为可重复执行。
@@ -26,4 +26,4 @@
 
 ## 回滚边界
 
-这些迁移只增加同步模块字段、表和菜单权限，不删除既有业务表或任务。若升级后需要回退，应停止后端并使用元数据库备份恢复，禁止直接手工删除新增列；目标端业务数据和 `test/` 下的 POC 数据不属于本迁移操作范围。
+这些迁移只增加同步模块字段、表和菜单权限，不删除既有业务表或任务。若升级后需要回退，应停止后端并使用元数据库备份恢复，禁止直接手工删除新增列；目标端业务数据和 `deploy/local-stack/` 下的本地引擎栈数据不属于本迁移操作范围。

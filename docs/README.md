@@ -1,34 +1,47 @@
-# 数据同步平台文档中心
+# 数据同步平台文档
 
-本目录是数据同步平台的唯一正式文档入口。产品需求、技术架构、POC 记录、详细设计和测试资料按阶段分类维护。
-
-## 目录
-
-| 目录 | 内容 | 状态 |
-|---|---|---|
-| `01-product/` | 产品需求与范围定义 | PRD v0.3 已完成 |
-| `02-architecture/` | 系统架构、组件边界与关键技术决策 | 初版 |
-| `03-poc/` | SeaTunnel 技术验证计划、结果与能力矩阵 | MySQL -> PostgreSQL MVP 完成；Oracle Phase 1.1 POC 资产已建立，等待运行依赖 |
-| `04-design/` | 领域模型、数据库、接口和任务状态机设计 | MVP 设计与联调完成 |
-| `05-testing/` | 测试策略、验收场景和测试数据说明 | 回归与发布验收清单已形成 |
-| `06-release/` | MVP 交付清单、离线包边界和启动顺序 | MVP 离线启动验证完成 |
+产品已按 PRD 完成 MVP（MySQL 源端；PostgreSQL / MySQL / Kafka 目标端）。本目录只保留架构和已发布特性的设计参考，过程性文档（PRD、POC 计划/报告、测试策略、发布清单）已从仓库移除。
 
 ## 当前基线
 
-- 源端：MySQL
-- MVP 目标端：PostgreSQL
-- 同步引擎评估基线：Apache SeaTunnel 2.3.13 / Zeta
+- 源端：MySQL（binlog CDC）
+- 目标端：PostgreSQL、MySQL、Kafka
+- 同步引擎：Apache SeaTunnel 2.3.13 / Zeta
 - 管理平台：RuoYi-Vue-Plus + plus-ui-react
-- 部署形态：单机起步，离线环境可安装
 
-## 阅读顺序
+## 架构与契约
 
-1. [产品需求](01-product/数据同步平台_PRD.md)
-2. [系统架构](02-architecture/system-architecture.md)
-3. [POC 计划](03-poc/poc-plan.md)
-4. [POC 报告](03-poc/poc-report.md)
-5. [测试策略](05-testing/test-strategy.md)
+| 文档 | 内容 |
+|---|---|
+| [architecture.md](architecture.md) | 系统架构、组件边界、核心数据对象、关键约束 |
+| [api-contract.md](api-contract.md) | 接口与请求/响应的权威参考 |
+| [engine-adapter-contract.md](engine-adapter-contract.md) | 平台与 SeaTunnel REST 的适配契约 |
+| [metadata-schema.md](metadata-schema.md) | 元数据库表结构 |
+| [task-state-machine.md](task-state-machine.md) | 任务状态机 |
 
-POC 的可执行资产位于仓库根目录的 `test/`，运行数据和测试结果也只写入该目录。
+## 设计文档
 
-平台开发阶段的 MySQL 元数据库和 Redis 位于 `platform/`，与 POC 环境隔离。
+| 文档 | 内容 |
+|---|---|
+| [multi-table.md](multi-table.md) | 多表 / 整库同步设计 |
+| [job-lifecycle.md](job-lifecycle.md) | SeaTunnel 作业生命周期 |
+| [scheduling-and-overwrite.md](scheduling-and-overwrite.md) | 调度与覆盖策略 |
+| [ddl-change-management.md](ddl-change-management.md) | 运行时表结构变更管理 |
+| [monitoring-and-consistency.md](monitoring-and-consistency.md) | 运行监控与数据核对 |
+| [credential-protection.md](credential-protection.md) | 凭证 AES 保护与迁移 |
+| [task-creation-wizard.md](task-creation-wizard.md) | 任务创建向导页面规则 |
+| [type-mapping-mysql-postgresql.md](type-mapping-mysql-postgresql.md) | MySQL -> PostgreSQL 类型映射 |
+
+## 运维
+
+| 文档 | 内容 |
+|---|---|
+| [runbook-restart.md](runbook-restart.md) | 平台重启手册 |
+| [runbook-metadata-migration.md](runbook-metadata-migration.md) | 元数据库迁移手册 |
+| [git-strategy.md](git-strategy.md) | Git 管理策略 |
+
+## 相关资源
+
+- 本地引擎栈（SeaTunnel 镜像构建、Compose）、离线交付模板：仓库根目录 `deploy/`。
+- 平台开发阶段的元数据库 MySQL 和 Redis：`platform/`。
+- 启动方式见仓库根 `CLAUDE.md`（`dev.ps1`）。

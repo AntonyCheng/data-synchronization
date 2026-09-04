@@ -6,7 +6,7 @@ MVP 状态集合：`DRAFT`（草稿）、`RUNNING`（运行中）、`PAUSING`（
 
 - 新建任务进入 `DRAFT`。
 - 只有 `DRAFT`、`STOPPED`、`REINITIALIZE_REQUIRED` 允许修改。
-- `DRAFT`、`STOPPED`、`FAILED`、`REINITIALIZE_REQUIRED` 允许删除；运行中和暂停中任务不允许删除。
+- `DRAFT`、`STOPPED`、`FAILED`、`FINISHED`、`REINITIALIZE_REQUIRED` 允许删除；运行中和暂停中任务不允许删除。删除仅清理任务配置和引擎恢复状态，不删除目标端已同步数据。
 - `validate` 只校验任务引用的源端和目标端 JDBC 连接，不改变状态，也不提交 SeaTunnel 作业。
 - `engine-config` 只生成脱敏配置预览，不改变状态，也不写入 `engine_job_id`。
 

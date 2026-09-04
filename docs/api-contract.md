@@ -21,7 +21,9 @@
 | PUT | `/task` | 修改草稿或已停止任务 |
 | DELETE | `/task/{id}` | 删除非运行中任务 |
 | POST | `/task/{id}/validate` | 校验源端和目标端连接 |
-| POST | `/task/{id}/target-compatibility` | 校验 PostgreSQL 目标表结构兼容性 |
+| POST | `/task/{id}/target-compatibility` | 校验 PostgreSQL/MySQL 目标表或 Kafka topic 兼容性；Kafka 检查 topic 可见性、分区和可靠分区键（topic 可在向导中先创建） |
+| GET | `/data-source/{sourceId}/kafka/topics` | 查询当前 Kafka 凭证可见的 topic 及分区/副本信息 |
+| POST | `/data-source/{sourceId}/kafka/topics` | 按名称、分区数和副本数主动创建 topic；已存在或无 Create 权限时明确失败，不覆盖已有 topic |
 | POST | `/task/{id}/engine-config` | 生成脱敏的 SeaTunnel HOCON 配置预览 |
 | POST | `/task/{id}/start` | 提交并启动新的 SeaTunnel 作业 |
 | POST | `/task/{id}/status` | 查询引擎状态并刷新任务状态、checkpoint 摘要和 SeaTunnel 运行指标投影 |
@@ -53,11 +55,11 @@
 | POST | `/group/{groupId}/resume` | 使用表项 savepoint 恢复作业 |
 | POST | `/group/{groupId}/stop` | 停止任务组全部表项作业 |
 
-多表首版限制：仅支持 MySQL -> PostgreSQL、`FULL_CDC`，每组最多 20 张表；当前每张表独立 SeaTunnel job，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式；任务组首版仍限定 `FULL_CDC`。
+多表首版限制：支持 MySQL -> PostgreSQL/MySQL/Kafka、`FULL_CDC`，每组最多 20 张表；当前每张表独立 SeaTunnel job，Kafka 表项另有 raw topic -> 标准事件桥接，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式；Kafka 单表的纯 `FULL` 有界快照适配器仍未开放。
 
 整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。
 
-MVP 请求约束：`sourceType=MYSQL` 只能作为源端，`sourceType=POSTGRESQL` 只能作为目标端；单表 `syncMode` 为 `FULL`、`INCREMENTAL` 或 `FULL_CDC`，任务组首版为 `FULL_CDC`；`ddlPolicy` 默认 `FAIL`。`INCREMENTAL` 从提交作业后的最新 binlog 位点开始，不补齐此前历史，目标端必须已有可信基线；`FULL` 不执行 CDC，完成后进入 `FINISHED`。任务表单使用数据源配置的默认数据库，数据库/表探查用于创建前确认和元数据提示；整库任务仍需后续表实例模型。连接测试返回 `success`、`message`、`latencyMs`，任务校验返回 `source`、`target`、`cdcPrecheck`、`targetCompatibility` 和综合 `valid`。
+MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POSTGRESQL`、`MYSQL`、`KAFKA`；单表 `syncMode` 为 `FULL`、`INCREMENTAL` 或 `FULL_CDC`，任务组首版为 `FULL_CDC`；`ddlPolicy` 默认 `FAIL`。`INCREMENTAL` 从提交作业后的最新 binlog 位点开始，不补齐此前历史，目标端必须已有可信基线；关系型 `FULL` 不执行 CDC，完成后进入 `FINISHED`；Kafka 纯 `FULL` 使用有界 JDBC 快照事件。Kafka topic 可在创建向导中选择已有 topic 或主动创建新 topic，平台创建默认 1 分区/1 副本且不覆盖已有 topic。任务表单使用数据源配置的默认数据库，数据库/表探查用于创建前确认和元数据提示；整库任务由表项模型承载。连接测试返回 `success`、`message`、`latencyMs`，任务校验返回 `source`、`target`、`cdcPrecheck`、`targetCompatibility` 和综合 `valid`。
 
 ## 字段映射与同步键
 
@@ -102,6 +104,6 @@ SeaTunnel 2.3.13 connector 已通过运行镜像内的字节码核实 `connectio
 
 状态刷新访问 SeaTunnel 失败或返回不存在的 `jobId` 时，任务会持久化为 `FAILED`，并在 `lastError` 与接口 `errorMessage` 中返回脱敏后的原因；不会把不可达状态误报为运行中。应用启动完成后会扫描数据库中 `RUNNING`/`PAUSING` 任务并执行一次状态刷新，无法联系引擎的任务同样会被标记为失败。
 
-数据核对接口只执行 `COUNT(*)`，不读取或返回业务行内容。表名必须是单段或两段字母、数字、`_`、`$` 标识符；连接失败时返回 `success=false` 和明确错误，行数一致时 `matched=true`。
+数据核对接口默认只执行 `COUNT(*)`，不读取或返回业务行内容；单列数值同步键可使用 `KEY_RANGE` 按块比较并返回块级统计。`blockSize` 必须为正数且受服务端上限约束；联合键、字符串键和无同步键明确拒绝分块模式并可回退 `COUNT`。表名必须是单段或两段字母、数字、`_`、`$` 标识符；连接失败时返回 `success=false` 和明确错误，行数一致时 `matched=true`。`FULL_CDC` 运行中严格水位核对会阻断，需暂停任务后再执行。
 
 `POST /group/{groupId}/check` 对任务组的每个表项独立执行同一检查。返回组级 `tableCount`、一致/不一致/失败数量、每个表项的行数和结论，并将最近一次结果写入 `ds_sync_task_group_item.last_check_*`。单个表连接或目标表失败不会中断其他表；组内任何失败或不一致都会使组级 `matched=false`。持续 CDC 运行时接口会返回“非同水位行数检查”说明，不能将结果作为严格同一时刻的一致性证明。

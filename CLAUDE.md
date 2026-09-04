@@ -20,8 +20,8 @@ scheduling, and the SeaTunnel REST adapter.
 | `server/` | RuoYi-Vue-Plus 6.0.0 backend (Spring Boot 4.1, Java 21, Maven multi-module). Upstream scaffold — **only `ruoyi-modules/ruoyi-sync` is this project's code.** |
 | `web/` | plus-ui-react 6.0.0 frontend (React 19, Umi Max, Ant Design 6 + ProComponents, pnpm). |
 | `platform/` | Docker Compose for dev-stage metadata MySQL (`dbs-mysql`, host `13306`, db `ry-vue`) and Redis (`dbs-redis`, host `16379`). |
-| `test/` | Fully isolated SeaTunnel POC environment (Compose project `data-sync-poc`, `ds-poc-*` containers) plus PowerShell POC/acceptance scripts. Never touches `platform/`. |
-| `docs/` | The canonical documentation tree, staged `01-product` … `06-release`. Start at `docs/README.md`. |
+| `deploy/` | Local engine stack (Compose project `data-sync-poc`, `ds-poc-*` containers: source MySQL, PostgreSQL/MySQL/Kafka targets, SeaTunnel) under `local-stack/`, the metadata migration script, and the offline delivery template/packaging scripts. Never touches `platform/`. |
+| `docs/` | Flat architecture + design reference. Start at `docs/README.md`. |
 
 All product API routes live under `/sync`; backend package is `org.dromara.sync`.
 
@@ -35,7 +35,7 @@ Windows PowerShell 5.1 compatible (there is no `pwsh` on the dev machine).
 ```powershell
 .\dev.ps1 up                 # containers(health-gated) -> migrations(idempotent) -> backend ∥ frontend -> prints URLs
 .\dev.ps1 up -Fast           # + dev-fast profile: disables workflow/LiteFlow + lazy-init, ~15s faster boot
-.\dev.ps1 up -Poc            # + start the SeaTunnel POC stack (ds-poc-*)
+.\dev.ps1 up -Poc            # + start the local engine stack (ds-poc-*; needed to actually run sync jobs)
 .\dev.ps1 up -NoBuild        # skip the reactor build, go straight to spring-boot:run (when nothing changed)
 .\dev.ps1 down [-All]        # stop backend+frontend; -All also `docker compose stop`
 .\dev.ps1 status             # containers / ports / PIDs
@@ -99,22 +99,24 @@ first; run it manually before a bare `pnpm exec tsc --noEmit`. Do **not** delete
 ```powershell
 docker compose --project-name data-sync-platform --file platform/docker-compose.yml up -d   # dbs-mysql :13306 / dbs-redis :16379
 # ry_sync.sql is the first-init seed; ry_sync_migration_*.sql apply in filename order, idempotent:
-test\scripts\migrate-platform-schema.ps1
+deploy\migrate-platform-schema.ps1
 ```
 
-### SeaTunnel POC (isolated, from repo root)
+### Local engine stack (isolated, from repo root)
+
+`deploy\local-stack\compose.yml` (Compose project `data-sync-poc`) is source MySQL +
+PostgreSQL/MySQL/Kafka targets + SeaTunnel + kafka-ui — the environment a sync task
+actually runs against. `dev.ps1 up -Poc` brings it up (health-gated); manually:
 
 ```powershell
-test\scripts\up.ps1              # build images + start ds-poc-* containers
-test\scripts\run-poc.ps1         # baseline MySQL -> PostgreSQL full + CDC correctness
-test\scripts\down.ps1            # stop, keep all data
-test\scripts\reset-poc.ps1 -Force  # wipe test/runtime/ (keeps test/results/)
+docker compose --project-name data-sync-poc --file deploy\local-stack\compose.yml up --detach
+docker compose --project-name data-sync-poc --file deploy\local-stack\compose.yml stop   # stop, keep all data
 ```
 
-Many scenario scripts exist (`run-mysql-target-*.ps1`, `run-mysql-kafka-*.ps1`,
-`recovery-drill.ps1`, `phase4/5/6-acceptance.ps1`, …); see `test/README.md`. Run
-evidence goes to `test/results/<timestamp>/`; conclusions are written back into
-`docs/03-poc/`.
+Container/project names (`ds-poc-*`, `data-sync-poc`) are unchanged from the original
+POC harness so `sync.engine.connection-endpoint-overrides` in `application-dev.yml`
+keeps working unmodified. Data, checkpoints and logs live under the gitignored
+`deploy\local-stack\runtime\`.
 
 ## Architecture of the sync module (`server/ruoyi-modules/ruoyi-sync`)
 
@@ -136,7 +138,7 @@ Table/column metadata is read on demand from source JDBC and **not persisted**.
 - `SyncTaskScheduler` — `ONCE` / `CRON` (Spring 6-field) triggering; shares the start service and the per-task Redis lock with manual start.
 - `KafkaTaskBridgeService` + `KafkaEventNormalizer` + `KafkaEventProducer` — for Kafka targets: SeaTunnel writes a versioned raw Debezium topic, the bridge normalizes it into the PRD standard event envelope on a stable partition key (`acks=all`, idempotent).
 
-### Invariants (see `docs/02-architecture/system-architecture.md`, `docs/04-design/task-state-machine.md`)
+### Invariants (see `docs/architecture.md`, `docs/task-state-machine.md`)
 
 - Platform state must be reconciled against engine state — on `ApplicationReadyEvent` the module scans `RUNNING`/`PAUSING` tasks and refreshes status; unreachable jobs become `FAILED` (never silently "running").
 - No concurrent runs of one logical task — Redis lock `sync:task:start:<id>` (Redisson).
@@ -145,7 +147,7 @@ Table/column metadata is read on demand from source JDBC and **not persisted**.
 - State set: `DRAFT`, `RUNNING`, `PAUSING`, `PAUSED`, `STOPPED`, `FAILED`, `REINITIALIZE_REQUIRED`, `FINISHED`. Only `DRAFT`/`STOPPED`/`REINITIALIZE_REQUIRED` are editable and startable from config.
 - `sync.engine.connection-endpoint-overrides` (in `application-dev.yml`) rewrites host ports (e.g. `localhost:23306`) to compose-network endpoints (`ds-poc-mysql:3306`) because SeaTunnel runs inside Docker while the backend runs on the host.
 
-`docs/04-design/api-contract.md` is the authoritative endpoint + request/response reference.
+`docs/api-contract.md` is the authoritative endpoint + request/response reference.
 
 ## Coding conventions
 
@@ -182,15 +184,16 @@ Spring/MyBatis-Plus or React/Antd habits.
 - Credential encryption is gated by env vars, decrypted only in the service layer:
   `SYNC_CREDENTIAL_ENCRYPTION_ENABLED=true` + `SYNC_CREDENTIAL_ENCRYPTION_PASSWORD=<16|24|32 chars>`
   (`mybatis-encryptor` in yaml). Plaintext POC rows stay readable; a save (blank password
-  field keeps the current value) migrates a row to ciphertext. See `docs/04-design/credential-protection.md`.
+  field keeps the current value) migrates a row to ciphertext. See `docs/credential-protection.md`.
 - The backend start scripts set `-Djdk.net.unixdomain.tmpdir` to an ASCII path under
-  `test/runtime/jdk-sockets` — a JDK 21 / Redisson issue when the Windows user profile
+  `.dev-runtime/jdk-sockets` — a JDK 21 / Redisson issue when the Windows user profile
   path contains non-ASCII characters. Keep that workaround if you touch startup.
   Shared PowerShell helpers live in `server/script/bin/common.ps1` (dot-sourced by
   `dev.ps1`, `run-backend-dev.ps1`, `start-backend-dev.ps1`).
 - Never commit `.env` files, RSA keys, `server/logs/`, `**/target/`, `node_modules/`,
-  Docker volumes (`platform/runtime/`, `test/runtime/`), or `test/results/` contents.
-  Commit only `.env.example` templates. See `docs/06-development/git-strategy.md`.
+  Docker volumes (`platform/runtime/`, `deploy/local-stack/runtime/`), the repo-root
+  `.dev-runtime/`, or `deploy/release/` (offline package build output).
+  Commit only `.env.example` templates. See `docs/git-strategy.md`.
 - Commit message style in history is Conventional-Commits-ish with a scope for repo-wide
   changes: `poc:`, `release:`, `docs(repo):`, `chore(repo):`.
 
