@@ -22,6 +22,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
@@ -33,6 +34,13 @@ import java.util.regex.Pattern;
 public class DataConsistencyServiceImpl implements IDataConsistencyService {
 
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9_$]+(\\.[A-Za-z0-9_$]+)?");
+    /**
+     * Each block costs two sequential blocking JDBC round-trips (source + target) in the
+     * request thread. At this cap a worst case (~100ms/block on a slow link) stays under
+     * two minutes; callers needing to cover a wider key range should raise blockSize
+     * instead of the platform silently running an effectively unbounded check.
+     */
+    static final int MAX_KEY_RANGE_BLOCKS = 1000;
     private final SyncTaskMapper syncTaskMapper;
     private final DataSourceMapper dataSourceMapper;
     private final IDataSourceMetadataService metadataService;
@@ -153,6 +161,20 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
         }
         BigDecimal step = BigDecimal.valueOf(blockSize);
         BigDecimal lower = range.min();
+        // The block SIZE is bounded above (see the blockSize check earlier in this
+        // method), but the block COUNT (span / step) was not - a small blockSize on a
+        // wide-ranging key made this "bounded, read-only" check run an effectively
+        // unbounded number of sequential blocking round-trips in the request thread.
+        BigDecimal span = range.max().subtract(range.min());
+        BigDecimal estimatedBlocks = estimateBlockCount(range.min(), range.max(), step);
+        if (estimatedBlocks.compareTo(BigDecimal.valueOf(MAX_KEY_RANGE_BLOCKS)) > 0) {
+            BigDecimal suggestedBlockSize = span.divide(BigDecimal.valueOf(MAX_KEY_RANGE_BLOCKS), 0, RoundingMode.CEILING);
+            result.setSuccess(false);
+            result.setMatched(false);
+            result.setMessage("同步键范围过大，预计分 " + estimatedBlocks.toPlainString() + " 块，超过单次核对上限 "
+                + MAX_KEY_RANGE_BLOCKS + " 块；请将核对步长调整到 " + suggestedBlockSize.toPlainString() + " 或以上后重试");
+            return result;
+        }
         int index = 1;
         int matched = 0;
         int mismatched = 0;
@@ -209,6 +231,15 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
                 return resultSet.getLong(1);
             }
         }
+    }
+
+    /**
+     * A conservative (never-under) estimate of how many blocks the loop below will run -
+     * it may overshoot the real count by one, which only makes the cap check stricter,
+     * never looser. Package-private for direct unit testing without a live JDBC connection.
+     */
+    static BigDecimal estimateBlockCount(BigDecimal min, BigDecimal max, BigDecimal step) {
+        return max.subtract(min).divide(step, 0, RoundingMode.CEILING).add(BigDecimal.ONE);
     }
 
     private static String normalizeMode(String mode) {
