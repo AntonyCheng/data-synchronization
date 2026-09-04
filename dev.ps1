@@ -382,7 +382,11 @@ function Invoke-RestartBackend {
     Write-Step "reinstalling ruoyi-sync + ruoyi-admin (no fat jar)"
     Push-Location $ServerDir
     try {
-        & mvn -pl ruoyi-modules/ruoyi-sync,ruoyi-admin -DskipTests -Dspring-boot.repackage.skip=true install | Out-Host
+        # Every arg must be quoted: PowerShell mangles an unquoted "-Dspring-boot.repackage.skip=true"
+        # when calling mvn.cmd (a batch file) bare - it gets split into "-Dspring-boot" and
+        # ".repackage.skip=true" as separate argv entries, and Maven then reads the latter as a
+        # lifecycle phase. Quoting each token keeps it as one argv entry, as done in Start-Backend.
+        & mvn '-pl' 'ruoyi-modules/ruoyi-sync,ruoyi-admin' '-DskipTests' '-Dspring-boot.repackage.skip=true' 'install' | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "incremental install failed" }
     }
     finally {
