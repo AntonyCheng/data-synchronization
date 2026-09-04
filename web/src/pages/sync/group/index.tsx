@@ -142,7 +142,12 @@ export default function SyncTaskGroupPage() {
     return true;
   };
   const remove = async (row: SyncTaskGroupVO) => { await deleteSyncTaskGroup(row.groupId); message.success('删除成功'); setDetailOpen(false); actionRef.current?.reloadAndRest?.(); };
-  const validate = async (row: SyncTaskGroupVO) => { const result = await validateSyncTaskGroup(row.groupId); setValidationResult(result.data); setDetail(current => current ? { ...current, status: result.data.valid ? 'VALID' : 'INVALID' } : current); };
+  // Validation is a read-only check and never changes the group's actual lifecycle
+  // status - overwriting detail.status with a synthetic 'VALID'/'INVALID' here (as this
+  // used to) desynced the displayed status and run-control buttons from backend truth
+  // (e.g. a RUNNING group would appear stopped, enabling 启动 and blocking 中止/删除
+  // for the wrong reason). Keep the validation outcome only in validationResult.
+  const validate = async (row: SyncTaskGroupVO) => { const result = await validateSyncTaskGroup(row.groupId); setValidationResult(result.data); };
   const preview = async (row: SyncTaskGroupVO) => { const result = await previewSyncTaskGroupConfig(row.groupId); setConfigPreview(result.data); };
   const operate = async (row: SyncTaskGroupVO, action: 'start' | 'status' | 'pause' | 'resume' | 'stop') => {
     const request = { start: startSyncTaskGroup, status: refreshSyncTaskGroupStatus, pause: pauseSyncTaskGroup, resume: resumeSyncTaskGroup, stop: stopSyncTaskGroup }[action];
