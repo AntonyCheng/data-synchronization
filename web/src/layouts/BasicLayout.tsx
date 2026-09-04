@@ -13,9 +13,7 @@ import { logout } from '@/api/login';
 import { isHandledRequestError } from '@/api/request';
 import defaultAvatar from '@/assets/images/profile.jpg';
 import appLogo from '@/assets/logo/logo.png';
-import ExternalLinkButton from '@/components/layout/ExternalLinkButton';
 import LayoutSettings from '@/components/layout/LayoutSettings';
-import LocaleSelect from '@/components/layout/LocaleSelect';
 import MenuSearch from '@/components/layout/MenuSearch';
 import MessageBox from '@/components/layout/MessageBox';
 import Screenfull from '@/components/layout/Screenfull';
@@ -465,10 +463,7 @@ export default function BasicLayout() {
         actionsRender={() => [
           <MenuSearch key="search" />,
           <MessageBox key="message" userId={userInfo?.user.userId} />,
-          <ExternalLinkButton key="git" type="git" />,
-          <ExternalLinkButton key="doc" type="doc" />,
           <Screenfull key="screenfull" />,
-          <LocaleSelect key="locale" value={appLocale} onChange={setAppLocale} />,
           <SizeSelect key="size" value={componentSize} onChange={setComponentSize} />,
           <Tooltip key="setting" title="布局设置">
             <Button

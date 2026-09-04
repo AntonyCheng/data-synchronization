@@ -3,7 +3,7 @@ import type { PageQuery } from '@/api/types';
 export interface DataSourceForm {
   sourceId?: string | number;
   sourceName?: string;
-  sourceType?: 'MYSQL' | 'POSTGRESQL';
+  sourceType?: 'MYSQL' | 'POSTGRESQL' | 'KAFKA';
   host?: string;
   port?: number;
   databaseName?: string;
@@ -88,4 +88,10 @@ export interface DataSourceCredentialMigrationResult {
   total: number;
   migrated: number;
   message: string;
+}
+
+export interface KafkaTopicVO {
+  topic: string;
+  partitions: number;
+  replicationFactor: number;
 }

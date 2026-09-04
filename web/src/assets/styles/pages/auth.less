@@ -121,6 +121,36 @@
   min-width: 0;
 }
 
+.captcha-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 116px;
+  gap: 8px;
+  align-items: start;
+}
+
+.captcha-row .ant-form-item {
+  min-width: 0;
+  margin-bottom: 24px;
+}
+
+.captcha-button {
+  width: 116px;
+  height: 40px;
+  padding: 0;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.captcha-image {
+  display: block;
+  width: 100%;
+  height: 40px;
+  object-fit: cover;
+}
+
 .login-panel .ant-pro-form-login-container,
 .register-panel .ant-pro-form-login-container {
   width: 100%;

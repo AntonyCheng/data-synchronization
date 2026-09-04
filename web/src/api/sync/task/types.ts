@@ -41,6 +41,12 @@ export interface SyncTaskVO extends SyncTaskForm {
   lastCheckpointId?: string;
   lastCheckpointTime?: string;
   lastCheckpointStatus?: string;
+  kafkaPublishedCount?: number;
+  kafkaLastPartition?: number;
+  kafkaLastOffset?: number;
+  kafkaLastSourceEventTime?: string;
+  kafkaLastBrokerAckTime?: string;
+  kafkaLagSeconds?: number;
   lastCheckSourceRows?: number;
   lastCheckTargetRows?: number;
   lastCheckDifference?: number;

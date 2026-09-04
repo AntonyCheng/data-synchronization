@@ -23,13 +23,15 @@ import {
   type ProColumns
 } from '@ant-design/pro-components';
 import { useBoolean } from 'ahooks';
-import { Alert, AutoComplete, Button, Checkbox, Descriptions, Divider, Form, InputNumber, message, Modal, Select, Space, Steps, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, AutoComplete, Button, Checkbox, Descriptions, Divider, Form, InputNumber, message, Modal, Radio, Select, Space, Steps, Table, Tag, Tooltip, Typography } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import {
   checkDataSourceCdc,
   getDataSourceMetadata,
   listDataSourceDatabases,
   listDataSourceTables,
+  listKafkaTopics,
+  createKafkaTopic,
   listDataSources,
   testDataSource
 } from '@/api/sync/data-source';
@@ -85,6 +87,10 @@ function reliableKeyOptions(metadata?: DataSourceMetadataVO) {
   return options;
 }
 
+function defaultKafkaTopic(database: string, table: string) {
+  return `${database || 'source'}_${table}`.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 249);
+}
+
 function mappingRisks(metadata?: DataSourceMetadataVO) {
   if (!metadata) return [];
   const risks: string[] = [];
@@ -111,6 +117,8 @@ export default function SyncTaskPage() {
   const [sourceDatabase, setSourceDatabase] = useState('');
   const [targetTables, setTargetTables] = useState<string[]>([]);
   const [targetTablesLoading, setTargetTablesLoading] = useState(false);
+  const [topicMode, setTopicMode] = useState<'EXISTING' | 'CREATE'>('EXISTING');
+  const [topicCreateLoading, setTopicCreateLoading] = useState(false);
   const [sourceMetadata, setSourceMetadata] = useState<DataSourceMetadataVO>();
   const [cdcPrecheck, setCdcPrecheck] = useState<DataSourceCdcPrecheckVO | TaskValidationResult['cdcPrecheck']>();
   const [sourceConnectionTest, setSourceConnectionTest] = useState<ConnectionTestResult>();
@@ -169,6 +177,7 @@ export default function SyncTaskPage() {
   const resetTargetTables = () => {
     setTargetTables([]);
     setTargetTablesLoading(false);
+    setTopicMode('EXISTING');
   };
 
   const loadTargetTables = async (targetId?: string | number) => {
@@ -178,10 +187,34 @@ export default function SyncTaskPage() {
     if (!target) return;
     setTargetTablesLoading(true);
     try {
-      const result = await listDataSourceTables(targetId, target.databaseName);
-      setTargetTables(result.data || []);
+      if (target.sourceType === 'KAFKA') {
+        const result = await listKafkaTopics(targetId);
+        setTargetTables((result.data || []).map(item => item.topic));
+      } else {
+        const result = await listDataSourceTables(targetId, target.databaseName);
+        setTargetTables(result.data || []);
+      }
     } finally {
       setTargetTablesLoading(false);
+    }
+  };
+
+  const createTopic = async () => {
+    const targetId = form.getFieldValue('targetId');
+    const topic = form.getFieldValue('targetTable');
+    if (!targetId || !topic) {
+      message.error('请先填写 topic 名称');
+      return;
+    }
+    setTopicCreateLoading(true);
+    try {
+      const result = await createKafkaTopic(targetId, { topic, partitions: 1, replicationFactor: 1 });
+      form.setFieldValue('targetTable', result.data.topic);
+      setTopicMode('EXISTING');
+      await loadTargetTables(targetId);
+      message.success(`topic ${result.data.topic} 创建成功`);
+    } finally {
+      setTopicCreateLoading(false);
     }
   };
 
@@ -232,6 +265,11 @@ export default function SyncTaskPage() {
       setSourceMetadata(result.data);
       form.setFieldValue('selectedColumns', result.data.columns.map(column => column.name));
       form.setFieldValue('syncKeyColumns', reliableKeyOptions(result.data)[0]?.value);
+      const targetId = form.getFieldValue('targetId');
+      const target = dataSources.find(item => String(item.sourceId) === String(targetId));
+      if (target?.sourceType === 'KAFKA' && !form.getFieldValue('targetTable')) {
+        form.setFieldValue('targetTable', defaultKafkaTopic(sourceDatabase, tableName));
+      }
     } finally {
       setMetadataLoading(false);
     }
@@ -260,16 +298,26 @@ export default function SyncTaskPage() {
   };
 
   const submitForm = async (values: SyncTaskForm) => {
-    if (values.syncMode === 'INCREMENTAL' && !cdcPrecheck?.passed) {
+    // Step panels unmount their controls; use the full form store so preserved
+    // values from earlier steps are included in the final payload.
+    const allValues = { ...form.getFieldsValue(true), ...values } as SyncTaskForm;
+    const selectedColumns = Array.isArray(allValues.selectedColumns)
+      ? allValues.selectedColumns
+      : String(allValues.selectedColumns || '').split(',').filter(Boolean);
+    if (!allValues.sourceId || !allValues.targetId || !allValues.sourceTable || !allValues.targetTable || selectedColumns.length === 0 || !allValues.syncKeyColumns) {
+      message.error('请返回前面步骤，补全源数据源、源表、目标表、字段和同步键');
+      return false;
+    }
+    if (allValues.syncMode === 'INCREMENTAL' && !cdcPrecheck?.passed) {
       message.error('纯增量任务必须先通过 CDC 前置检查，请返回第一步重新选择并检查源数据源');
       return false;
     }
-    const payload = { ...values, selectedColumns: Array.isArray(values.selectedColumns) ? values.selectedColumns.join(',') : values.selectedColumns };
+    const payload = { ...allValues, selectedColumns: selectedColumns.join(',') };
     setSubmitLoading(true);
     try {
-      if (values.taskId) await updateSyncTask(payload);
+      if (allValues.taskId) await updateSyncTask(payload);
       else await addSyncTask(payload);
-      message.success(values.taskId ? '任务保存成功' : '任务创建成功');
+      message.success(allValues.taskId ? '任务保存成功' : '任务创建成功');
       closeModal();
       actionRef.current?.reload();
       return true;
@@ -489,7 +537,9 @@ export default function SyncTaskPage() {
   };
 
   const sourceOptions = dataSources.filter(item => item.sourceType === 'MYSQL').map(item => ({ label: sourceLabel(item), value: item.sourceId }));
-  const targetOptions = dataSources.filter(item => item.sourceType === 'POSTGRESQL').map(item => ({ label: sourceLabel(item), value: item.sourceId }));
+  const targetOptions = dataSources
+    .filter(item => item.sourceType === 'POSTGRESQL' || item.sourceType === 'MYSQL' || item.sourceType === 'KAFKA')
+    .map(item => ({ label: sourceLabel(item), value: item.sourceId }));
   const taskStatus = selectedTask?.status || '';
   const actionDisabled = Boolean(busyAction);
   const configLocked = ['RUNNING', 'PAUSING'].includes(taskStatus);
@@ -549,6 +599,11 @@ export default function SyncTaskPage() {
               <Descriptions.Item label="目标表">{`${selectedTask.targetSchema || 'public'}.${selectedTask.targetTable || '-'}`}</Descriptions.Item>
               <Descriptions.Item label="最近检查点">{selectedTask.lastCheckpointTime || '-'}</Descriptions.Item>
               <Descriptions.Item label="最近核对">{selectedTask.lastCheckTime ? `${selectedTask.lastCheckTime} / ${selectedTask.lastCheckMatched === '1' ? '一致' : '不一致'}` : '未核对'}</Descriptions.Item>
+              <Descriptions.Item label="Kafka 已发布事件">{selectedTask.kafkaPublishedCount ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="Kafka 最近分区/offset">{selectedTask.kafkaLastPartition == null ? '-' : `${selectedTask.kafkaLastPartition} / ${selectedTask.kafkaLastOffset ?? '-'}`}</Descriptions.Item>
+              <Descriptions.Item label="Kafka 最近源事件时间">{selectedTask.kafkaLastSourceEventTime || '-'}</Descriptions.Item>
+              <Descriptions.Item label="Kafka 最近 broker 确认">{selectedTask.kafkaLastBrokerAckTime || '-'}</Descriptions.Item>
+              <Descriptions.Item label="Kafka 发布延迟">{selectedTask.kafkaLagSeconds == null ? '-' : `${selectedTask.kafkaLagSeconds} 秒`}</Descriptions.Item>
               <Descriptions.Item label="最大行数/秒">{selectedTask.readLimitRowsPerSecond ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="最大字节/秒">{selectedTask.readLimitBytesPerSecond ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="快照并行度">{selectedTask.snapshotParallelism ?? '-'}</Descriptions.Item>
@@ -661,14 +716,14 @@ export default function SyncTaskPage() {
         )}
         {detailLoading && <Typography.Text type="secondary">正在加载最新任务信息...</Typography.Text>}
       </Modal>
-      <ModalForm<SyncTaskForm> title={modalTitle} open={modalOpen} form={form} layout="vertical" width={760} modalProps={{ destroyOnHidden: true, onCancel: () => { resetMetadataState(); resetTargetTables(); closeModal(); } }} onOpenChange={open => { if (!open) { resetMetadataState(); resetTargetTables(); closeModal(); } }} onFinish={submitForm} onFinishFailed={() => message.error('请先完善当前步骤的必填项')} submitter={{ render: () => <Space><Button onClick={() => { resetMetadataState(); resetTargetTables(); closeModal(); }}>取消</Button>{wizardStep > 0 && <Button onClick={() => setWizardStep(current => current - 1)}>上一步</Button>}{wizardStep < 4 ? <Button type="primary" onClick={() => void nextWizardStep()}>下一步</Button> : <Button type="primary" loading={submitLoading} onClick={() => form.submit()}>{form.getFieldValue('taskId') ? '确认保存' : '确认创建'}</Button>}</Space> }}>
+      <ModalForm<SyncTaskForm> title={modalTitle} open={modalOpen} form={form} preserve layout="vertical" width={760} modalProps={{ destroyOnHidden: true, onCancel: () => { resetMetadataState(); resetTargetTables(); closeModal(); } }} onOpenChange={open => { if (!open) { resetMetadataState(); resetTargetTables(); closeModal(); } }} onFinish={submitForm} onFinishFailed={() => message.error('请先完善当前步骤的必填项')} submitter={{ render: () => <Space><Button onClick={() => { resetMetadataState(); resetTargetTables(); closeModal(); }}>取消</Button>{wizardStep > 0 && <Button onClick={() => setWizardStep(current => current - 1)}>上一步</Button>}{wizardStep < 4 ? <Button type="primary" onClick={() => void nextWizardStep()}>下一步</Button> : <Button type="primary" loading={submitLoading} onClick={() => form.submit()}>{form.getFieldValue('taskId') ? '确认保存' : '确认创建'}</Button>}</Space> }}>
         <ProFormText name="taskId" hidden />
         <Steps current={wizardStep} size="small" style={{ marginBottom: 24 }} items={[{ title: '数据源' }, { title: '同步粒度' }, { title: '目标端' }, { title: '字段映射' }, { title: '同步方式' }]} />
-        {wizardStep === 0 && <><Alert type="info" showIcon message="选择数据源后会重新连接并探查元数据，不直接信任历史连接状态。" style={{ marginBottom: 16 }} /><ProFormSelect name="sourceId" label="源数据源（MySQL）" options={sourceOptions} rules={[{ required: true, message: '请选择源数据源' }]} fieldProps={{ loading: dataSources.length === 0, onChange: value => void loadSourceMetadata(value as string | number) }} />{sourceConnectionTest && <Alert type={sourceConnectionTest.success ? 'success' : 'error'} showIcon message={sourceConnectionTest.success ? `源端连接可用（${sourceConnectionTest.latencyMs} ms）` : '源端连接失败'} description={sourceConnectionTest.message} style={{ marginBottom: 12 }} />}{cdcPrecheck && <Alert type={cdcPrecheck.passed ? 'success' : 'warning'} showIcon message={cdcPrecheck.passed ? 'CDC 前置检查通过' : 'CDC 前置检查未通过'} description={cdcPrecheck.message} style={{ marginBottom: 12 }} />}<Form.Item label="源数据库"><Typography.Text>{sourceDatabase || '选择源数据源后自动读取'}</Typography.Text>{sourceDatabases.length > 1 && <Typography.Text type="secondary"> 已探查 {sourceDatabases.length} 个数据库，当前单表任务使用数据源配置的默认数据库。</Typography.Text>}</Form.Item><ProFormSelect name="targetId" label="目标数据源（PostgreSQL）" options={targetOptions} rules={[{ required: true, message: '请选择目标数据源' }]} fieldProps={{ onChange: value => { form.setFieldValue('targetTable', undefined); void loadTargetTables(value as string | number); } }} /></>}
+        {wizardStep === 0 && <><Alert type="info" showIcon message="选择数据源后会重新连接并探查元数据，不直接信任历史连接状态。" style={{ marginBottom: 16 }} /><ProFormSelect name="sourceId" label="源数据源（MySQL）" options={sourceOptions} rules={[{ required: true, message: '请选择源数据源' }]} fieldProps={{ loading: dataSources.length === 0, onChange: value => void loadSourceMetadata(value as string | number) }} />{sourceConnectionTest && <Alert type={sourceConnectionTest.success ? 'success' : 'error'} showIcon message={sourceConnectionTest.success ? `源端连接可用（${sourceConnectionTest.latencyMs} ms）` : '源端连接失败'} description={sourceConnectionTest.message} style={{ marginBottom: 12 }} />}{cdcPrecheck && <Alert type={cdcPrecheck.passed ? 'success' : 'warning'} showIcon message={cdcPrecheck.passed ? 'CDC 前置检查通过' : 'CDC 前置检查未通过'} description={cdcPrecheck.message} style={{ marginBottom: 12 }} />}<Form.Item label="源数据库"><Typography.Text>{sourceDatabase || '选择源数据源后自动读取'}</Typography.Text>{sourceDatabases.length > 1 && <Typography.Text type="secondary"> 已探查 {sourceDatabases.length} 个数据库，当前单表任务使用数据源配置的默认数据库。</Typography.Text>}</Form.Item><ProFormSelect name="targetId" label="目标数据源（MySQL / PostgreSQL / Kafka）" options={targetOptions} rules={[{ required: true, message: '请选择目标数据源' }]} fieldProps={{ onChange: value => { form.setFieldValue('targetTable', undefined); void loadTargetTables(value as string | number); } }} /></>}
         {wizardStep === 1 && <><Alert type="info" showIcon message="当前入口创建单表任务；多表和整库同步请在“同步任务组”页面创建。" style={{ marginBottom: 16 }} /><ProFormSelect name="sourceTable" label="源表名" options={sourceTables.map(table => ({ label: table, value: table }))} showSearch rules={[{ required: true, message: '请选择源表' }]} fieldProps={{ loading: metadataLoading && sourceTables.length === 0, onChange: value => void loadTableMetadata(value as string) }} />{sourceMetadata && <Alert type={sourceMetadata.primaryKeys.length > 0 || sourceMetadata.uniqueKeys.some(item => item.allNotNull) ? 'success' : 'warning'} showIcon message={`已读取 ${sourceMetadata.tableName} 元数据`} description={<Descriptions size="small" column={{ xs: 1, sm: 2 }}><Descriptions.Item label="字段数">{sourceMetadata.columns.length}</Descriptions.Item><Descriptions.Item label="字符集">{sourceMetadata.charset || '-'}</Descriptions.Item><Descriptions.Item label="主键">{sourceMetadata.primaryKeys.join(', ') || '无'}</Descriptions.Item><Descriptions.Item label="可靠唯一键">{sourceMetadata.uniqueKeys.filter(item => item.allNotNull).map(item => `${item.name} (${item.columns.join(', ')})`).join('; ') || '无'}</Descriptions.Item></Descriptions>} />}</>}
-        {wizardStep === 2 && <><ProFormText name="targetSchema" label="目标 Schema" placeholder="默认 public" /><Form.Item name="targetTable" preserve label="目标表名" rules={[{ required: true, message: '请选择已有表或输入新表名' }]} extra="可选择目标端已有表；如果列表中没有，可直接输入新表名，保存后平台会按源表结构自动建表。"><AutoComplete options={targetTables.map(table => ({ label: table, value: table }))} allowClear placeholder={targetTablesLoading ? '正在读取目标端表列表，可直接输入新表名' : '选择已有表或输入新表名'} /></Form.Item><Alert type="info" showIcon message="目标表可以是已有表，也可以是新表。已有表将在保存后执行兼容性检查；新表会在任务启动时自动创建。" /></>}
+        {wizardStep === 2 && <><Form.Item noStyle shouldUpdate={(prev, current) => prev.targetId !== current.targetId}>{({ getFieldValue }) => getFieldValue('targetId') && dataSources.find(item => String(item.sourceId) === String(getFieldValue('targetId')))?.sourceType === 'KAFKA' ? <><Form.Item label="Kafka topic 来源"><Radio.Group value={topicMode} onChange={event => setTopicMode(event.target.value)} options={[{ label: '选择已有 topic', value: 'EXISTING' }, { label: '创建新 topic', value: 'CREATE' }]} /></Form.Item><Form.Item name="targetTable" preserve label="目标 topic" rules={[{ required: true, message: '请选择或填写目标 topic' }]} extra={topicMode === 'CREATE' ? '平台将使用 1 个分区、1 个副本创建 topic，不会覆盖已存在的 topic。' : '仅展示当前账号可见的 topic。'}><AutoComplete options={targetTables.map(table => ({ label: table, value: table }))} allowClear placeholder={topicMode === 'CREATE' ? '输入新 topic 名称' : (targetTablesLoading ? '正在读取 topic 列表' : '选择已有 topic')} /></Form.Item>{topicMode === 'CREATE' && <Button type="primary" loading={topicCreateLoading} onClick={() => void createTopic()}>创建 topic</Button>}<Alert type="info" showIcon message="Kafka 任务使用 JSON 事件信封；创建 topic 需要 Kafka 凭证具备 Create 权限。" /></> : <><ProFormText name="targetSchema" label="目标 Schema（仅 PostgreSQL）" placeholder="默认 public" /><Form.Item name="targetTable" preserve label="目标表名" rules={[{ required: true, message: '请选择已有表或输入目标表名' }]} extra="MySQL/PostgreSQL 可选择已有表或输入新表名。"><AutoComplete options={targetTables.map(table => ({ label: table, value: table }))} allowClear placeholder={targetTablesLoading ? '正在读取目标端表列表，可直接输入新表名' : '选择已有表或输入目标表名'} /></Form.Item><Alert type="info" showIcon message="关系型目标已有表会执行兼容性检查；新表在任务启动时自动创建。" /></>}</Form.Item></>}
         {wizardStep === 3 && sourceMetadata && <>{mappingRisks(sourceMetadata).map(risk => <Alert key={risk} type="warning" showIcon message={risk} style={{ marginBottom: 8 }} />)}<Form.Item name="selectedColumns" label="纳入同步的字段" rules={[{ required: true, message: '至少选择一个字段' }]} extra="MVP 仅支持同名字段映射；同步键字段不可排除。"><Checkbox.Group options={sourceMetadata.columns.map(column => ({ label: `${column.name} (${column.typeName || '-'})`, value: column.name, disabled: (form.getFieldValue('syncKeyColumns') || '').split(',').includes(column.name) }))} /></Form.Item><Form.Item name="syncKeyColumns" label="同步键" rules={[{ required: true, message: '请选择可靠同步键' }]} extra="优先使用主键；没有主键时仅可选择所有字段均为非空的唯一键。"><Select options={reliableKeyOptions(sourceMetadata)} disabled={reliableKeyOptions(sourceMetadata).length === 0} placeholder={reliableKeyOptions(sourceMetadata).length ? '请选择同步键' : '源表没有可靠同步键'} /></Form.Item>{reliableKeyOptions(sourceMetadata).length === 0 && <Alert type="warning" showIcon message="该表没有可靠同步键，只能创建全量任务；增量相关模式在保存时会被阻断。" />}</>}
-        {wizardStep === 4 && <><ProFormText name="taskName" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }]} /><ProFormSelect name="syncMode" label="同步模式" options={[{ label: '全量同步', value: 'FULL' }, { label: '纯增量', value: 'INCREMENTAL' }, { label: '全量 + CDC', value: 'FULL_CDC' }]} rules={[{ required: true }]} /><Form.Item noStyle shouldUpdate={(prev, current) => prev.syncMode !== current.syncMode || prev.incrementalStartupMode !== current.incrementalStartupMode}>{({ getFieldValue }) => getFieldValue('syncMode') === 'INCREMENTAL' ? <><Alert type="warning" showIcon message="纯增量不会补齐任务创建前的历史数据，目标端必须已有可信基线。" style={{ marginBottom: 12 }} />{cdcPrecheck && !cdcPrecheck.passed && <Alert type="error" showIcon message="CDC 前置检查未通过，不能创建纯增量任务。" description={cdcPrecheck.message} style={{ marginBottom: 12 }} />}<ProFormSelect name="incrementalStartupMode" label="增量启动位点" options={[{ label: '从创建后的最新位点开始', value: 'LATEST' }, { label: '按指定时间开始', value: 'TIMESTAMP' }, { label: '指定 binlog 文件和位置', value: 'SPECIFIC' }]} rules={[{ required: true }]} />{getFieldValue('incrementalStartupMode') === 'TIMESTAMP' && <ProFormText name="incrementalStartupTimestamp" label="启动时间" placeholder="例如 2026-08-27T12:30:00" fieldProps={{ type: 'datetime-local' }} rules={[{ required: true, message: '请选择启动时间' }]} extra="按源端 Asia/Shanghai 时区换算为 SeaTunnel 毫秒时间戳。" />}{getFieldValue('incrementalStartupMode') === 'SPECIFIC' && <Space align="start"><ProFormText name="incrementalStartupBinlogFile" label="binlog 文件" placeholder="mysql-bin.000001" rules={[{ required: true, message: '请输入 binlog 文件' }]} fieldProps={{ style: { width: 250 } }} /><ProFormDigit name="incrementalStartupBinlogPosition" label="binlog 位置" min={4} rules={[{ required: true, message: '请输入 binlog 位置' }]} fieldProps={{ style: { width: 180 } }} /></Space>}</> : null}</Form.Item><ProFormSelect name="ddlPolicy" label="DDL 策略" options={[{ label: '失败即停', value: 'FAIL' }, { label: '忽略', value: 'IGNORE' }]} rules={[{ required: true }]} /><ProFormSelect name="scheduleMode" label="调度模式" options={[{ label: '保存后执行一次', value: 'ONCE' }, { label: 'Cron 定时执行', value: 'CRON' }, { label: '常驻实时（手动启动）', value: 'REALTIME' }, { label: '手动（不自动触发）', value: 'MANUAL' }]} rules={[{ required: true }]} /><Form.Item noStyle shouldUpdate={(prev, current) => prev.scheduleMode !== current.scheduleMode}>{({ getFieldValue }) => getFieldValue('scheduleMode') === 'CRON' ? <ProFormText name="cronExpression" label="Cron 表达式" placeholder="例如 0 0 2 * * ?（秒 分 时 日 月 周）" rules={[{ required: true, message: '请输入 Cron 表达式' }]} extra="使用 Spring 6 位 Cron，保存时会校验并计算下次执行时间。" /> : null}</Form.Item><Form.Item noStyle shouldUpdate={(prev, current) => prev.fullDataMode !== current.fullDataMode || prev.syncMode !== current.syncMode}>{({ getFieldValue }) => getFieldValue('fullDataMode') === 'OVERWRITE' && getFieldValue('syncMode') === 'FULL_CDC' ? <Alert type="warning" showIcon message="全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 请使用合并（upsert）或创建纯全量覆盖任务。" /> : getFieldValue('fullDataMode') === 'OVERWRITE' && getFieldValue('syncMode') !== 'INCREMENTAL' ? <Alert type="warning" showIcon message="覆盖刷新将先写入临时表，作业成功后才替换正式表；失败时保留原目标数据。" /> : null}</Form.Item><Divider titlePlacement="left" plain>源库保护</Divider><Space wrap align="start"><ProFormDigit name="readLimitRowsPerSecond" label="最大行数/秒" min={1} max={100000} rules={[{ required: true }]} fieldProps={{ style: { width: 180 }}} /><ProFormDigit name="readLimitBytesPerSecond" label="最大字节/秒" min={1} max={1073741824} rules={[{ required: true }]} fieldProps={{ style: { width: 210 }}} /><ProFormDigit name="snapshotParallelism" label="快照并行度" min={1} max={4} rules={[{ required: true }]} fieldProps={{ style: { width: 150 }}} /><ProFormDigit name="sourceConnectionLimit" label="CDC 连接池上限" min={1} max={8} rules={[{ required: true }]} fieldProps={{ style: { width: 180 }}} /></Space><Divider titlePlacement="left" plain>提交确认</Divider><Form.Item noStyle shouldUpdate>{({ getFieldsValue }) => { const values = getFieldsValue(); return <Descriptions size="small" column={2} bordered><Descriptions.Item label="源端">{sourceDatabase || '-'} / {values.sourceTable || '-'}</Descriptions.Item><Descriptions.Item label="目标端">{values.targetSchema || 'public'} / {values.targetTable || '-'}</Descriptions.Item><Descriptions.Item label="同步模式">{values.syncMode || '-'}</Descriptions.Item><Descriptions.Item label="同步键">{values.syncKeyColumns || '-'}</Descriptions.Item><Descriptions.Item label="字段数">{Array.isArray(values.selectedColumns) ? values.selectedColumns.length : String(values.selectedColumns || '').split(',').filter(Boolean).length}</Descriptions.Item><Descriptions.Item label="调度">{values.scheduleMode || '-'}</Descriptions.Item></Descriptions>; }}</Form.Item></>}
+        {wizardStep === 4 && <><ProFormText name="taskName" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }]} /><ProFormSelect name="syncMode" label="同步模式" options={[{ label: '全量同步', value: 'FULL' }, { label: '纯增量', value: 'INCREMENTAL' }, { label: '全量 + CDC', value: 'FULL_CDC' }]} rules={[{ required: true }]} /><Form.Item noStyle shouldUpdate={(prev, current) => prev.syncMode !== current.syncMode || prev.incrementalStartupMode !== current.incrementalStartupMode}>{({ getFieldValue }) => getFieldValue('syncMode') === 'INCREMENTAL' ? <><Alert type="warning" showIcon message="纯增量不会补齐任务创建前的历史数据，目标端必须已有可信基线。" style={{ marginBottom: 12 }} />{cdcPrecheck && !cdcPrecheck.passed && <Alert type="error" showIcon message="CDC 前置检查未通过，不能创建纯增量任务。" description={cdcPrecheck.message} style={{ marginBottom: 12 }} />}<ProFormSelect name="incrementalStartupMode" label="增量启动位点" options={[{ label: '从创建后的最新位点开始', value: 'LATEST' }, { label: '按指定时间开始', value: 'TIMESTAMP' }, { label: '指定 binlog 文件和位置', value: 'SPECIFIC' }]} rules={[{ required: true }]} />{getFieldValue('incrementalStartupMode') === 'TIMESTAMP' && <ProFormText name="incrementalStartupTimestamp" label="启动时间" placeholder="例如 2026-08-27T12:30:00" fieldProps={{ type: 'datetime-local' }} rules={[{ required: true, message: '请选择启动时间' }]} extra="按源端 Asia/Shanghai 时区换算为 SeaTunnel 毫秒时间戳。" />}{getFieldValue('incrementalStartupMode') === 'SPECIFIC' && <Space align="start"><ProFormText name="incrementalStartupBinlogFile" label="binlog 文件" placeholder="mysql-bin.000001" rules={[{ required: true, message: '请输入 binlog 文件' }]} fieldProps={{ style: { width: 250 } }} /><ProFormDigit name="incrementalStartupBinlogPosition" label="binlog 位置" min={4} rules={[{ required: true, message: '请输入 binlog 位置' }]} fieldProps={{ style: { width: 180 } }} /></Space>}</> : null}</Form.Item><ProFormSelect name="ddlPolicy" label="DDL 策略" options={[{ label: '失败即停', value: 'FAIL' }, { label: '忽略', value: 'IGNORE' }]} rules={[{ required: true }]} /><ProFormSelect name="scheduleMode" label="调度模式" options={[{ label: '保存后执行一次', value: 'ONCE' }, { label: 'Cron 定时执行', value: 'CRON' }, { label: '常驻实时（手动启动）', value: 'REALTIME' }, { label: '手动（不自动触发）', value: 'MANUAL' }]} rules={[{ required: true }]} /><Form.Item noStyle shouldUpdate={(prev, current) => prev.scheduleMode !== current.scheduleMode}>{({ getFieldValue }) => getFieldValue('scheduleMode') === 'CRON' ? <ProFormText name="cronExpression" label="Cron 表达式" placeholder="例如 0 0 2 * * ?（秒 分 时 日 月 周）" rules={[{ required: true, message: '请输入 Cron 表达式' }]} extra="使用 Spring 6 位 Cron，保存时会校验并计算下次执行时间。" /> : null}</Form.Item><Form.Item noStyle shouldUpdate={(prev, current) => prev.fullDataMode !== current.fullDataMode || prev.syncMode !== current.syncMode}>{({ getFieldValue }) => getFieldValue('fullDataMode') === 'OVERWRITE' && getFieldValue('syncMode') === 'FULL_CDC' ? <Alert type="warning" showIcon message="全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 请使用合并（upsert）或创建纯全量覆盖任务。" /> : getFieldValue('fullDataMode') === 'OVERWRITE' && getFieldValue('syncMode') !== 'INCREMENTAL' ? <Alert type="warning" showIcon message="覆盖刷新将先写入临时表，作业成功后才替换正式表。" /> : null}</Form.Item><Divider titlePlacement="left" plain>源库保护</Divider><Space wrap align="start"><ProFormDigit name="readLimitRowsPerSecond" label="最大行数/秒" min={1} max={100000} rules={[{ required: true }]} fieldProps={{ style: { width: 180 }}} /><ProFormDigit name="readLimitBytesPerSecond" label="最大字节/秒" min={1} max={1073741824} rules={[{ required: true }]} fieldProps={{ style: { width: 210 }}} /><ProFormDigit name="snapshotParallelism" label="快照并行度" min={1} max={4} rules={[{ required: true }]} fieldProps={{ style: { width: 150 }}} /><ProFormDigit name="sourceConnectionLimit" label="CDC 连接池上限" min={1} max={8} rules={[{ required: true }]} fieldProps={{ style: { width: 180 }}} /></Space><Divider titlePlacement="left" plain>提交确认</Divider><Form.Item noStyle shouldUpdate>{({ getFieldsValue }) => { const values = getFieldsValue(true); return <Descriptions size="small" column={2} bordered><Descriptions.Item label="源端">{sourceDatabase || '-'} / {values.sourceTable || '-'}</Descriptions.Item><Descriptions.Item label="目标端">{values.targetSchema || 'public'} / {values.targetTable || '-'}</Descriptions.Item><Descriptions.Item label="同步模式">{values.syncMode || '-'}</Descriptions.Item><Descriptions.Item label="同步键">{values.syncKeyColumns || '-'}</Descriptions.Item><Descriptions.Item label="字段数">{Array.isArray(values.selectedColumns) ? values.selectedColumns.length : String(values.selectedColumns || '').split(',').filter(Boolean).length}</Descriptions.Item><Descriptions.Item label="调度">{values.scheduleMode || '-'}</Descriptions.Item></Descriptions>; }}</Form.Item></>}
       </ModalForm>
     </PageContainer>
   );

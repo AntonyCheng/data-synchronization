@@ -3,6 +3,7 @@ import {
   ModalForm,
   PageContainer,
   ProFormDigit,
+  ProFormDependency,
   ProFormSelect,
   ProFormText,
   ProTable,
@@ -76,8 +77,11 @@ export default function SyncDataSourcePage() {
 
   const test = async (row: DataSourceVO) => {
     const result = await testDataSource(row.sourceId);
-    message[result.data.success ? 'success' : 'error'](
-      `${result.data.message}${result.data.success ? `（${result.data.latencyMs}ms）` : ''}`
+    const { success, message: detail, latencyMs } = result.data;
+    const name = row.sourceName || `数据源 ${row.sourceId}`;
+    const summary = success ? `数据源“${name}”连接测试成功` : `数据源“${name}”连接测试失败`;
+    message[success ? 'success' : 'error'](
+      `${summary}${success ? `（耗时 ${latencyMs}ms）` : ''}：${detail}`
     );
   };
 
@@ -96,7 +100,7 @@ export default function SyncDataSourcePage() {
 
   const columns: ProColumns<DataSourceVO>[] = [
     { title: '名称', dataIndex: 'sourceName', width: 180 },
-    { title: '类型', dataIndex: 'sourceType', width: 120, valueEnum: { MYSQL: 'MySQL', POSTGRESQL: 'PostgreSQL' } },
+    { title: '类型', dataIndex: 'sourceType', width: 120, valueEnum: { MYSQL: 'MySQL', POSTGRESQL: 'PostgreSQL', KAFKA: 'Kafka' } },
     { title: '地址', dataIndex: 'host' },
     { title: '端口', dataIndex: 'port', width: 90, search: false },
     { title: '数据库', dataIndex: 'databaseName' },
@@ -170,12 +174,20 @@ export default function SyncDataSourcePage() {
         <ProFormSelect
           name="sourceType"
           label="类型"
-          options={[{ label: 'MySQL', value: 'MYSQL' }, { label: 'PostgreSQL', value: 'POSTGRESQL' }]}
+          options={[{ label: 'MySQL', value: 'MYSQL' }, { label: 'PostgreSQL', value: 'POSTGRESQL' }, { label: 'Kafka', value: 'KAFKA' }]}
           rules={[{ required: true, message: '请选择数据源类型' }]}
         />
         <ProFormText name="host" label="主机地址" rules={[{ required: true, message: '请输入主机地址' }]} />
         <ProFormDigit name="port" label="端口" min={1} max={65535} rules={[{ required: true, message: '请输入端口' }]} />
-        <ProFormText name="databaseName" label="数据库名称" rules={[{ required: true, message: '请输入数据库名称' }]} />
+        <ProFormDependency name={['sourceType']}>
+          {({ sourceType }) => (
+            <ProFormText
+              name="databaseName"
+              label={sourceType === 'KAFKA' ? '数据库名称（Kafka 不需要）' : '数据库名称'}
+              rules={sourceType === 'KAFKA' ? [] : [{ required: true, message: '请输入数据库名称' }]}
+            />
+          )}
+        </ProFormDependency>
         <ProFormText name="schemaName" label="Schema" />
         <ProFormText name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]} />
         <ProFormText.Password name="password" label="密码" placeholder="修改时留空表示保持原密码" />

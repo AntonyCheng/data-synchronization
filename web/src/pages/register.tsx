@@ -7,17 +7,16 @@ import zhCN from 'antd/locale/zh_CN';
 import { useCallback, useEffect, useState } from 'react';
 import type { RegisterParams, VerifyCodeResult } from '@/api/types';
 import { getCodeImg, register } from '@/api/login';
-import LocaleSelect from '@/components/layout/LocaleSelect';
 import { useLoading } from '@/hooks/useLoading';
 import { useAppStore } from '@/stores/appStore';
 import { appEnv } from '@/utils/env';
 
 const registerText = {
   zh_CN: {
-    brandTitle: '企业级后台管理系统',
+    brandTitle: '一站式实时计算平台',
     brandDesc:
-      '真正面向企业级的应用框架，组件化、模块化、轻耦合、高扩展。重写 RuoYi-Vue 所有功能，集成 Sa-Token、Mybatis-Plus、WarmFlow、SpringDoc、Hutool、OSS。',
-    highlights: ['技术栈全面升级', '动态菜单', '多主题布局', '深浅色主题'],
+      '统一管理数据源、同步任务、实时链路与运行质量，快速搭建可靠的数据同步工作台。',
+    highlights: ['数据源统一管理', '任务全生命周期', '多表整库同步', '运行质量可视'],
     formSubTitle: '创建新的业务工作台账号',
     username: '账号',
     password: '密码',
@@ -40,10 +39,10 @@ const registerText = {
     codeRequired: '请输入验证码'
   },
   en_US: {
-    brandTitle: 'Enterprise Admin System',
+    brandTitle: 'One-stop Real-time Computing Platform',
     brandDesc:
-      'An enterprise-oriented application framework with modular architecture, loose coupling, and extensibility. It ports the RuoYi-Vue feature set and integrates Sa-Token, Mybatis-Plus, WarmFlow, SpringDoc, Hutool, and OSS.',
-    highlights: ['Modern Stack', 'Dynamic Menus', 'Multi Layouts', 'Dark Mode'],
+      'Manage data sources, synchronization tasks, real-time pipelines and runtime quality from one workspace.',
+    highlights: ['Unified sources', 'Task lifecycle', 'Multi-table sync', 'Visible runtime quality'],
     formSubTitle: 'Create a new workspace account',
     username: 'Username',
     password: 'Password',
@@ -69,7 +68,6 @@ const registerText = {
 
 export default function Register() {
   const appLocale = useAppStore(state => state.appLocale);
-  const setAppLocale = useAppStore(state => state.setAppLocale);
   const [captcha, setCaptcha] = useState<VerifyCodeResult>({ captchaEnabled: true });
   const { loading, withLoading } = useLoading();
   const text = registerText[appLocale];
@@ -115,11 +113,8 @@ export default function Register() {
   return (
     <ConfigProvider locale={appLocale === 'zh_CN' ? zhCN : enUS}>
       <div className="register-page">
-        <div className="auth-locale-select">
-          <LocaleSelect value={appLocale} onChange={setAppLocale} />
-        </div>
         <section className="register-brand-react">
-          <span className="register-brand-pill">Plus UI Workspace</span>
+          <span className="register-brand-pill">实时计算工作台</span>
           <h1>{text.brandTitle}</h1>
           <p>{text.brandDesc}</p>
           <div className="register-highlights">

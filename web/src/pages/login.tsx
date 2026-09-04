@@ -13,7 +13,6 @@ import githubIcon from '@/assets/icons/svg/github.svg';
 import maxkeyIcon from '@/assets/icons/svg/maxkey.svg';
 import topiamIcon from '@/assets/icons/svg/topiam.svg';
 import wechatIcon from '@/assets/icons/svg/wechat.svg';
-import LocaleSelect from '@/components/layout/LocaleSelect';
 import { useAppStore } from '@/stores/appStore';
 import { useTagsViewStore } from '@/stores/tagsViewStore';
 import { getToken, setToken } from '@/utils/auth';
@@ -49,11 +48,10 @@ function getRememberedLogin() {
 
 const authText = {
   zh_CN: {
-    title: '企业级后台管理系统',
+    title: '一站式实时计算平台',
     brandDesc:
-      '真正面向企业级的应用框架 组件化 模块化 轻耦合 高扩展 针对企业痛点 业界一流技术栈\n' +
-      '重写 RuoYi-Vue 所有功能 集成 Sa-Token、Mybatis-Plus、WarmFlow、SpringDoc、Hutool、OSS 定期同步。',
-    highlights: ['动态菜单', '细粒度权限', '多主题布局', '工作流集成'],
+      '统一管理数据源、同步任务、实时链路与运行质量，覆盖 MySQL、PostgreSQL 与 Kafka 数据流转。',
+    highlights: ['全量与 CDC', '多表与整库', '目标兼容性核对', '运行质量监控'],
     metrics: [
       { value: 'React+Ant', label: '前端技术栈' },
       { value: '动态权限控制', label: '细粒度权限管理' },
@@ -73,11 +71,10 @@ const authText = {
     codeRequired: '请输入验证码'
   },
   en_US: {
-    title: 'Enterprise-level Backend Management System',
+    title: 'One-stop Real-time Computing Platform',
     brandDesc:
-      'Enterprise-grade application framework featuring componentization, modularization, loose coupling and high scalability. Tailored for enterprise pain points with industry-leading tech stack.\n' +
-      'All functions of RuoYi-Vue are fully rewritten, with regular synchronization of integrated components including Sa-Token, Mybatis-Plus, WarmFlow, SpringDoc, Hutool and OSS.',
-    highlights: ['Dynamic Menus', 'Fine Permissions', 'Multi Layouts', 'Workflow Ready'],
+      'Manage data sources, synchronization tasks, real-time pipelines and operational quality in one place.',
+    highlights: ['Full & CDC', 'Multi-table & database', 'Compatibility checks', 'Runtime monitoring'],
     metrics: [
       { value: 'React+Ant', label: 'Front-end Tech Stack' },
       { value: 'Dynamic Permission Control', label: 'Fine-grained Permission Management' },
@@ -101,7 +98,6 @@ const authText = {
 export default function Login() {
   const [params] = useSearchParams();
   const appLocale = useAppStore(state => state.appLocale);
-  const setAppLocale = useAppStore(state => state.setAppLocale);
   const resetTags = useTagsViewStore(state => state.resetTags);
   const [captcha, setCaptcha] = useState<VerifyCodeResult>({ captchaEnabled: true });
   const [initialValues] = useState(getRememberedLogin);
@@ -141,9 +137,6 @@ export default function Login() {
   return (
     <ConfigProvider locale={appLocale === 'zh_CN' ? zhCN : enUS}>
       <div className="login-page">
-        <div className="auth-locale-select">
-          <LocaleSelect value={appLocale} onChange={setAppLocale} />
-        </div>
         <section className="login-brand">
           <h1>{text.title}</h1>
           <p>{text.brandDesc}</p>

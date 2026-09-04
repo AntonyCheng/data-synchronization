@@ -1,8 +1,8 @@
 const env = import.meta.env;
 
 export const appEnv = {
-  title: env.VITE_APP_TITLE || 'RuoYi-React-Plus后台管理系统',
-  logoTitle: env.VITE_APP_LOGO_TITLE || 'RuoYi-React-Plus',
+  title: env.VITE_APP_TITLE || '一站式实时计算平台',
+  logoTitle: env.VITE_APP_LOGO_TITLE || '一站式实时计算平台',
   baseApi: env.VITE_APP_BASE_API || '',
   contextPath: env.VITE_APP_CONTEXT_PATH || '/',
   clientId: env.VITE_APP_CLIENT_ID || '',
