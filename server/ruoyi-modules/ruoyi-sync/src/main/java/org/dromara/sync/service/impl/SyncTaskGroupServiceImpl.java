@@ -154,7 +154,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             SyncTaskGroupItemValidationVo itemResult = new SyncTaskGroupItemValidationVo();
             itemResult.setItemId(item.getItemId());
             itemResult.setSourceTable(item.getSourceTable());
-            itemResult.setTargetTable((StringUtils.isBlank(item.getTargetSchema()) ? "public" : item.getTargetSchema()) + "." + item.getTargetTable());
+            itemResult.setTargetTable(displayTargetTable(target, item.getTargetSchema(), item.getTargetTable()));
             try {
                 DataSourceMetadataVo metadata = metadataService.queryTableMetadata(source.getSourceId(),
                     StringUtils.defaultIfBlank(item.getSourceDatabase(), source.getDatabaseName()), item.getSourceTable());
@@ -382,7 +382,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     "无法读取源表结构：" + safeMessage(ex),
                     "确认源表仍存在且同步账号具有读取元数据权限后重新执行结构检查。", "PENDING_FIX");
                 isolateDdlItem(item, event);
-                result.getEvents().add(toDdlEventVo(event, item));
+                result.getEvents().add(toDdlEventVo(event, item, target));
                 newlyDetected++;
                 continue;
             }
@@ -411,7 +411,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     existing.setDetails("源表结构已恢复为启动快照。请确认目标端结构后恢复该表。" );
                     existing.setRemediation("确认目标端仍与源端兼容后，使用“恢复该表”继续从 savepoint 同步。");
                     ddlEventMapper.updateById(existing);
-                    result.getEvents().add(toDdlEventVo(existing, item));
+                    result.getEvents().add(toDdlEventVo(existing, item, target));
                     readyToResume++;
                 }
                 continue;
@@ -423,7 +423,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             SyncTaskGroupDdlEvent event = upsertDdlEvent(group, item, currentHash, diff.changeType(), diff.riskLevel(),
                 diff.details(), remediation(diff, compatibility), eventStatus);
             isolateDdlItem(item, event);
-            result.getEvents().add(toDdlEventVo(event, item));
+            result.getEvents().add(toDdlEventVo(event, item, target));
             if ("READY_TO_RESUME".equals(eventStatus)) readyToResume++; else newlyDetected++;
         }
 
@@ -475,7 +475,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 itemResult.setMessage(tableResult.getMessage());
             } catch (RuntimeException ex) {
                 itemResult.setSourceTable(StringUtils.defaultIfBlank(item.getSourceDatabase(), source.getDatabaseName()) + "." + item.getSourceTable());
-                itemResult.setTargetTable(StringUtils.defaultIfBlank(item.getTargetSchema(), "public") + "." + item.getTargetTable());
+                itemResult.setTargetTable(displayTargetTable(target, item.getTargetSchema(), item.getTargetTable()));
                 itemResult.setSuccess(false);
                 itemResult.setMatched(false);
                 itemResult.setMessage("数据核对失败：" + StringUtils.defaultIfBlank(ex.getMessage(), "未知错误"));
@@ -871,6 +871,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return target != null && "KAFKA".equalsIgnoreCase(target.getSourceType());
     }
 
+    /**
+     * Display-only qualified target table name. The "schema." prefix only means anything for
+     * PostgreSQL targets - MySQL and Kafka have no such concept, so prefixing them with the
+     * PostgreSQL-only "public" default was misleading (see [[public-schema-prefix-display-bug]]).
+     */
+    private static String displayTargetTable(DataSource target, String targetSchema, String targetTable) {
+        boolean postgres = target != null && "POSTGRESQL".equalsIgnoreCase(target.getSourceType());
+        return postgres ? (StringUtils.isBlank(targetSchema) ? "public" : targetSchema) + "." + targetTable : targetTable;
+    }
+
     private static String mapStatus(String status) {
         if (status == null) return "FAILED";
         return switch (status.toUpperCase()) {
@@ -1039,12 +1049,12 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return prefix + " 当前目标表兼容性已通过；请确认业务影响后使用“恢复该表”继续同步。";
     }
 
-    private static SyncTaskGroupDdlEventVo toDdlEventVo(SyncTaskGroupDdlEvent event, SyncTaskGroupItem item) {
+    private static SyncTaskGroupDdlEventVo toDdlEventVo(SyncTaskGroupDdlEvent event, SyncTaskGroupItem item, DataSource target) {
         SyncTaskGroupDdlEventVo vo = new SyncTaskGroupDdlEventVo();
         vo.setEventId(event.getEventId());
         vo.setItemId(event.getItemId());
         vo.setSourceTable(item.getSourceTable());
-        vo.setTargetTable((StringUtils.isBlank(item.getTargetSchema()) ? "public" : item.getTargetSchema()) + "." + item.getTargetTable());
+        vo.setTargetTable(displayTargetTable(target, item.getTargetSchema(), item.getTargetTable()));
         vo.setChangeType(event.getChangeType());
         vo.setRiskLevel(event.getRiskLevel());
         vo.setStatus(event.getStatus());

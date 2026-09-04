@@ -297,6 +297,11 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
         task.setStatus("STOPPED");
         task.setLastError("");
+        // SyncTaskScheduler treats STOPPED as an eligible status (a fresh STOPPED task can be
+        // rearmed by editing its schedule), but a leftover past nextRunTime from the run that
+        // just got stopped would make the very next poll immediately restart this job. Clear it
+        // so a manual stop actually stops the task until the user restarts or reschedules it.
+        task.setNextRunTime(null);
         syncTaskMapper.updateById(task);
         return operation(task, "作业已停止");
     }

@@ -1,5 +1,6 @@
 package org.dromara.sync.domain;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
@@ -37,6 +38,11 @@ public class SyncTask extends BaseEntity {
     private String ddlPolicy;
     private String scheduleMode;
     private String cronExpression;
+    // Global mybatis-plus field-strategy is not_null, which would silently drop a
+    // setNextRunTime(null) from any updateById() UPDATE statement - the very thing
+    // SyncTaskScheduler.advance() and a manual stop() rely on to make a ONCE task (or a
+    // just-stopped task) stop being schedule-eligible. Force nulls to actually persist.
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private LocalDateTime nextRunTime;
     private LocalDateTime lastTriggerTime;
     private String lastSkipReason;
