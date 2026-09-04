@@ -8,6 +8,7 @@ import org.dromara.common.core.domain.R;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
+import org.dromara.common.redis.annotation.RepeatSubmit;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.sync.domain.bo.DataSourceBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
@@ -57,6 +58,7 @@ public class DataSourceController extends BaseController {
 
     @SaCheckPermission("sync:data-source:add")
     @Log(title = "同步数据源", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
     @PostMapping
     public R<Void> add(@Validated @RequestBody DataSourceBo bo) {
         return toAjax(dataSourceService.insertByBo(bo));
@@ -64,6 +66,7 @@ public class DataSourceController extends BaseController {
 
     @SaCheckPermission("sync:data-source:edit")
     @Log(title = "同步数据源", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PutMapping
     public R<Void> edit(@Validated @RequestBody DataSourceBo bo) {
         return toAjax(dataSourceService.updateByBo(bo));
@@ -116,6 +119,7 @@ public class DataSourceController extends BaseController {
 
     @SaCheckPermission("sync:data-source:metadata")
     @Log(title = "创建 Kafka topic", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
     @PostMapping("/{sourceId}/kafka/topics")
     public R<KafkaTopicVo> createKafkaTopic(@NotNull(message = "数据源ID不能为空") @PathVariable Long sourceId,
                                             @Validated @RequestBody KafkaTopicCreateBo bo) {
@@ -124,6 +128,7 @@ public class DataSourceController extends BaseController {
 
     @SaCheckPermission("sync:data-source:credential-migrate")
     @Log(title = "迁移同步数据源凭证", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/credential-migrate")
     public R<DataSourceCredentialMigrationResult> migrateCredentials() {
         return R.ok(dataSourceService.migrateCredentials());

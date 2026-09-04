@@ -7,6 +7,7 @@ import org.dromara.common.core.domain.R;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
+import org.dromara.common.redis.annotation.RepeatSubmit;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
@@ -49,6 +50,7 @@ public class SyncTaskGroupController extends BaseController {
 
     @SaCheckPermission("sync:group:add")
     @Log(title = "同步任务组", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
     @PostMapping
     public R<Void> add(@Validated @RequestBody SyncTaskGroupBo bo) {
         return toAjax(groupService.insertByBo(bo));
@@ -56,6 +58,7 @@ public class SyncTaskGroupController extends BaseController {
 
     @SaCheckPermission("sync:group:edit")
     @Log(title = "同步任务组", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PutMapping
     public R<Void> edit(@Validated @RequestBody SyncTaskGroupBo bo) {
         return toAjax(groupService.updateByBo(bo));
@@ -84,6 +87,7 @@ public class SyncTaskGroupController extends BaseController {
 
     @SaCheckPermission("sync:group:start")
     @Log(title = "启动同步任务组", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{groupId}/start")
     public R<SyncTaskGroupOperationResult> start(@PathVariable Long groupId) { return R.ok(groupService.start(groupId)); }
 
@@ -104,6 +108,7 @@ public class SyncTaskGroupController extends BaseController {
 
     @SaCheckPermission("sync:group:resume")
     @Log(title = "恢复同步任务组表项", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{groupId}/item/{itemId}/resume-after-ddl")
     public R<SyncTaskGroupOperationResult> resumeDdlItem(@PathVariable Long groupId, @PathVariable Long itemId) {
         return R.ok(groupService.resumeDdlItem(groupId, itemId));
@@ -116,16 +121,19 @@ public class SyncTaskGroupController extends BaseController {
 
     @SaCheckPermission("sync:group:pause")
     @Log(title = "暂停同步任务组", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{groupId}/pause")
     public R<SyncTaskGroupOperationResult> pause(@PathVariable Long groupId) { return R.ok(groupService.pause(groupId)); }
 
     @SaCheckPermission("sync:group:resume")
     @Log(title = "恢复同步任务组", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{groupId}/resume")
     public R<SyncTaskGroupOperationResult> resume(@PathVariable Long groupId) { return R.ok(groupService.resume(groupId)); }
 
     @SaCheckPermission("sync:group:stop")
     @Log(title = "停止同步任务组", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{groupId}/stop")
     public R<SyncTaskGroupOperationResult> stop(@PathVariable Long groupId) { return R.ok(groupService.stop(groupId)); }
 }

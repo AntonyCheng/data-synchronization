@@ -8,6 +8,7 @@ import org.dromara.common.core.domain.R;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
+import org.dromara.common.redis.annotation.RepeatSubmit;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.sync.domain.bo.SyncTaskBo;
 import org.dromara.sync.domain.bo.SyncTaskDataCheckRequest;
@@ -60,6 +61,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:add")
     @Log(title = "同步任务", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
     @PostMapping
     public R<Void> add(@Validated @RequestBody SyncTaskBo bo) {
         return toAjax(syncTaskService.insertByBo(bo));
@@ -67,6 +69,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:edit")
     @Log(title = "同步任务", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PutMapping
     public R<Void> edit(@Validated @RequestBody SyncTaskBo bo) {
         return toAjax(syncTaskService.updateByBo(bo));
@@ -102,6 +105,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:start")
     @Log(title = "启动同步任务", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{taskId}/start")
     public R<SeaTunnelJobOperationResult> start(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.start(taskId));
@@ -124,6 +128,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:pause")
     @Log(title = "暂停同步任务", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{taskId}/pause")
     public R<SeaTunnelJobOperationResult> pause(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.pause(taskId));
@@ -131,6 +136,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:resume")
     @Log(title = "恢复同步任务", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{taskId}/resume")
     public R<SeaTunnelJobOperationResult> resume(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.resume(taskId));
@@ -138,6 +144,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:stop")
     @Log(title = "停止同步任务", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{taskId}/stop")
     public R<SeaTunnelJobOperationResult> stop(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.stop(taskId));
@@ -145,6 +152,7 @@ public class SyncTaskController extends BaseController {
 
     @SaCheckPermission("sync:task:reinitialize")
     @Log(title = "重新初始化同步任务", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
     @PostMapping("/{taskId}/reinitialize")
     public R<SeaTunnelJobOperationResult> reinitialize(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.reinitialize(taskId));
