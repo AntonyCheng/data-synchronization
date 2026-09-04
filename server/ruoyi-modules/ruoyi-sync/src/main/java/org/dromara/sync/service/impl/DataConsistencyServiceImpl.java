@@ -56,6 +56,16 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
         if (task == null) throw new ServiceException("同步任务不存在");
         DataSource source = requireSource(task.getSourceId(), "源");
         DataSource target = requireSource(task.getTargetId(), "目标");
+        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
+            SyncTaskDataCheckResult kafkaResult = new SyncTaskDataCheckResult();
+            kafkaResult.setTaskId(taskId);
+            kafkaResult.setSourceTable(qualifiedSourceTable(source.getDatabaseName(), task.getSourceTable()));
+            kafkaResult.setTargetTable(task.getTargetTable());
+            kafkaResult.setSuccess(false);
+            kafkaResult.setMatched(false);
+            kafkaResult.setMessage("Kafka 任务使用事件核对口径，不执行关系型目标行数核对；请通过 topic 的 key、offset、分区和事件信封进行核对");
+            return kafkaResult;
+        }
         SyncTaskDataCheckRequest options = request == null ? new SyncTaskDataCheckRequest() : request;
         SyncTaskDataCheckResult result = check(source, target, source.getDatabaseName(), task.getSourceTable(), task.getTargetSchema(), task.getTargetTable(), task, options);
         result.setTaskId(taskId);
@@ -277,7 +287,11 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
         if (sourceId == null) throw new ServiceException(side + "数据源不能为空");
         DataSource source = dataSourceMapper.selectById(sourceId);
         if (source == null) throw new ServiceException(side + "数据源不存在");
-        if (StringUtils.isBlank(source.getPassword())) throw new ServiceException(side + "数据源密码未配置");
+        // Kafka brokers are commonly unauthenticated - see the same fix and rationale
+        // in SeaTunnelJobServiceImpl.requireSource().
+        if (!"KAFKA".equalsIgnoreCase(source.getSourceType()) && StringUtils.isBlank(source.getPassword())) {
+            throw new ServiceException(side + "数据源密码未配置");
+        }
         return source;
     }
 

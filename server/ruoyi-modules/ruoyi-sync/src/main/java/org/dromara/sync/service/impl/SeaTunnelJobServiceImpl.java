@@ -573,7 +573,11 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         if (source == null) {
             throw new ServiceException(side + "数据源不存在");
         }
-        if (StringUtils.isBlank(source.getPassword())) {
+        // Kafka brokers are commonly unauthenticated (see DataSourceServiceImpl,
+        // which never requires a password for KAFKA); rejecting a blank password here
+        // made every passwordless Kafka data source permanently unusable as a sync
+        // source/target - start()/resume()/reinitialize() all route through this check.
+        if (!"KAFKA".equalsIgnoreCase(source.getSourceType()) && StringUtils.isBlank(source.getPassword())) {
             throw new ServiceException(side + "数据源密码未配置");
         }
         return source;
