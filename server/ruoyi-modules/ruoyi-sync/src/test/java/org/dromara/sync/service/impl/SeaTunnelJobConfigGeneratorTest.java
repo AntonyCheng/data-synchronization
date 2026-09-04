@@ -50,6 +50,20 @@ class SeaTunnelJobConfigGeneratorTest {
         assertTrue(config.contains("FROM `source_db`.`customers`"), config);
     }
 
+    /**
+     * A partial column selection still needs the projection transform to actually narrow
+     * the columns the CDC connector emits. This also exercises the "can't reach the
+     * source to check" fallback in isFullColumnSelection() (mysql.example is unreachable
+     * here) - it must default to keeping the transform rather than silently dropping the
+     * column restriction.
+     */
+    @Test
+    void partialColumnSelectionKeepsTheProjectionTransform() {
+        String config = SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties()).config();
+        assertTrue(config.contains("transform {"), config);
+        assertTrue(config.contains("SELECT `id`, `display_name` FROM ds_source_1"), config);
+    }
+
     private static int[] serverIdRange(String config) {
         Matcher matcher = SERVER_ID.matcher(config);
         if (!matcher.find()) throw new AssertionError("no server-id in generated config:\n" + config);

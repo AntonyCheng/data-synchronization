@@ -17,6 +17,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -93,6 +94,14 @@ final class SeaTunnelJobConfigGenerator {
         int sourceConnectionLimit = positive(task.getSourceConnectionLimit(), properties.getSourceConnectionLimit());
         String sourceOutput = "ds_source_" + task.getTaskId();
         String projectedOutput = "ds_projected_" + task.getTaskId();
+        // MySQL-CDC always emits every source column - it has no column-level projection
+        // of its own - so a transform is only needed when the selection actually narrows
+        // the columns. Skipping it otherwise matters: SeaTunnel's generic Sql transform
+        // does not propagate NOT NULL/primary-key metadata, so a target auto-created
+        // through it fails ("All parts of a PRIMARY KEY must be NOT NULL") for any table
+        // whose sync key is NOT NULL - i.e. almost every well-formed table.
+        boolean needsProjection = !isFullColumnSelection(source, task.getSourceTable(), selectedColumns);
+        String sinkInput = needsProjection ? projectedOutput : sourceOutput;
         StringBuilder builder = new StringBuilder(1800);
         builder.append("env {\n")
             .append("  job.mode = \"STREAMING\"\n")
@@ -128,9 +137,9 @@ final class SeaTunnelJobConfigGenerator {
             .append("    enable_upsert = true\n")
             .append("    batch_size = 100\n")
             .append("    max_retries = 5\n")
-            .append("    plugin_input = ").append(stringList(List.of(projectedOutput))).append("\n")
+            .append("    plugin_input = ").append(stringList(List.of(sinkInput))).append("\n")
             .append("  }\n}\n");
-        return insertProjection(builder.toString(), sourceOutput, projectedOutput, selectedColumns);
+        return needsProjection ? insertProjection(builder.toString(), sourceOutput, projectedOutput, selectedColumns) : builder.toString();
     }
 
     private static String buildKafkaConfig(SyncTask task, DataSource source, DataSource target,
@@ -278,15 +287,43 @@ final class SeaTunnelJobConfigGenerator {
     private static List<String> resolveSelectedColumns(DataSource source, SyncTask task) {
         List<String> configured = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
         if (!configured.isEmpty()) return configured;
-        String table = unqualifiedTable(task.getSourceTable());
-        try (Connection connection = DriverManager.getConnection(mysqlJdbcUrl(source), source.getUsername(), source.getPassword());
-             ResultSet resultSet = connection.getMetaData().getColumns(source.getDatabaseName(), null, table, "%")) {
-            List<String> columns = new ArrayList<>();
-            while (resultSet.next()) columns.add(resultSet.getString("COLUMN_NAME"));
+        try {
+            List<String> columns = queryAllColumns(source, task.getSourceTable());
             if (columns.isEmpty()) throw new ServiceException("源表没有可同步字段");
             return columns;
         } catch (SQLException ex) {
             throw new ServiceException("读取源表字段失败：" + safeMessage(ex));
+        }
+    }
+
+    private static List<String> queryAllColumns(DataSource source, String tableReference) throws SQLException {
+        String table = unqualifiedTable(tableReference);
+        try (Connection connection = DriverManager.getConnection(mysqlJdbcUrl(source), source.getUsername(), source.getPassword());
+             ResultSet resultSet = connection.getMetaData().getColumns(source.getDatabaseName(), null, table, "%")) {
+            List<String> columns = new ArrayList<>();
+            while (resultSet.next()) columns.add(resultSet.getString("COLUMN_NAME"));
+            return columns;
+        }
+    }
+
+    /**
+     * True when the configured selection covers every column of the source table (in
+     * which case a downstream projection transform would be redundant). Any lookup
+     * failure conservatively returns false so the caller keeps the (slower but safe)
+     * projection path rather than risk silently dropping a real column restriction.
+     */
+    private static boolean isFullColumnSelection(DataSource source, String tableReference, List<String> selectedColumns) {
+        try {
+            List<String> allColumns = queryAllColumns(source, tableReference);
+            if (allColumns.isEmpty() || selectedColumns.size() != allColumns.size()) return false;
+            Set<String> selectedNormalized = new java.util.HashSet<>();
+            for (String column : selectedColumns) selectedNormalized.add(column.toLowerCase(Locale.ROOT));
+            for (String column : allColumns) {
+                if (!selectedNormalized.contains(column.toLowerCase(Locale.ROOT))) return false;
+            }
+            return true;
+        } catch (SQLException ex) {
+            return false;
         }
     }
 
