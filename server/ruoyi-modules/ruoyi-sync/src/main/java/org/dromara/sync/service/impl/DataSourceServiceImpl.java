@@ -18,6 +18,8 @@ import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.service.IDataSourceService;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.ObjectProvider;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -34,7 +36,7 @@ import java.util.Set;
 @Service
 public class DataSourceServiceImpl implements IDataSourceService {
 
-    private static final Set<String> SUPPORTED_TYPES = Set.of("MYSQL", "POSTGRESQL");
+    private static final Set<String> SUPPORTED_TYPES = Set.of("MYSQL", "POSTGRESQL", "KAFKA");
     private final DataSourceMapper dataSourceMapper;
     private final ObjectProvider<EncryptorProperties> encryptorProperties;
 
@@ -98,6 +100,12 @@ public class DataSourceServiceImpl implements IDataSourceService {
         try {
             normalizeAndValidate(entity, true);
             Instant started = Instant.now();
+            if ("KAFKA".equals(entity.getSourceType())) {
+                try (AdminClient admin = AdminClient.create(kafkaProperties(entity))) {
+                    admin.describeCluster().nodes().get(5, java.util.concurrent.TimeUnit.SECONDS);
+                    return ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
+                }
+            }
             try (Connection ignored = DriverManager.getConnection(buildJdbcUrl(entity), entity.getUsername(), entity.getPassword())) {
                 return ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
             }
@@ -150,10 +158,11 @@ public class DataSourceServiceImpl implements IDataSourceService {
         }
         entity.setSourceType(normalizeType(entity.getSourceType()));
         if (!SUPPORTED_TYPES.contains(entity.getSourceType())) {
-            throw new ServiceException("仅支持 MySQL 和 PostgreSQL 数据源");
+            throw new ServiceException("仅支持 MySQL、PostgreSQL 和 Kafka 数据源");
         }
-        if (StringUtils.isBlank(entity.getHost()) || entity.getPort() == null || StringUtils.isBlank(entity.getDatabaseName())
-            || StringUtils.isBlank(entity.getUsername()) || (passwordRequired && StringUtils.isBlank(entity.getPassword()))) {
+        boolean kafka = "KAFKA".equals(entity.getSourceType());
+        if (StringUtils.isBlank(entity.getHost()) || entity.getPort() == null || (!kafka && (StringUtils.isBlank(entity.getDatabaseName())
+            || StringUtils.isBlank(entity.getUsername()) || (passwordRequired && StringUtils.isBlank(entity.getPassword()))))) {
             throw new ServiceException("数据源连接参数不完整");
         }
         if (StringUtils.isBlank(entity.getSslEnabled())) entity.setSslEnabled("0");
@@ -173,5 +182,13 @@ public class DataSourceServiceImpl implements IDataSourceService {
         }
         return "jdbc:postgresql://" + entity.getHost() + ":" + entity.getPort() + "/" + entity.getDatabaseName()
             + "?connectTimeout=5&socketTimeout=5&ssl=" + "1".equals(entity.getSslEnabled());
+    }
+
+    private static java.util.Properties kafkaProperties(DataSource entity) {
+        java.util.Properties properties = new java.util.Properties();
+        properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, entity.getHost() + ':' + entity.getPort());
+        properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
+        properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 5000);
+        return properties;
     }
 }

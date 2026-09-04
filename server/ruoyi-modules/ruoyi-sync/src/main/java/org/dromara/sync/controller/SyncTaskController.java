@@ -6,6 +6,8 @@ import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.log.annotation.Log;
+import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.sync.domain.bo.SyncTaskBo;
 import org.dromara.sync.domain.bo.SyncTaskDataCheckRequest;
@@ -57,54 +59,63 @@ public class SyncTaskController extends BaseController {
     }
 
     @SaCheckPermission("sync:task:add")
+    @Log(title = "同步任务", businessType = BusinessType.INSERT)
     @PostMapping
     public R<Void> add(@Validated @RequestBody SyncTaskBo bo) {
         return toAjax(syncTaskService.insertByBo(bo));
     }
 
     @SaCheckPermission("sync:task:edit")
+    @Log(title = "同步任务", businessType = BusinessType.UPDATE)
     @PutMapping
     public R<Void> edit(@Validated @RequestBody SyncTaskBo bo) {
         return toAjax(syncTaskService.updateByBo(bo));
     }
 
     @SaCheckPermission("sync:task:remove")
+    @Log(title = "同步任务", businessType = BusinessType.DELETE)
     @DeleteMapping("/{taskId}")
     public R<Void> remove(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return toAjax(syncTaskService.deleteById(taskId));
     }
 
     @SaCheckPermission("sync:task:validate")
+    @Log(title = "同步任务校验", businessType = BusinessType.OTHER)
     @PostMapping("/{taskId}/validate")
     public R<SyncTaskValidationResult> validate(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(syncTaskService.validate(taskId));
     }
 
     @SaCheckPermission("sync:task:validate")
+    @Log(title = "目标兼容性检查", businessType = BusinessType.OTHER)
     @PostMapping("/{taskId}/target-compatibility")
     public R<TargetCompatibilityVo> targetCompatibility(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(metadataService.checkTargetCompatibility(taskId));
     }
 
     @SaCheckPermission("sync:task:engine-config")
+    @Log(title = "同步任务配置预览", businessType = BusinessType.OTHER)
     @PostMapping("/{taskId}/engine-config")
     public R<SeaTunnelJobConfigPreview> engineConfig(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.previewConfig(taskId));
     }
 
     @SaCheckPermission("sync:task:start")
+    @Log(title = "启动同步任务", businessType = BusinessType.UPDATE)
     @PostMapping("/{taskId}/start")
     public R<SeaTunnelJobOperationResult> start(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.start(taskId));
     }
 
     @SaCheckPermission("sync:task:status")
+    @Log(title = "刷新同步任务状态", businessType = BusinessType.OTHER)
     @PostMapping("/{taskId}/status")
     public R<SeaTunnelJobStatus> status(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.refreshStatus(taskId));
     }
 
     @SaCheckPermission("sync:task:check")
+    @Log(title = "同步任务数据核对", businessType = BusinessType.OTHER)
     @PostMapping("/{taskId}/check")
     public R<SyncTaskDataCheckResult> check(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId,
                                             @RequestBody(required = false) SyncTaskDataCheckRequest request) {
@@ -112,24 +123,28 @@ public class SyncTaskController extends BaseController {
     }
 
     @SaCheckPermission("sync:task:pause")
+    @Log(title = "暂停同步任务", businessType = BusinessType.UPDATE)
     @PostMapping("/{taskId}/pause")
     public R<SeaTunnelJobOperationResult> pause(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.pause(taskId));
     }
 
     @SaCheckPermission("sync:task:resume")
+    @Log(title = "恢复同步任务", businessType = BusinessType.UPDATE)
     @PostMapping("/{taskId}/resume")
     public R<SeaTunnelJobOperationResult> resume(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.resume(taskId));
     }
 
     @SaCheckPermission("sync:task:stop")
+    @Log(title = "停止同步任务", businessType = BusinessType.UPDATE)
     @PostMapping("/{taskId}/stop")
     public R<SeaTunnelJobOperationResult> stop(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.stop(taskId));
     }
 
     @SaCheckPermission("sync:task:reinitialize")
+    @Log(title = "重新初始化同步任务", businessType = BusinessType.UPDATE)
     @PostMapping("/{taskId}/reinitialize")
     public R<SeaTunnelJobOperationResult> reinitialize(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.reinitialize(taskId));

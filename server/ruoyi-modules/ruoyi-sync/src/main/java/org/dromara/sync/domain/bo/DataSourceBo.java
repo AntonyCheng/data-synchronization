@@ -39,12 +39,10 @@ public class DataSourceBo implements Serializable {
     @Max(value = 65535, message = "端口不能超过65535")
     private Integer port;
 
-    @NotBlank(message = "数据库名称不能为空")
     private String databaseName;
 
     private String schemaName;
 
-    @NotBlank(message = "用户名不能为空")
     private String username;
 
     @Size(max = 512, message = "密码不能超过{max}个字符")

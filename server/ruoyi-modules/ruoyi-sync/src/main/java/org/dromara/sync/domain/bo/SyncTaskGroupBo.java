@@ -2,7 +2,6 @@ package org.dromara.sync.domain.bo;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -37,6 +36,5 @@ public class SyncTaskGroupBo implements Serializable {
     private Integer sourceConnectionLimit;
 
     @Valid
-    @NotEmpty(message = "至少选择一张表")
     private List<SyncTaskGroupItemBo> items = new ArrayList<>();
 }

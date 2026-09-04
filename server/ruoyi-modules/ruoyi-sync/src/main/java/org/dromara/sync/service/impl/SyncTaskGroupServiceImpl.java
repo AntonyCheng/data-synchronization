@@ -75,6 +75,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final SeaTunnelProperties properties;
     private final SeaTunnelRestClient restClient;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
+    private final KafkaTaskBridgeService kafkaTaskBridgeService;
 
     @Override
     public PageResult<SyncTaskGroupVo> queryPageList(String groupName, String status, PageQuery pageQuery) {
@@ -118,6 +119,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         entity.setConfigVersion((current.getConfigVersion() == null ? 1 : current.getConfigVersion()) + 1);
         groupMapper.updateById(entity);
         replaceItems(entity.getGroupId(), bo.getItems());
+        if ("DATABASE".equals(entity.getSyncScope())) discover(entity.getGroupId());
         return true;
     }
 
@@ -125,7 +127,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Transactional
     public Boolean deleteById(Long groupId) {
         SyncTaskGroup current = requireGroup(groupId);
-        if (!List.of("DRAFT", "STOPPED", "FAILED").contains(current.getStatus())) {
+        if (!List.of("DRAFT", "STOPPED", "FAILED", "FINISHED").contains(current.getStatus())) {
             throw new ServiceException("运行中的任务组不能删除");
         }
         itemMapper.delete(new LambdaQueryWrapper<SyncTaskGroupItem>().eq(SyncTaskGroupItem::getGroupId, groupId));
@@ -158,11 +160,12 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     StringUtils.defaultIfBlank(item.getSourceDatabase(), source.getDatabaseName()), item.getSourceTable());
                 boolean hasKey = !SyncColumnSelectionValidator.validate(metadata,
                     item.getSelectedColumns(), item.getSyncKeyColumns()).syncKeyColumns().isEmpty();
+                boolean keyRequired = !"FULL".equalsIgnoreCase(group.getSyncMode()) || isKafkaTarget(target);
                 TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
                     item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
                 itemResult.setTargetCompatibility(compatibility);
-                itemResult.setPassed(hasKey && compatibility.isPassed());
-                itemResult.setMessage(itemResult.isPassed() ? "表结构和同步键校验通过" : (hasKey ? compatibility.getMessage() : "源表没有可用同步键"));
+                itemResult.setPassed((!keyRequired || hasKey) && compatibility.isPassed());
+                itemResult.setMessage(itemResult.isPassed() ? "表结构和同步键校验通过" : (keyRequired && !hasKey ? "源表没有可用同步键" : compatibility.getMessage()));
             } catch (RuntimeException ex) {
                 itemResult.setPassed(false);
                 itemResult.setMessage(ex.getMessage());
@@ -228,6 +231,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     item.setStatus("RUNNING");
                     item.setLastError("");
                     itemMapper.updateById(item);
+                    if (isKafkaTarget(target)) {
+                        kafkaTaskBridgeService.startGroupItem(SyncTaskGroupConfigGenerator.toTask(group, item), target,
+                            source.getDatabaseName());
+                    }
                     jobIds.add(submitted.jobId());
                     submittedItems.add(item);
                 } catch (RuntimeException ex) {
@@ -251,6 +258,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             for (SyncTaskGroupItem submittedItem : submittedItems) {
                 try {
                     restClient.stop(submittedItem.getEngineJobId(), false, false);
+                    if (isKafkaTarget(target)) kafkaTaskBridgeService.stop(submittedItem.getItemId());
                     submittedItem.setStatus("STOPPED");
                 } catch (RuntimeException stopError) {
                     submittedItem.setStatus("FAILED");
@@ -324,6 +332,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     item.setStatus("RUNNING");
                     item.setLastError("");
                     itemMapper.updateById(item);
+                    if (isKafkaTarget(target)) {
+                        kafkaTaskBridgeService.startGroupItem(SyncTaskGroupConfigGenerator.toTask(group, item), target,
+                            source.getDatabaseName());
+                    }
                     jobIds.add(submitted.jobId());
                     started++;
                 } catch (RuntimeException ex) {
@@ -435,6 +447,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         SyncTaskGroupDataCheckResult result = new SyncTaskGroupDataCheckResult();
         result.setGroupId(groupId);
         result.setTableCount(groupItems.size());
+        if (isKafkaTarget(target)) {
+            result.setSuccess(false);
+            result.setMatched(false);
+            result.setConsistencyNote("Kafka 目标使用事件核对口径，不执行关系型目标行数核对。");
+            result.setMessage("Kafka 任务组请通过 topic 的 key、offset、分区和事件信封进行核对");
+            return result;
+        }
         result.setConsistencyNote(List.of("RUNNING", "DEGRADED", "PAUSING").contains(group.getStatus())
             ? "任务仍在持续同步，当前为非同水位的行数检查；暂停或确认两端水位稳定后再做严格验收。"
             : "当前结果为源端与目标端的只读行数检查，不替代基于同步键的逐行校验。");
@@ -575,7 +594,19 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 .in(SyncTaskGroup::getStatus, "RUNNING", "PAUSING"))
             .forEach(group -> {
                 try {
-                    refreshStatus(group.getGroupId());
+                    SyncTaskGroupStatus status = refreshStatus(group.getGroupId());
+                    if ("RUNNING".equals(status.getStatus())) {
+                        DataSource source = requireSource(group.getSourceId(), "源");
+                        DataSource target = requireSource(group.getTargetId(), "目标");
+                        if (isKafkaTarget(target)) {
+                            for (SyncTaskGroupItem item : items(group.getGroupId())) {
+                                if ("RUNNING".equals(item.getStatus())) {
+                                    kafkaTaskBridgeService.startGroupItem(SyncTaskGroupConfigGenerator.toTask(group, item), target,
+                                        source.getDatabaseName());
+                                }
+                            }
+                        }
+                    }
                 } catch (RuntimeException ex) {
                     group.setStatus("FAILED");
                     group.setLastError(truncateForColumn(ex.getMessage()));
@@ -619,7 +650,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     public SyncTaskGroupOperationResult pause(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (!"RUNNING".equals(group.getStatus())) throw new ServiceException("只有运行中的任务组可以暂停");
+        DataSource target = requireSource(group.getTargetId(), "目标");
         for (SyncTaskGroupItem item : items(groupId)) if (StringUtils.isNotBlank(item.getEngineJobId())) {
+            if (isKafkaTarget(target)) kafkaTaskBridgeService.stop(item.getItemId());
             restClient.stop(item.getEngineJobId(), true, false);
             item.setStatus("PAUSING");
             itemMapper.updateById(item);
@@ -647,6 +680,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             restClient.submit(generated.jobName(), generated.config(), item.getEngineJobId(), true);
             item.setStatus("RUNNING");
             itemMapper.updateById(item);
+            if (isKafkaTarget(target)) {
+                kafkaTaskBridgeService.startGroupItem(SyncTaskGroupConfigGenerator.toTask(group, item), target,
+                    source.getDatabaseName());
+            }
         }
         group.setStatus("RUNNING");
         groupMapper.updateById(group);
@@ -657,7 +694,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Transactional
     public SyncTaskGroupOperationResult stop(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
+        DataSource target = requireSource(group.getTargetId(), "目标");
         for (SyncTaskGroupItem item : items(groupId)) if (StringUtils.isNotBlank(item.getEngineJobId())) {
+            if (isKafkaTarget(target)) kafkaTaskBridgeService.stop(item.getItemId());
             restClient.stop(item.getEngineJobId(), false, false);
             item.setStatus("STOPPED");
             itemMapper.updateById(item);
@@ -686,8 +725,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource source = requireSource(entity.getSourceId(), "源");
         DataSource target = requireSource(entity.getTargetId(), "目标");
         if (!"MYSQL".equalsIgnoreCase(source.getSourceType())) throw new ServiceException("多表 MVP 源端必须是 MySQL");
-        if (!"POSTGRESQL".equalsIgnoreCase(target.getSourceType())) throw new ServiceException("多表 MVP 目标端必须是 PostgreSQL");
-        if (!"FULL_CDC".equalsIgnoreCase(entity.getSyncMode())) throw new ServiceException("多表首版仅支持全量 + CDC");
+        if (!Set.of("POSTGRESQL", "MYSQL", "KAFKA").contains(StringUtils.defaultIfBlank(target.getSourceType(), "").toUpperCase())) {
+            throw new ServiceException("多表 MVP 目标端必须是 PostgreSQL、MySQL 或 Kafka");
+        }
+        String syncMode = entity.getSyncMode().toUpperCase(Locale.ROOT);
+        if (!Set.of("FULL", "INCREMENTAL", "FULL_CDC").contains(syncMode)) {
+            throw new ServiceException("不支持的同步模式：" + syncMode);
+        }
         if (!List.of("MULTI_TABLE", "DATABASE").contains(entity.getSyncScope())) throw new ServiceException("同步粒度仅支持多表或整库");
         if (!"DATABASE".equals(entity.getSyncScope()) && (bo.getItems() == null || bo.getItems().isEmpty())) {
             throw new ServiceException("至少选择一张表");
@@ -821,6 +865,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource source = dataSourceMapper.selectById(sourceId);
         if (source == null) throw new ServiceException(side + "数据源不存在");
         return source;
+    }
+
+    private static boolean isKafkaTarget(DataSource target) {
+        return target != null && "KAFKA".equalsIgnoreCase(target.getSourceType());
     }
 
     private static String mapStatus(String status) {

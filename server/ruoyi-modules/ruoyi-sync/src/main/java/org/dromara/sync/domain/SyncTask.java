@@ -54,6 +54,12 @@ public class SyncTask extends BaseEntity {
     private String lastCheckpointId;
     private LocalDateTime lastCheckpointTime;
     private String lastCheckpointStatus;
+    private Long kafkaPublishedCount;
+    private Integer kafkaLastPartition;
+    private Long kafkaLastOffset;
+    private LocalDateTime kafkaLastSourceEventTime;
+    private LocalDateTime kafkaLastBrokerAckTime;
+    private Long kafkaLagSeconds;
     private Long lastCheckSourceRows;
     private Long lastCheckTargetRows;
     private Long lastCheckDifference;

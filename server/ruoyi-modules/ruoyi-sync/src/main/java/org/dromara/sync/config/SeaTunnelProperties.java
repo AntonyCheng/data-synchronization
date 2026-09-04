@@ -5,6 +5,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 
 /** Runtime settings for the SeaTunnel job adapter. */
 @Data
@@ -33,9 +35,18 @@ public class SeaTunnelProperties {
     /** Default MySQL CDC source connection pool size. */
     private int sourceConnectionLimit = 2;
 
+    /** Addresses as seen from the SeaTunnel runtime rather than the platform process. */
+    private Map<String, String> connectionEndpointOverrides = new HashMap<>();
+
     /** Platform hard limits. Requests above these values are rejected. */
     private int maxReadLimitRowsPerSecond = 100000;
     private long maxReadLimitBytesPerSecond = 1024 * 1024 * 1024L;
     private int maxSnapshotParallelism = 4;
     private int maxSourceConnectionLimit = 8;
+
+    public String resolveEngineEndpoint(String host, Integer port) {
+        String endpoint = host + ':' + port;
+        String override = connectionEndpointOverrides.get(endpoint);
+        return override == null || override.isBlank() ? endpoint : override.trim();
+    }
 }

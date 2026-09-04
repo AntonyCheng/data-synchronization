@@ -35,7 +35,7 @@ final class SyncTaskGroupConfigGenerator {
         return SeaTunnelJobConfigGenerator.generate(toTask(group, item), source, target, properties);
     }
 
-    private static SyncTask toTask(SyncTaskGroup group, SyncTaskGroupItem item) {
+    static SyncTask toTask(SyncTaskGroup group, SyncTaskGroupItem item) {
         SyncTask task = new SyncTask();
         task.setTaskId(item.getItemId());
         task.setTaskName(group.getGroupName() + " / " + item.getSourceTable());
@@ -45,6 +45,7 @@ final class SyncTaskGroupConfigGenerator {
         task.setTargetSchema(item.getTargetSchema());
         task.setTargetTable(item.getTargetTable());
         task.setSyncMode(group.getSyncMode());
+        task.setConfigVersion(group.getConfigVersion());
         task.setDdlPolicy(item.getDdlPolicy());
         task.setSelectedColumns(item.getSelectedColumns());
         task.setSyncKeyColumns(item.getSyncKeyColumns());

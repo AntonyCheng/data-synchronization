@@ -11,10 +11,16 @@ import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceIndexVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
+import org.dromara.sync.domain.bo.KafkaTopicCreateBo;
+import org.dromara.sync.domain.vo.KafkaTopicVo;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.springframework.stereotype.Service;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.errors.TopicExistsException;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -32,6 +38,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /** JDBC-backed metadata and MySQL CDC prerequisite implementation. */
@@ -39,7 +47,7 @@ import java.util.stream.Collectors;
 @Service
 public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService {
 
-    private static final Set<String> SUPPORTED_TYPES = Set.of("MYSQL", "POSTGRESQL");
+    private static final Set<String> SUPPORTED_TYPES = Set.of("MYSQL", "POSTGRESQL", "KAFKA");
     private static final Set<String> MYSQL_CDC_VARIABLES = Set.of(
         "log_bin", "binlog_format", "binlog_row_image", "gtid_mode", "binlog_expire_logs_seconds",
         "binlog_expire_logs_days", "time_zone", "system_time_zone"
@@ -51,6 +59,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     @Override
     public List<String> queryDatabases(Long sourceId) {
         DataSource source = requireSource(sourceId);
+        if ("KAFKA".equals(source.getSourceType())) throw new ServiceException("Kafka 数据源没有关系型数据库元数据");
         try (Connection connection = openConnection(source, null)) {
             if ("MYSQL".equals(source.getSourceType())) {
                 List<String> databases = new ArrayList<>();
@@ -77,6 +86,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     @Override
     public List<String> queryTables(Long sourceId, String databaseName) {
         DataSource source = requireSource(sourceId);
+        if ("KAFKA".equals(source.getSourceType())) throw new ServiceException("Kafka 数据源没有关系型表元数据");
         String database = StringUtils.isBlank(databaseName) ? source.getDatabaseName() : databaseName.trim();
         try (Connection connection = openConnection(source, database)) {
             DatabaseMetaData metadata = connection.getMetaData();
@@ -104,6 +114,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     public DataSourceMetadataVo queryTableMetadata(Long sourceId, String databaseName, String schemaName, String tableName) {
         if (StringUtils.isBlank(tableName)) throw new ServiceException("表名不能为空");
         DataSource source = requireSource(sourceId);
+        if ("KAFKA".equals(source.getSourceType())) throw new ServiceException("Kafka 数据源没有关系型表元数据");
         String database = StringUtils.isBlank(databaseName) ? source.getDatabaseName() : databaseName.trim();
         String table = tableName.trim();
         try (Connection connection = openConnection(source, database)) {
@@ -159,13 +170,18 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     private TargetCompatibilityVo checkTargetCompatibility(SyncTask task) {
         DataSource source = requireSource(task.getSourceId());
         DataSource target = requireSource(task.getTargetId());
-        if (!"MYSQL".equals(source.getSourceType()) || !"POSTGRESQL".equals(target.getSourceType())) {
-            throw new ServiceException("MVP 目标兼容性检查仅支持 MySQL 到 PostgreSQL");
+        if ("MYSQL".equals(source.getSourceType()) && "KAFKA".equals(target.getSourceType())) {
+            return kafkaTargetCompatibility(task, source, target);
+        }
+        if (!"MYSQL".equals(source.getSourceType())
+            || (!"POSTGRESQL".equals(target.getSourceType()) && !"MYSQL".equals(target.getSourceType()))) {
+            throw new ServiceException("MVP 目标兼容性检查仅支持 MySQL 到 PostgreSQL 或 MySQL");
         }
         TargetCompatibilityVo result = new TargetCompatibilityVo();
         result.setTaskId(task.getTaskId());
         result.setSourceTable(task.getSourceTable());
-        String targetTable = qualifiedTargetName(task.getTargetSchema(), task.getTargetTable());
+        String targetTable = "MYSQL".equalsIgnoreCase(target.getSourceType())
+            ? task.getTargetTable() : qualifiedTargetName(task.getTargetSchema(), task.getTargetTable());
         result.setTargetTable(targetTable);
         DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), source.getDatabaseName(), null, task.getSourceTable());
         SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(sourceMetadata,
@@ -198,7 +214,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         result.getChecks().add(new DataSourceCheckItemVo("missing_columns", "源字段缺失", true, missing.isEmpty(),
             missing.isEmpty() ? "无" : String.join(", ", missing), missing.isEmpty() ? "源字段均存在" : "目标表缺少源字段"));
         List<String> incompatible = sourceColumns.entrySet().stream().filter(entry -> targetColumns.containsKey(entry.getKey())
-            && !compatible(entry.getValue(), targetColumns.get(entry.getKey()))).map(entry -> entry.getValue().getName()).toList();
+            && !compatible(entry.getValue(), targetColumns.get(entry.getKey()), target.getSourceType())).map(entry -> entry.getValue().getName()).toList();
         result.getChecks().add(new DataSourceCheckItemVo("incompatible_columns", "字段类型", true, incompatible.isEmpty(),
             incompatible.isEmpty() ? "兼容" : String.join(", ", incompatible), incompatible.isEmpty() ? "字段类型兼容" : "存在可能丢失精度或无法写入的类型"));
         boolean keysMatch = syncKeys.isEmpty() || sameColumns(syncKeys, targetMetadata.getPrimaryKeys());
@@ -221,9 +237,135 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         return result;
     }
 
+    private TargetCompatibilityVo kafkaTargetCompatibility(SyncTask task, DataSource source, DataSource target) {
+        TargetCompatibilityVo result = new TargetCompatibilityVo();
+        result.setTaskId(task.getTaskId());
+        result.setSourceTable(task.getSourceTable());
+        result.setTargetTable(task.getTargetTable());
+        DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), source.getDatabaseName(), null, task.getSourceTable());
+        SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(sourceMetadata,
+            task.getSelectedColumns(), task.getSyncKeyColumns());
+        boolean topicPresent = StringUtils.isNotBlank(task.getTargetTable());
+        boolean keysPresent = !selection.syncKeyColumns().isEmpty();
+        boolean topicVisible = false;
+        int partitionCount = 0;
+        String topicDetail = topicPresent ? task.getTargetTable() : "未填写";
+        if (topicPresent) {
+            try (AdminClient admin = AdminClient.create(kafkaAdminProperties(target))) {
+                var descriptions = admin.describeTopics(List.of(task.getTargetTable())).allTopicNames()
+                    .get(10, TimeUnit.SECONDS);
+                var description = descriptions.get(task.getTargetTable());
+                if (description != null) {
+                    topicVisible = true;
+                    partitionCount = description.partitions().size();
+                    topicDetail = task.getTargetTable() + "（" + partitionCount + " 个分区）";
+                }
+            } catch (Exception ex) {
+                topicDetail = task.getTargetTable() + "（不可见或无权限）";
+            }
+        }
+        result.getChecks().add(new DataSourceCheckItemVo("kafka_topic", "目标 topic", true, topicVisible,
+            topicDetail, "请选择当前凭证可见的 topic，或在任务向导中先创建新 topic"));
+        result.getChecks().add(new DataSourceCheckItemVo("kafka_partitions", "topic 分区", true,
+            topicVisible && partitionCount > 0, topicVisible ? Integer.toString(partitionCount) : "未读取",
+            "至少需要一个可用分区；同一同步键将稳定路由到同一分区"));
+        result.getChecks().add(new DataSourceCheckItemVo("partition_key", "分区同步键", true, keysPresent,
+            keysPresent ? String.join(", ", selection.syncKeyColumns()) : "无", "同一同步键将稳定路由到同一分区"));
+        result.setTargetExists(topicVisible);
+        result.setPassed(topicVisible && partitionCount > 0 && keysPresent);
+        result.setMessage(result.isPassed() ? "Kafka topic、分区与可靠分区键检查通过，启动时将确认生产 ACL"
+            : "Kafka 任务需要可见的目标 topic、至少一个分区和可靠同步键");
+        return result;
+    }
+
+    @Override
+    public List<KafkaTopicVo> listKafkaTopics(Long sourceId) {
+        DataSource source = requireSource(sourceId);
+        requireKafka(source);
+        try (AdminClient admin = AdminClient.create(kafkaAdminProperties(source))) {
+            List<String> names = new ArrayList<>(admin.listTopics().names().get(10, TimeUnit.SECONDS).stream()
+                .filter(name -> !name.startsWith("__ds_raw_"))
+                .toList());
+            names.sort(String::compareTo);
+            Map<String, org.apache.kafka.clients.admin.TopicDescription> descriptions = admin.describeTopics(names)
+                .allTopicNames().get(10, TimeUnit.SECONDS);
+            List<KafkaTopicVo> result = new ArrayList<>();
+            for (String name : names) {
+                var description = descriptions.get(name);
+                if (description == null || description.partitions().isEmpty()) continue;
+                KafkaTopicVo topic = new KafkaTopicVo();
+                topic.setTopic(name);
+                topic.setPartitions(description.partitions().size());
+                topic.setReplicationFactor((short) description.partitions().getFirst().replicas().size());
+                result.add(topic);
+            }
+            return result;
+        } catch (Exception ex) {
+            throw new ServiceException("读取 Kafka topic 列表失败：" + metadataMessage(ex));
+        }
+    }
+
+    @Override
+    public KafkaTopicVo createKafkaTopic(Long sourceId, KafkaTopicCreateBo bo) {
+        DataSource source = requireSource(sourceId);
+        requireKafka(source);
+        String topicName = bo.getTopic().trim();
+        if (!topicName.matches("[A-Za-z0-9._-]{1,249}")) {
+            throw new ServiceException("topic 名称只能包含字母、数字、点、下划线和连字符，长度不超过 249");
+        }
+        int partitions = bo.getPartitions() == null ? 1 : bo.getPartitions();
+        short replicationFactor = bo.getReplicationFactor() == null ? 1 : bo.getReplicationFactor();
+        if (partitions < 1 || partitions > 1000) throw new ServiceException("分区数必须在 1 到 1000 之间");
+        if (replicationFactor < 1 || replicationFactor > 100) throw new ServiceException("副本数必须在 1 到 100 之间");
+        try (AdminClient admin = AdminClient.create(kafkaAdminProperties(source))) {
+            if (admin.listTopics().names().get(10, TimeUnit.SECONDS).contains(topicName)) {
+                throw new ServiceException("Kafka topic 已存在，请选择已有 topic 或更换名称");
+            }
+            admin.createTopics(List.of(new NewTopic(topicName, partitions, replicationFactor)))
+                .all().get(10, TimeUnit.SECONDS);
+            var description = admin.describeTopics(List.of(topicName)).allTopicNames()
+                .get(10, TimeUnit.SECONDS).get(topicName);
+            if (description == null) throw new ServiceException("Kafka topic 创建后无法读取详情");
+            KafkaTopicVo result = new KafkaTopicVo();
+            result.setTopic(topicName);
+            result.setPartitions(description.partitions().size());
+            result.setReplicationFactor((short) description.partitions().getFirst().replicas().size());
+            return result;
+        } catch (ServiceException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            if (ex.getCause() instanceof TopicExistsException) {
+                throw new ServiceException("Kafka topic 已存在，请选择已有 topic 或更换名称");
+            }
+            throw new ServiceException("创建 Kafka topic 失败：" + metadataMessage(ex));
+        }
+    }
+
+    private static void requireKafka(DataSource source) {
+        if (!"KAFKA".equalsIgnoreCase(source.getSourceType())) {
+            throw new ServiceException("该数据源不是 Kafka");
+        }
+    }
+
+    private static String metadataMessage(Exception ex) {
+        String message = ex.getMessage();
+        return message == null || message.isBlank() ? ex.getClass().getSimpleName() : message;
+    }
+
+    private static Properties kafkaAdminProperties(DataSource source) {
+        Properties properties = new Properties();
+        properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, source.getHost() + ':' + source.getPort());
+        properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
+        properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 10000);
+        return properties;
+    }
+
     private boolean tableExists(DataSource source, String schema, String table) {
         try (Connection connection = openConnection(source, source.getDatabaseName());
-             ResultSet resultSet = connection.getMetaData().getTables(null, schema, table, new String[]{"TABLE"})) {
+             ResultSet resultSet = connection.getMetaData().getTables(
+                 "MYSQL".equalsIgnoreCase(source.getSourceType()) ? source.getDatabaseName() : null,
+                 "MYSQL".equalsIgnoreCase(source.getSourceType()) ? null : schema,
+                 table, new String[]{"TABLE"})) {
             return resultSet.next();
         } catch (SQLException ex) {
             throw metadataFailure("检查目标表失败", ex);
@@ -246,13 +388,14 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         return true;
     }
 
-    private boolean compatible(DataSourceColumnVo source, DataSourceColumnVo target) {
+    private boolean compatible(DataSourceColumnVo source, DataSourceColumnVo target, String targetSourceType) {
         String sourceTypeName = source.getTypeName() == null ? "" : source.getTypeName().toLowerCase(Locale.ROOT);
         String targetTypeName = target.getTypeName() == null ? "" : target.getTypeName().toLowerCase(Locale.ROOT);
         // SeaTunnel JDBC binds MySQL JSON as a string. PostgreSQL json/jsonb columns
         // require an explicit cast, which the MVP generator does not emit; text
         // columns preserve the JSON payload without relying on an implicit cast.
-        if ("json".equals(sourceTypeName)
+        if ("POSTGRESQL".equalsIgnoreCase(targetSourceType)
+            && "json".equals(sourceTypeName)
             && Set.of("json", "jsonb").contains(targetTypeName)) return false;
         boolean sourceBoolean = (Integer.valueOf(java.sql.Types.BIT).equals(source.getJdbcType())
             && Integer.valueOf(1).equals(source.getSize()))

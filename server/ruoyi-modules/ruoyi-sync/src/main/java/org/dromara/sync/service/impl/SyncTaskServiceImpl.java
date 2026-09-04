@@ -102,8 +102,10 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     public Boolean deleteById(Long taskId) {
         SyncTask current = syncTaskMapper.selectById(taskId);
         if (current == null) return false;
-        if (!DRAFT.equals(current.getStatus()) && !"STOPPED".equals(current.getStatus())
-            && !"FAILED".equals(current.getStatus()) && !"REINITIALIZE_REQUIRED".equals(current.getStatus())) {
+        String status = StringUtils.defaultIfBlank(current.getStatus(), "").trim().toUpperCase(java.util.Locale.ROOT);
+        if (!DRAFT.equals(status) && !"STOPPED".equals(status)
+            && !"FAILED".equals(status) && !"FINISHED".equals(status)
+            && !"REINITIALIZE_REQUIRED".equals(status)) {
             throw new ServiceException("运行中的任务不能删除");
         }
         boolean deleted = syncTaskMapper.deleteById(taskId) > 0;
@@ -151,21 +153,28 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         DataSource target = dataSourceMapper.selectById(entity.getTargetId());
         if (source == null || target == null) throw new ServiceException("源端或目标端数据源不存在");
         if (!"MYSQL".equalsIgnoreCase(source.getSourceType())) throw new ServiceException("MVP 源端必须是 MySQL");
-        if (!"POSTGRESQL".equalsIgnoreCase(target.getSourceType())) throw new ServiceException("MVP 目标端必须是 PostgreSQL");
-        if (StringUtils.isBlank(entity.getTargetSchema())) entity.setTargetSchema("public");
+        if (!java.util.Set.of("POSTGRESQL", "MYSQL", "KAFKA").contains(StringUtils.defaultIfBlank(target.getSourceType(), "").toUpperCase())) {
+            throw new ServiceException("当前任务目标端必须是 PostgreSQL、MySQL 或 Kafka");
+        }
+        if ("POSTGRESQL".equalsIgnoreCase(target.getSourceType()) && StringUtils.isBlank(entity.getTargetSchema())) entity.setTargetSchema("public");
+        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) entity.setTargetSchema(null);
         if (StringUtils.isBlank(entity.getSyncMode())) entity.setSyncMode("FULL_CDC");
         if (!java.util.Set.of("FULL", "INCREMENTAL", "FULL_CDC").contains(entity.getSyncMode().toUpperCase())) {
             throw new ServiceException("不支持的同步模式：" + entity.getSyncMode());
         }
-        if (StringUtils.isBlank(entity.getFullDataMode())) entity.setFullDataMode("UPSERT");
-        if (!java.util.Set.of("UPSERT", "OVERWRITE").contains(entity.getFullDataMode().toUpperCase())) {
-            throw new ServiceException("不支持的全量目标数据模式：" + entity.getFullDataMode());
-        }
-        if ("INCREMENTAL".equalsIgnoreCase(entity.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) {
-            throw new ServiceException("纯增量任务不能使用覆盖刷新模式");
-        }
-        if ("FULL_CDC".equalsIgnoreCase(entity.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) {
-            throw new ServiceException("全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 仅支持全量任务使用原子覆盖；请改用合并（upsert）或创建纯全量任务");
+        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
+            entity.setFullDataMode(null);
+        } else {
+            if (StringUtils.isBlank(entity.getFullDataMode())) entity.setFullDataMode("UPSERT");
+            if (!java.util.Set.of("UPSERT", "OVERWRITE").contains(entity.getFullDataMode().toUpperCase())) {
+                throw new ServiceException("不支持的全量目标数据模式：" + entity.getFullDataMode());
+            }
+            if ("INCREMENTAL".equalsIgnoreCase(entity.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) {
+                throw new ServiceException("纯增量任务不能使用覆盖刷新模式");
+            }
+            if ("FULL_CDC".equalsIgnoreCase(entity.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) {
+                throw new ServiceException("全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 仅支持全量任务使用原子覆盖；请改用合并（upsert）或创建纯全量任务");
+            }
         }
         normalizeIncrementalStartup(entity);
         if (StringUtils.isBlank(entity.getDdlPolicy())) entity.setDdlPolicy("FAIL");
@@ -175,7 +184,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
             entity.getSelectedColumns(), entity.getSyncKeyColumns());
         entity.setSelectedColumns(SyncColumnSelectionValidator.serialize(selection.selectedColumns()));
         entity.setSyncKeyColumns(SyncColumnSelectionValidator.serialize(selection.syncKeyColumns()));
-        if (!"FULL".equalsIgnoreCase(entity.getSyncMode()) && selection.syncKeyColumns().isEmpty()) {
+        if (("KAFKA".equalsIgnoreCase(target.getSourceType()) || !"FULL".equalsIgnoreCase(entity.getSyncMode())) && selection.syncKeyColumns().isEmpty()) {
             throw new ServiceException("源表没有可靠同步键，只能创建全量任务");
         }
         resourceProtectionPolicy.applyDefaultsAndValidate(entity);

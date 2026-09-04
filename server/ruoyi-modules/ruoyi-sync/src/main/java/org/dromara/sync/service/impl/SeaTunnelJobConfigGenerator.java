@@ -18,8 +18,9 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
-/** Generates the narrow HOCON shape used by the MySQL CDC -> PostgreSQL POC. */
+/** Generates the MVP HOCON shape for MySQL -> PostgreSQL/MySQL/Kafka tasks. */
 final class SeaTunnelJobConfigGenerator {
 
     private SeaTunnelJobConfigGenerator() {
@@ -28,7 +29,9 @@ final class SeaTunnelJobConfigGenerator {
     static GeneratedConfig generate(SyncTask task, DataSource source, DataSource target,
                                     SeaTunnelProperties properties) {
         requireType(source, "MYSQL", "源");
-        requireType(target, "POSTGRESQL", "目标");
+        if (!Set.of("POSTGRESQL", "MYSQL", "KAFKA").contains(defaultValue(target.getSourceType(), "").toUpperCase())) {
+            throw new ServiceException("目标数据源必须是 PostgreSQL、MySQL 或 Kafka");
+        }
         String syncMode = defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase();
         if (!List.of("FULL", "INCREMENTAL", "FULL_CDC").contains(syncMode)) {
             throw new ServiceException("不支持的同步模式：" + syncMode);
@@ -39,18 +42,24 @@ final class SeaTunnelJobConfigGenerator {
 
         List<String> primaryKeys = resolveSyncKeys(source, task);
         List<String> selectedColumns = resolveSelectedColumns(source, task);
-        if (primaryKeys.isEmpty() && (!"FULL".equals(syncMode) || "UPSERT".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT")))) {
+        if (primaryKeys.isEmpty() && !"FULL".equals(syncMode)) {
             throw new ServiceException("源表没有主键，无法生成可恢复的 CDC 任务");
         }
 
         String sourceTable = qualifiedSourceTable(source.getDatabaseName(), task.getSourceTable());
         String configuredTargetTable = overwriteTargetTable(task, syncMode);
-        String targetTable = qualifiedTargetTable(defaultValue(task.getTargetSchema(), "public"), configuredTargetTable);
+        String targetTable = "KAFKA".equalsIgnoreCase(target.getSourceType()) || "MYSQL".equalsIgnoreCase(target.getSourceType())
+            ? configuredTargetTable : qualifiedTargetTable(defaultValue(task.getTargetSchema(), "public"), configuredTargetTable);
         String jobName = "ds-task-" + task.getTaskId();
         int serverId = stableServerId(task.getTaskId());
-        String config = "FULL".equals(syncMode)
-            ? buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties)
-            : buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, serverId, syncMode, properties);
+        String config;
+        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
+            config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, properties);
+        } else {
+            config = "FULL".equals(syncMode)
+                ? buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties)
+                : buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, serverId, syncMode, properties);
+        }
         return new GeneratedConfig(jobName, sourceTable, targetTable, primaryKeys, config, redact(config));
     }
 
@@ -76,8 +85,8 @@ final class SeaTunnelJobConfigGenerator {
                                       List<String> selectedColumns,
                                       int serverId, String syncMode, SeaTunnelProperties properties) {
         String sourceDatabase = quote(source.getDatabaseName());
-        String sourceJdbc = quote(mysqlJdbcUrl(source));
-        String targetJdbc = quote(postgresJdbcUrl(target));
+        String sourceJdbc = quote(engineMysqlJdbcUrl(source, properties));
+        String targetJdbc = quote(engineTargetJdbcUrl(target, properties));
         int snapshotParallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
         int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
         long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
@@ -107,7 +116,7 @@ final class SeaTunnelJobConfigGenerator {
             .append("    plugin_output = ").append(quote(sourceOutput)).append("\n")
             .append("  }\n}\n\nsink {\n  Jdbc {\n")
             .append("    url = ").append(targetJdbc).append('\n')
-            .append("    driver = \"org.postgresql.Driver\"\n")
+            .append("    driver = \"").append(targetDriver(target)).append("\"\n")
             .append("    username = ").append(quote(target.getUsername())).append('\n')
             .append("    password = ").append(quote(target.getPassword())).append('\n')
             .append("    database = ").append(quote(target.getDatabaseName())).append('\n')
@@ -122,6 +131,76 @@ final class SeaTunnelJobConfigGenerator {
             .append("    plugin_input = ").append(stringList(List.of(projectedOutput))).append("\n")
             .append("  }\n}\n");
         return insertProjection(builder.toString(), sourceOutput, projectedOutput, selectedColumns);
+    }
+
+    private static String buildKafkaConfig(SyncTask task, DataSource source, DataSource target,
+                                           String sourceTable, List<String> primaryKeys,
+                                           SeaTunnelProperties properties) {
+        String mode = defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase();
+        if (primaryKeys.isEmpty()) throw new ServiceException("Kafka 任务必须配置可靠同步键");
+        if ("FULL".equals(mode)) return buildKafkaFullConfig(task, source, target, sourceTable, primaryKeys, properties);
+        if (!List.of("FULL_CDC", "INCREMENTAL").contains(mode)) throw new ServiceException("不支持的 Kafka 同步模式：" + mode);
+        String rawTopic = KafkaTaskBridgeService.rawTopic(task);
+        int parallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
+        int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
+        long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
+        StringBuilder builder = new StringBuilder(1600);
+        builder.append("env {\n")
+            .append("  job.mode = \"STREAMING\"\n")
+            .append("  parallelism = ").append(parallelism).append("\n")
+            .append("  checkpoint.interval = ").append(Math.max(1000, properties.getCheckpointIntervalMs())).append("\n")
+            .append("  checkpoint.timeout = 60000\n")
+            .append("  read_limit.rows_per_second = ").append(rowsPerSecond).append("\n")
+            .append("  read_limit.bytes_per_second = ").append(bytesPerSecond).append("\n")
+            .append("}\n\nsource {\n  MySQL-CDC {\n")
+            .append("    url = ").append(quote(engineMysqlJdbcUrl(source, properties))).append('\n')
+            .append("    username = ").append(quote(source.getUsername())).append('\n')
+            .append("    password = ").append(quote(source.getPassword())).append('\n')
+            .append("    database-names = [").append(quote(source.getDatabaseName())).append("]\n")
+            .append("    table-names = [").append(quote(sourceTable)).append("]\n")
+            .append("    server-id = \"").append(stableServerId(task.getTaskId())).append('-').append(stableServerId(task.getTaskId()) + 3).append("\"\n")
+            .append("    server-time-zone = \"Asia/Shanghai\"\n")
+            .append(startupOptions(task, defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase()))
+            .append("    exactly_once = false\n")
+            .append("    schema-changes.enabled = false\n")
+            .append("  }\n}\n\nsink {\n  Kafka {\n")
+            .append("    topic = ").append(quote(rawTopic)).append('\n')
+            .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
+            .append("    format = \"DEBEZIUM_JSON\"\n")
+            .append("    partition_key_fields = ").append(stringList(primaryKeys)).append('\n')
+            .append("    semantics = \"AT_LEAST_ONCE\"\n")
+            .append("    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n")
+            .append("  }\n}\n");
+        return builder.toString();
+    }
+
+    private static String buildKafkaFullConfig(SyncTask task, DataSource source, DataSource target,
+                                               String sourceTable, List<String> primaryKeys,
+                                               SeaTunnelProperties properties) {
+        String rawTopic = KafkaTaskBridgeService.rawTopic(task);
+        int parallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
+        int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
+        long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
+        List<String> selected = resolveSelectedColumns(source, task);
+        return "env {\n"
+            + "  job.mode = \"BATCH\"\n"
+            + "  parallelism = " + parallelism + "\n"
+            + "  read_limit.rows_per_second = " + rowsPerSecond + "\n"
+            + "  read_limit.bytes_per_second = " + bytesPerSecond + "\n"
+            + "}\n\nsource {\n  Jdbc {\n"
+            + "    url = " + quote(engineMysqlJdbcUrl(source, properties)) + "\n"
+            + "    driver = \"com.mysql.cj.jdbc.Driver\"\n"
+            + "    user = " + quote(source.getUsername()) + "\n"
+            + "    password = " + quote(source.getPassword()) + "\n"
+            + "    query = " + quote("SELECT " + selectColumns(selected) + " FROM " + sourceTable) + "\n"
+            + "    result_table_name = \"source_table\"\n"
+            + "  }\n}\n\nsink {\n  Kafka {\n"
+            + "    topic = " + quote(rawTopic) + "\n"
+            + "    bootstrap.servers = " + quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort())) + "\n"
+            + "    format = \"JSON\"\n"
+            + "    semantics = \"AT_LEAST_ONCE\"\n"
+            + "    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n"
+            + "  }\n}\n";
     }
 
     private static String startupOptions(SyncTask task, String syncMode) {
@@ -152,8 +231,8 @@ final class SeaTunnelJobConfigGenerator {
                                            String sourceTable, String targetTable, List<String> primaryKeys,
                                            List<String> selectedColumns,
                                            SeaTunnelProperties properties) {
-        String sourceJdbc = quote(mysqlJdbcUrl(source));
-        String targetJdbc = quote(postgresJdbcUrl(target));
+        String sourceJdbc = quote(engineMysqlJdbcUrl(source, properties));
+        String targetJdbc = quote(engineTargetJdbcUrl(target, properties));
         String targetMode = "OVERWRITE".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT"))
             ? "DROP_DATA" : "APPEND_DATA";
         int snapshotParallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
@@ -174,7 +253,7 @@ final class SeaTunnelJobConfigGenerator {
             .append("    result_table_name = \"source_table\"\n")
             .append("  }\n}\n\nsink {\n  Jdbc {\n")
             .append("    url = ").append(targetJdbc).append('\n')
-            .append("    driver = \"org.postgresql.Driver\"\n")
+            .append("    driver = \"").append(targetDriver(target)).append("\"\n")
             .append("    username = ").append(quote(target.getUsername())).append('\n')
             .append("    password = ").append(quote(target.getPassword())).append('\n')
             .append("    database = ").append(quote(target.getDatabaseName())).append('\n')
@@ -267,6 +346,26 @@ final class SeaTunnelJobConfigGenerator {
     private static String postgresJdbcUrl(DataSource source) {
         return "jdbc:postgresql://" + source.getHost() + ':' + source.getPort() + '/' + source.getDatabaseName()
             + "?connectTimeout=5&socketTimeout=5&ssl=" + ("1".equals(source.getSslEnabled()));
+    }
+
+    private static String engineTargetJdbcUrl(DataSource target, SeaTunnelProperties properties) {
+        return "MYSQL".equalsIgnoreCase(target.getSourceType())
+            ? engineMysqlJdbcUrl(target, properties) : enginePostgresJdbcUrl(target, properties);
+    }
+
+    private static String engineMysqlJdbcUrl(DataSource source, SeaTunnelProperties properties) {
+        return "jdbc:mysql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
+            + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
+            + "&allowPublicKeyRetrieval=true&serverTimezone=Asia%2FShanghai";
+    }
+
+    private static String enginePostgresJdbcUrl(DataSource source, SeaTunnelProperties properties) {
+        return "jdbc:postgresql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
+            + "?connectTimeout=5&socketTimeout=5&ssl=" + ("1".equals(source.getSslEnabled()));
+    }
+
+    private static String targetDriver(DataSource target) {
+        return "MYSQL".equalsIgnoreCase(target.getSourceType()) ? "com.mysql.cj.jdbc.Driver" : "org.postgresql.Driver";
     }
 
     private static String qualifiedSourceTable(String database, String table) {

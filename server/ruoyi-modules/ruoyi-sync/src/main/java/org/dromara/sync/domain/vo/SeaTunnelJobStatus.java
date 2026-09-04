@@ -21,6 +21,12 @@ public class SeaTunnelJobStatus implements Serializable {
     private String lastCheckpointId;
     private LocalDateTime lastCheckpointTime;
     private String lastCheckpointStatus;
+    private Long kafkaPublishedCount;
+    private Integer kafkaLastPartition;
+    private Long kafkaLastOffset;
+    private LocalDateTime kafkaLastSourceEventTime;
+    private LocalDateTime kafkaLastBrokerAckTime;
+    private Long kafkaLagSeconds;
     private String phase;
     private Long sourceReceivedCount;
     private Long sinkCommittedCount;

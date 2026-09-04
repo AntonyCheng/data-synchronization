@@ -72,7 +72,10 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
                                           String targetSchema, String targetTableName, SyncTask task,
                                           SyncTaskDataCheckRequest request) {
         String sourceTable = qualifiedSourceTable(sourceDatabase, sourceTableName);
-        String targetTable = qualifiedTargetTable(StringUtils.isBlank(targetSchema) ? "public" : targetSchema, targetTableName);
+        boolean targetPostgres = "POSTGRESQL".equalsIgnoreCase(target.getSourceType());
+        String targetTable = targetPostgres
+            ? qualifiedTargetTable(StringUtils.isBlank(targetSchema) ? "public" : targetSchema, targetTableName)
+            : qualifiedMysqlTargetTable(target.getDatabaseName(), targetTableName);
         SyncTaskDataCheckResult result = new SyncTaskDataCheckResult();
         result.setSourceTable(sourceTable);
         result.setTargetTable(targetTable);
@@ -90,10 +93,10 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
         }
         try {
             if ("KEY_RANGE".equals(mode)) {
-                return checkByKeyRange(source, target, sourceTable, targetTable, task, blockSize, result);
+                return checkByKeyRange(source, target, sourceTable, targetTable, targetPostgres, task, blockSize, result);
             }
             long sourceRows = count(source, sourceTable, false);
-            long targetRows = count(target, targetTable, true);
+            long targetRows = count(target, targetTable, targetPostgres);
             result.setSourceRows(sourceRows);
             result.setTargetRows(targetRows);
             result.setDifference(sourceRows - targetRows);
@@ -109,7 +112,7 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
     }
 
     private SyncTaskDataCheckResult checkByKeyRange(DataSource source, DataSource target, String sourceTable,
-                                                    String targetTable, SyncTask task, int blockSize,
+                                                    String targetTable, boolean targetPostgres, SyncTask task, int blockSize,
                                                     SyncTaskDataCheckResult result) throws SQLException {
         if (task == null || StringUtils.isBlank(task.getSyncKeyColumns())) {
             result.setSuccess(false);
@@ -138,7 +141,7 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
         Range range = readRange(source, sourceTable, keyColumn);
         result.setSourceRows(range.count());
         if (range.count() == 0) {
-            result.setTargetRows(count(target, targetTable, true));
+            result.setTargetRows(count(target, targetTable, targetPostgres));
             result.setDifference(result.getSourceRows() - result.getTargetRows());
             result.setMatched(result.getDifference() == 0);
             result.setSuccess(true);
@@ -160,7 +163,7 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
             block.setLowerBound(lower.toPlainString());
             block.setUpperBound(upper.toPlainString());
             long sourceRows = countRange(source, sourceTable, keyColumn, lower, upper, false);
-            long targetRows = countRange(target, targetTable, quoteIdentifier(key.getName(), true), lower, upper, true);
+            long targetRows = countRange(target, targetTable, quoteIdentifier(key.getName(), targetPostgres), lower, upper, targetPostgres);
             block.setSourceRows(sourceRows);
             block.setTargetRows(targetRows);
             block.setDifference(sourceRows - targetRows);
@@ -268,6 +271,13 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
     private static String qualifiedTargetTable(String schema, String table) {
         String value = StringUtils.isBlank(table) ? "" : table.trim();
         if (value.indexOf('.') < 0) value = schema + '.' + value;
+        validateIdentifier(value, "目标表名");
+        return value;
+    }
+
+    private static String qualifiedMysqlTargetTable(String database, String table) {
+        String value = StringUtils.isBlank(table) ? "" : table.trim();
+        if (value.indexOf('.') < 0) value = database + '.' + value;
         validateIdentifier(value, "目标表名");
         return value;
     }

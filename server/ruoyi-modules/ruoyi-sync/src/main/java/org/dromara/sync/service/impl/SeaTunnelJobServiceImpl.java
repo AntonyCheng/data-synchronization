@@ -45,6 +45,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private final ISyncTaskService syncTaskService;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final RedissonClient redissonClient;
+    private final KafkaTaskBridgeService kafkaTaskBridgeService;
 
     @Override
     public SeaTunnelJobConfigPreview previewConfig(Long taskId) {
@@ -72,6 +73,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         RLock lock = redissonClient.getLock("sync:task:start:" + taskId);
         boolean acquired = false;
         boolean submissionStarted = false;
+        boolean kafkaBridgeStarted = false;
         try {
             acquired = lock.tryLock(0, 60, TimeUnit.SECONDS);
             if (!acquired) throw new ServiceException("任务正在提交运行实例，请勿重复启动");
@@ -82,6 +84,11 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             var validation = syncTaskService.validate(taskId);
             if (!validation.isValid()) throw new ServiceException("启动前校验未通过：" + validation.getMessage());
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
+            if (isKafkaTask(task)) {
+                kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
+                    requireSource(task.getSourceId(), "源").getDatabaseName());
+                kafkaBridgeStarted = true;
+            }
             submissionStarted = true;
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
             task.setEngineJobId(submitted.jobId());
@@ -91,10 +98,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             syncTaskMapper.updateById(task);
             return operation(task, "作业已提交");
         } catch (ServiceException ex) {
+            if (kafkaBridgeStarted) kafkaTaskBridgeService.stop(taskId);
             SyncTask task = syncTaskMapper.selectById(taskId);
             if (submissionStarted && task != null) markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw ex;
         } catch (Exception ex) {
+            if (kafkaBridgeStarted) kafkaTaskBridgeService.stop(taskId);
             SyncTask task = syncTaskMapper.selectById(taskId);
             if (submissionStarted && task != null) markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw new ServiceException("启动同步任务失败：" + safeMessage(ex));
@@ -112,6 +121,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         try {
             snapshot = restClient.status(jobId);
         } catch (ServiceException ex) {
+            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
             if (isRecoveryBoundaryError(ex.getMessage())) {
                 return markReinitializeRequired(task, jobId, ex.getMessage());
             }
@@ -127,6 +137,9 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             checkpointError = ex.getMessage();
         }
         String platformStatus = mapStatus(snapshot.status());
+        if (isKafkaTask(task) && Set.of("STOPPED", "FAILED", "FINISHED").contains(platformStatus)) {
+            kafkaTaskBridgeService.stop(taskId);
+        }
         if ("FAILED".equals(platformStatus) && isRecoveryBoundaryError(snapshot.errorMessage())) {
             return markReinitializeRequired(task, jobId, snapshot.errorMessage());
         }
@@ -159,6 +172,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         result.setLastCheckpointId(task.getLastCheckpointId());
         result.setLastCheckpointTime(task.getLastCheckpointTime());
         result.setLastCheckpointStatus(task.getLastCheckpointStatus());
+        result.setKafkaPublishedCount(task.getKafkaPublishedCount());
+        result.setKafkaLastPartition(task.getKafkaLastPartition());
+        result.setKafkaLastOffset(task.getKafkaLastOffset());
+        result.setKafkaLastSourceEventTime(task.getKafkaLastSourceEventTime());
+        result.setKafkaLastBrokerAckTime(task.getKafkaLastBrokerAckTime());
+        result.setKafkaLagSeconds(task.getKafkaLagSeconds());
         applyMetrics(result, snapshot);
         return result;
     }
@@ -201,6 +220,8 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         syncTaskMapper.selectList(new LambdaQueryWrapper<SyncTask>().in(SyncTask::getStatus, "RUNNING", "PAUSING"))
             .forEach(task -> {
                 try {
+                    if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
+                        requireSource(task.getSourceId(), "源").getDatabaseName());
                     refreshStatus(task.getTaskId());
                 } catch (Exception ex) {
                     markFailed(task, task.getEngineJobId(), ex.getMessage());
@@ -216,6 +237,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             throw new ServiceException("只有运行中的任务可以暂停");
         }
         restClient.stop(jobId, true, false);
+        if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
         task.setStatus("PAUSING");
         task.setLastError("");
         syncTaskMapper.updateById(task);
@@ -239,6 +261,8 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (checkpoint.id() == null) {
                 throw new ServiceException("任务没有可用的 checkpoint/savepoint，不能从未知位点恢复，请重新初始化");
             }
+            if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
+                requireSource(task.getSourceId(), "源").getDatabaseName());
             restClient.submit(generated.jobName(), generated.config(), jobId, true);
             task.setStatus("RUNNING");
             task.setLastError("");
@@ -252,6 +276,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             markFailed(task, jobId, ex.getMessage());
             throw ex;
         } catch (Exception ex) {
+            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, jobId, ex.getMessage());
             throw new ServiceException("恢复同步任务失败：" + safeMessage(ex));
         }
@@ -265,6 +290,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             throw new ServiceException("任务当前未运行");
         }
         restClient.stop(jobId, false, false);
+        if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
         task.setStatus("STOPPED");
         task.setLastError("");
         syncTaskMapper.updateById(task);
@@ -295,6 +321,8 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
                 throw new ServiceException("重新初始化前校验未通过：" + validation.getMessage());
             }
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
+            if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
+                requireSource(task.getSourceId(), "源").getDatabaseName());
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
             task.setEngineJobId(submitted.jobId());
             task.setEngineConfigHash(hash(generated.config()));
@@ -306,9 +334,11 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             syncTaskMapper.updateById(task);
             return operation(task, "已丢弃旧恢复状态并重新启动全量初始化");
         } catch (ServiceException ex) {
+            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw ex;
         } catch (Exception ex) {
+            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw new ServiceException("重新初始化任务失败：" + safeMessage(ex));
         }
@@ -318,6 +348,11 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         DataSource source = requireSource(task.getSourceId(), "源");
         DataSource target = requireSource(task.getTargetId(), "目标");
         return SeaTunnelJobConfigGenerator.generate(task, source, target, properties);
+    }
+
+    private boolean isKafkaTask(SyncTask task) {
+        DataSource target = task == null ? null : dataSourceMapper.selectById(task.getTargetId());
+        return target != null && "KAFKA".equalsIgnoreCase(target.getSourceType());
     }
 
     private void prepareResourceProtection(SyncTask task) {
