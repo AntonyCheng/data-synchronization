@@ -7,6 +7,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.node.ObjectNode;
@@ -18,14 +19,25 @@ import java.util.Properties;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-/** Publishes only normalized PRD events to Kafka with stable key partitioning. */
+/**
+ * Publishes only normalized PRD events to Kafka with stable key partitioning.
+ * One {@link KafkaProducer} is kept alive per bootstrap-servers string and reused
+ * across publish calls (KafkaProducer is thread-safe and is designed to be shared -
+ * creating a new one per batch would pay the full connection/metadata-fetch cost on
+ * every poll cycle of every running Kafka task, which is the dominant cost at any
+ * real throughput).
+ */
 @Component
 public class KafkaEventProducer {
 
     private final JsonMapper jsonMapper;
     private final SyncTaskMapper syncTaskMapper;
+    private final ConcurrentMap<String, KafkaProducer<String, String>> producers = new ConcurrentHashMap<>();
 
     @Autowired
     public KafkaEventProducer(JsonMapper jsonMapper, SyncTaskMapper syncTaskMapper) {
@@ -80,6 +92,35 @@ public class KafkaEventProducer {
         if (bootstrapServers == null || bootstrapServers.isBlank()) throw new ServiceException("Kafka broker 地址不能为空");
         if (topic == null || topic.isBlank()) throw new ServiceException("Kafka topic 不能为空");
         if (events == null || events.isEmpty()) return List.of();
+        KafkaProducer<String, String> producer = producerFor(bootstrapServers);
+        List<String> keys = new ArrayList<>(events.size());
+        List<Future<RecordMetadata>> futures = new ArrayList<>(events.size());
+        try {
+            // Issue every send first (the producer pipelines them - idempotence keeps
+            // per-partition ordering across the in-flight requests), then wait for acks.
+            // Blocking on get() one send at a time here would serialize on network
+            // round-trips and cap throughput far below what one producer can sustain.
+            for (KafkaEventNormalizer.NormalizedEvent event : events) {
+                String key = event.key().toString();
+                keys.add(key);
+                futures.add(producer.send(new ProducerRecord<>(topic, key, toEnvelope(event).toString())));
+            }
+            List<PublishResult> results = new ArrayList<>(events.size());
+            for (int index = 0; index < futures.size(); index++) {
+                RecordMetadata metadata = futures.get(index).get(30, TimeUnit.SECONDS);
+                results.add(new PublishResult(topic, metadata.partition(), metadata.offset(), keys.get(index)));
+            }
+            return List.copyOf(results);
+        } catch (Exception ex) {
+            throw new ServiceException("Kafka 事件发布失败：" + safeMessage(ex));
+        }
+    }
+
+    private KafkaProducer<String, String> producerFor(String bootstrapServers) {
+        return producers.computeIfAbsent(bootstrapServers, KafkaEventProducer::createProducer);
+    }
+
+    private static KafkaProducer<String, String> createProducer(String bootstrapServers) {
         Properties properties = new Properties();
         properties.put("bootstrap.servers", bootstrapServers);
         properties.put("acks", "all");
@@ -87,19 +128,13 @@ public class KafkaEventProducer {
         properties.put("retries", Integer.toString(Integer.MAX_VALUE));
         properties.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
         properties.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        List<PublishResult> results = new ArrayList<>();
-        try (KafkaProducer<String, String> producer = new KafkaProducer<>(properties)) {
-            for (KafkaEventNormalizer.NormalizedEvent event : events) {
-                String key = event.key().toString();
-                RecordMetadata metadata = producer.send(new ProducerRecord<>(topic, key, toEnvelope(event).toString()))
-                    .get(30, TimeUnit.SECONDS);
-                results.add(new PublishResult(topic, metadata.partition(), metadata.offset(), key));
-            }
-            producer.flush();
-            return List.copyOf(results);
-        } catch (Exception ex) {
-            throw new ServiceException("Kafka 事件发布失败：" + safeMessage(ex));
-        }
+        return new KafkaProducer<>(properties);
+    }
+
+    @PreDestroy
+    void close() {
+        producers.values().forEach(producer -> producer.close(java.time.Duration.ofSeconds(5)));
+        producers.clear();
     }
 
     ObjectNode toEnvelope(KafkaEventNormalizer.NormalizedEvent event) {

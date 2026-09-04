@@ -269,6 +269,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             syncTaskMapper.updateById(task);
             return operation(task, "作业已从 savepoint 恢复");
         } catch (ServiceException ex) {
+            // The Kafka bridge (if any) is started before restClient.submit() above, so a
+            // ServiceException from submit()/checkpoints() must stop it too - otherwise the
+            // bridge's consumer thread and Kafka consumer-group membership are orphaned.
+            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
             if (isRecoveryBoundaryError(ex.getMessage())) {
                 markReinitializeRequired(task, jobId, ex.getMessage());
                 throw new ServiceException(ex.getMessage());

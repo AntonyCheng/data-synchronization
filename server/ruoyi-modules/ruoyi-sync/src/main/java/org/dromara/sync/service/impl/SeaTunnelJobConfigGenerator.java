@@ -107,7 +107,7 @@ final class SeaTunnelJobConfigGenerator {
             .append("    password = ").append(quote(source.getPassword())).append('\n')
             .append("    database-names = [").append(sourceDatabase).append("]\n")
             .append("    table-names = [").append(quote(sourceTable)).append("]\n")
-            .append("    server-id = \"").append(serverId).append('-').append(serverId + 3).append("\"\n")
+            .append("    server-id = \"").append(serverId).append('-').append(serverId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
             .append("    server-time-zone = \"Asia/Shanghai\"\n")
             .append("    connection.pool.size = ").append(sourceConnectionLimit).append("\n")
             .append(startupOptions(task, syncMode))
@@ -144,6 +144,7 @@ final class SeaTunnelJobConfigGenerator {
         int parallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
         int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
         long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
+        int kafkaServerId = stableServerId(task.getTaskId());
         StringBuilder builder = new StringBuilder(1600);
         builder.append("env {\n")
             .append("  job.mode = \"STREAMING\"\n")
@@ -158,7 +159,7 @@ final class SeaTunnelJobConfigGenerator {
             .append("    password = ").append(quote(source.getPassword())).append('\n')
             .append("    database-names = [").append(quote(source.getDatabaseName())).append("]\n")
             .append("    table-names = [").append(quote(sourceTable)).append("]\n")
-            .append("    server-id = \"").append(stableServerId(task.getTaskId())).append('-').append(stableServerId(task.getTaskId()) + 3).append("\"\n")
+            .append("    server-id = \"").append(kafkaServerId).append('-').append(kafkaServerId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
             .append("    server-time-zone = \"Asia/Shanghai\"\n")
             .append(startupOptions(task, defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase()))
             .append("    exactly_once = false\n")
@@ -192,7 +193,7 @@ final class SeaTunnelJobConfigGenerator {
             + "    driver = \"com.mysql.cj.jdbc.Driver\"\n"
             + "    user = " + quote(source.getUsername()) + "\n"
             + "    password = " + quote(source.getPassword()) + "\n"
-            + "    query = " + quote("SELECT " + selectColumns(selected) + " FROM " + sourceTable) + "\n"
+            + "    query = " + quote("SELECT " + selectColumns(selected) + " FROM " + quoteQualifiedIdentifier(sourceTable)) + "\n"
             + "    result_table_name = \"source_table\"\n"
             + "  }\n}\n\nsink {\n  Kafka {\n"
             + "    topic = " + quote(rawTopic) + "\n"
@@ -249,7 +250,7 @@ final class SeaTunnelJobConfigGenerator {
             .append("    driver = \"com.mysql.cj.jdbc.Driver\"\n")
             .append("    user = ").append(quote(source.getUsername())).append('\n')
             .append("    password = ").append(quote(source.getPassword())).append('\n')
-            .append("    query = ").append(quote("SELECT " + selectColumns(selectedColumns) + " FROM " + sourceTable)).append('\n')
+            .append("    query = ").append(quote("SELECT " + selectColumns(selectedColumns) + " FROM " + quoteQualifiedIdentifier(sourceTable))).append('\n')
             .append("    result_table_name = \"source_table\"\n")
             .append("  }\n}\n\nsink {\n  Jdbc {\n")
             .append("    url = ").append(targetJdbc).append('\n')
@@ -395,13 +396,35 @@ final class SeaTunnelJobConfigGenerator {
         return '`' + identifier.replace("`", "``") + '`';
     }
 
+    /** Backtick-quotes each segment of a possibly database-qualified table name. */
+    private static String quoteQualifiedIdentifier(String qualifiedName) {
+        int separator = qualifiedName == null ? -1 : qualifiedName.indexOf('.');
+        return separator < 0 ? quoteIdentifier(qualifiedName)
+            : quoteIdentifier(qualifiedName.substring(0, separator)) + '.' + quoteIdentifier(qualifiedName.substring(separator + 1));
+    }
+
     private static String qualifiedTargetTable(String schema, String table) {
         return table.indexOf('.') >= 0 ? table : schema + '.' + table;
     }
 
+    /**
+     * Each CDC config claims a {@code server-id} range of {@link #SERVER_ID_RANGE_WIDTH}
+     * consecutive values (see the {@code server-id = "X-(X+3)"} field below). Bucketing by
+     * multiplying the modulo result by the range width - instead of adding it directly -
+     * guarantees two different buckets never produce overlapping ranges; the previous
+     * "5400 + taskId % 100000" scheme let adjacent task IDs (the common case for
+     * Snowflake IDs assigned to task-group items created in the same batch) claim
+     * overlapping ranges, which MySQL's replication protocol rejects as duplicate
+     * server IDs when both jobs connect concurrently.
+     */
+    private static final int SERVER_ID_RANGE_WIDTH = 4;
+    private static final long SERVER_ID_BUCKET_COUNT = 900_000L;
+    private static final int SERVER_ID_BASE = 10_000;
+
     private static int stableServerId(Long taskId) {
         long value = taskId == null ? 1L : Math.abs(taskId);
-        return 5400 + (int) (value % 100000);
+        long bucket = value % SERVER_ID_BUCKET_COUNT;
+        return SERVER_ID_BASE + (int) (bucket * SERVER_ID_RANGE_WIDTH);
     }
 
     private static void requireType(DataSource source, String expected, String side) {
