@@ -190,7 +190,15 @@ export default function SyncDataSourcePage() {
         </ProFormDependency>
         <ProFormText name="schemaName" label="Schema" />
         <ProFormText name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]} />
-        <ProFormText.Password name="password" label="密码" placeholder="修改时留空表示保持原密码" />
+        <ProFormDependency name={['sourceId']}>
+          {({ sourceId }) => (
+            <ProFormText.Password
+              name="password"
+              label="密码"
+              placeholder={sourceId ? '留空表示保持原密码' : '请输入密码'}
+            />
+          )}
+        </ProFormDependency>
         <ProFormSelect
           name="sslEnabled"
           label="SSL"
