@@ -17,6 +17,7 @@ import org.dromara.sync.service.ISyncTaskService;
 import org.springframework.stereotype.Service;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Scheduled;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 
@@ -222,6 +223,25 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
                 try {
                     if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
                         requireSource(task.getSourceId(), "源").getDatabaseName());
+                    refreshStatus(task.getTaskId());
+                } catch (Exception ex) {
+                    markFailed(task, task.getEngineJobId(), ex.getMessage());
+                }
+            });
+    }
+
+    /**
+     * Beyond the startup reconciliation above, nothing else polled engine state for a task
+     * left RUNNING between user actions - a FULL-mode task (or any job that finishes or dies
+     * on the engine side without the user ever clicking "刷新状态") stayed stuck showing
+     * RUNNING in the list indefinitely. Poll periodically so platform status doesn't silently
+     * drift from engine truth while the process keeps running.
+     */
+    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}")
+    public void refreshRunningTaskStatus() {
+        syncTaskMapper.selectList(new LambdaQueryWrapper<SyncTask>().in(SyncTask::getStatus, "RUNNING", "PAUSING"))
+            .forEach(task -> {
+                try {
                     refreshStatus(task.getTaskId());
                 } catch (Exception ex) {
                     markFailed(task, task.getEngineJobId(), ex.getMessage());

@@ -57,6 +57,9 @@ final class SeaTunnelJobConfigGenerator {
         if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
             config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, properties);
         } else {
+            if ("FULL".equals(syncMode)) {
+                ensureMysqlFullModeTargetTable(task, source, target, targetTable, selectedColumns);
+            }
             config = "FULL".equals(syncMode)
                 ? buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties)
                 : buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, serverId, syncMode, properties);
@@ -279,6 +282,53 @@ final class SeaTunnelJobConfigGenerator {
         return builder.toString();
     }
 
+    /**
+     * FULL mode's Jdbc source hands SeaTunnel a raw SELECT query rather than a real
+     * table reference. SeaTunnel then infers each column's target DDL type from that
+     * query's ResultSetMetaData rather than the source table's own DDL, and for MySQL
+     * (unlike PostgreSQL, which has no such restriction) this can misclassify a bounded
+     * VARCHAR as an unbounded TEXT - which the server then rejects the moment it's used
+     * in a PRIMARY KEY/UNIQUE ("BLOB/TEXT column ... used in key specification without a
+     * key length"). Confirmed via a MySQL->MySQL multi-table FULL run where the sync key
+     * was a VARCHAR unique key (customers/orders, both integer-keyed, created fine;
+     * inventory_by_sku, keyed on two VARCHAR columns, failed exactly this way).
+     * <p>
+     * Only MySQL->MySQL is fixed here by cloning the source's own verified-correct DDL
+     * (stripping any FOREIGN KEY constraints, which would reference tables that don't
+     * exist on the target) instead of trusting SeaTunnel's inference. Skipped for a
+     * partial column selection (a straight DDL clone would create unselected columns
+     * SeaTunnel never writes, which may carry NOT NULL/no-default constraints the insert
+     * would then violate) and for MySQL->PostgreSQL (a different dialect needs real type
+     * mapping, not a DDL clone, and Postgres does not hit this specific failure anyway).
+     */
+    private static void ensureMysqlFullModeTargetTable(SyncTask task, DataSource source, DataSource target,
+                                                         String targetTable, List<String> selectedColumns) {
+        if (!"MYSQL".equalsIgnoreCase(target.getSourceType())) return;
+        if (!isFullColumnSelection(source, task.getSourceTable(), selectedColumns)) return;
+        String targetTableName = unqualifiedTable(targetTable);
+        try (Connection targetConnection = DriverManager.getConnection(mysqlJdbcUrl(target), target.getUsername(), target.getPassword())) {
+            try (ResultSet existing = targetConnection.getMetaData().getTables(target.getDatabaseName(), null, targetTableName, new String[]{"TABLE"})) {
+                if (existing.next()) return;
+            }
+            String createTableSql;
+            try (Connection sourceConnection = DriverManager.getConnection(mysqlJdbcUrl(source), source.getUsername(), source.getPassword());
+                 java.sql.Statement statement = sourceConnection.createStatement();
+                 ResultSet showCreate = statement.executeQuery("SHOW CREATE TABLE `" + unqualifiedTable(task.getSourceTable()) + "`")) {
+                if (!showCreate.next()) return;
+                createTableSql = showCreate.getString(2);
+            }
+            createTableSql = createTableSql.replaceFirst(
+                "(?i)CREATE TABLE `[^`]+`", "CREATE TABLE `" + targetTableName + "`");
+            createTableSql = createTableSql.replaceAll(
+                ",\\s*CONSTRAINT `[^`]+` FOREIGN KEY[^,]*\\([^)]*\\)\\s*REFERENCES[^,]*\\([^)]*\\)[^,)]*", "");
+            try (java.sql.Statement statement = targetConnection.createStatement()) {
+                statement.execute(createTableSql);
+            }
+        } catch (SQLException ex) {
+            throw new ServiceException("预建目标表失败：" + safeMessage(ex));
+        }
+    }
+
     private static List<String> resolveSyncKeys(DataSource source, SyncTask task) {
         List<String> configured = SyncColumnSelectionValidator.parseColumns(task.getSyncKeyColumns());
         return configured.isEmpty() ? resolvePrimaryKeys(source, task.getSourceTable()) : configured;
@@ -392,9 +442,15 @@ final class SeaTunnelJobConfigGenerator {
     }
 
     private static String engineMysqlJdbcUrl(DataSource source, SeaTunnelProperties properties) {
+        // useInformationSchema forces MySQL Connector/J to resolve column metadata (type,
+        // precision) from information_schema instead of ResultSetMetaData off a prepared
+        // statement. Without it, a plain-query Jdbc source (used by buildFullConfig - the
+        // MySQL-CDC connector path is unaffected) can misreport a bounded VARCHAR's
+        // precision, and SeaTunnel's auto-DDL then emits an unbounded TEXT/BLOB column -
+        // which MySQL then rejects for a table using that column as its key.
         return "jdbc:mysql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
             + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
-            + "&allowPublicKeyRetrieval=true&serverTimezone=Asia%2FShanghai";
+            + "&allowPublicKeyRetrieval=true&serverTimezone=Asia%2FShanghai&useInformationSchema=true";
     }
 
     private static String enginePostgresJdbcUrl(DataSource source, SeaTunnelProperties properties) {
