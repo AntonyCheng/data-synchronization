@@ -202,6 +202,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         resourceProtectionPolicy.applyDefaultsAndValidate(group);
         groupMapper.updateById(group);
         boolean databaseScope = "DATABASE".equals(group.getSyncScope());
+        DataSource source = requireSource(group.getSourceId(), "源");
+        DataSource target = requireSource(group.getTargetId(), "目标");
+        if (databaseScope && isKafkaTarget(target)) recoverDatabaseKafkaTopics(groupId, source, target);
         SyncTaskGroupValidationResult validation = validate(groupId);
         boolean infrastructureValid = validation.getSource() != null && validation.getSource().isSuccess()
             && validation.getTarget() != null && validation.getTarget().isSuccess()
@@ -209,8 +212,6 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (!validation.isValid() && (!databaseScope || !infrastructureValid)) {
             throw new ServiceException("启动前校验未通过：" + validation.getMessage());
         }
-        DataSource source = requireSource(group.getSourceId(), "源");
-        DataSource target = requireSource(group.getTargetId(), "目标");
         List<String> jobIds = new java.util.ArrayList<>();
         List<SyncTaskGroupItem> submittedItems = new java.util.ArrayList<>();
         SyncTaskGroupItem currentItem = null;
@@ -264,17 +265,17 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     submittedItem.setStatus("FAILED");
                     error = error + "; 补偿停止失败: " + StringUtils.defaultIfBlank(stopError.getMessage(), "引擎不可达");
                 }
-                submittedItem.setLastError("组启动失败，已执行补偿停止");
+                submittedItem.setLastError(truncateForColumn("组启动失败，已执行补偿停止"));
                 itemMapper.updateById(submittedItem);
             }
             if (currentItem != null && !submittedItems.contains(currentItem)) {
                 currentItem.setStatus("FAILED");
-                currentItem.setLastError(error);
+                currentItem.setLastError(truncateForColumn(error));
                 itemMapper.updateById(currentItem);
             }
             group.setEngineJobId(String.join(",", jobIds));
             group.setStatus("FAILED");
-            group.setLastError(error);
+            group.setLastError(truncateForColumn(error));
             groupMapper.updateById(group);
             return operation(group, "任务组启动失败，已补偿停止已提交作业：" + error);
         }
@@ -310,6 +311,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             String validationError;
             try {
                 applySelection(item, source);
+                if (isKafkaTarget(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
                 validationError = validateDiscoveredItem(source, target, item);
             } catch (RuntimeException ex) {
                 validationError = ex.getMessage();
@@ -607,6 +609,28 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                             }
                         }
                     }
+                } catch (RuntimeException ex) {
+                    group.setStatus("FAILED");
+                    group.setLastError(truncateForColumn(ex.getMessage()));
+                    groupMapper.updateById(group);
+                }
+            });
+    }
+
+    /**
+     * Mirrors SeaTunnelJobServiceImpl.refreshRunningTaskStatus() for groups: without this,
+     * nothing but the one-time startup reconciliation above ever polled engine state for a
+     * RUNNING/PAUSING group, so a FULL-mode group (which finishes at the engine within
+     * seconds) stayed stuck showing RUNNING indefinitely unless a user happened to open its
+     * detail and click "刷新状态".
+     */
+    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}")
+    public void refreshRunningGroupStatus() {
+        groupMapper.selectList(new LambdaQueryWrapper<SyncTaskGroup>()
+                .in(SyncTaskGroup::getStatus, "RUNNING", "PAUSING"))
+            .forEach(group -> {
+                try {
+                    refreshStatus(group.getGroupId());
                 } catch (RuntimeException ex) {
                     group.setStatus("FAILED");
                     group.setLastError(truncateForColumn(ex.getMessage()));
@@ -924,6 +948,27 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return result;
     }
 
+    /**
+     * A whole-database Kafka group creates one topic per table on discovery. Re-running this
+     * on start recreates a topic that was dropped and clears the isolation on any table that
+     * had been marked FAILED only because its topic did not exist yet.
+     */
+    private void recoverDatabaseKafkaTopics(Long groupId, DataSource source, DataSource target) {
+        for (SyncTaskGroupItem item : items(groupId)) {
+            try {
+                kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
+                if ("FAILED".equals(item.getStatus()) && validateDiscoveredItem(source, target, item) == null) {
+                    captureSchemaBaseline(item, source);
+                    item.setStatus("PENDING");
+                    item.setLastError("");
+                    itemMapper.updateById(item);
+                }
+            } catch (RuntimeException ignored) {
+                // Leave the table isolated; the start loop surfaces the reason per table.
+            }
+        }
+    }
+
     private String validateDiscoveredItem(DataSource source, DataSource target, SyncTaskGroupItem item) {
         try {
             DataSourceMetadataVo metadata = metadataService.queryTableMetadata(source.getSourceId(), item.getSourceDatabase(), item.getSourceTable());
@@ -991,10 +1036,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         try {
             if (StringUtils.isNotBlank(item.getEngineJobId())) restClient.stop(item.getEngineJobId(), true, false);
             item.setStatus("DDL_BLOCKED");
-            item.setLastError("检测到表结构变更：" + event.getChangeType() + "。请按结构检查结果修复后逐表恢复。");
+            item.setLastError(truncateForColumn("检测到表结构变更：" + event.getChangeType() + "。请按结构检查结果修复后逐表恢复。"));
         } catch (RuntimeException ex) {
             item.setStatus("FAILED");
-            item.setLastError("检测到表结构变更，但 savepoint 暂停请求失败：" + safeMessage(ex));
+            item.setLastError(truncateForColumn("检测到表结构变更，但 savepoint 暂停请求失败：" + safeMessage(ex)));
             event.setStatus("PENDING_FIX");
             event.setRemediation(event.getRemediation() + " 暂停请求失败，请先确认引擎状态后手动停止该表。");
             ddlEventMapper.updateById(event);

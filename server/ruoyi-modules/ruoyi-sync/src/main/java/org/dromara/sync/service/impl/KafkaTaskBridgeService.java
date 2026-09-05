@@ -98,6 +98,23 @@ class KafkaTaskBridgeService {
         return worker != null && worker.isRunning();
     }
 
+    /**
+     * Whole-database groups own their topic namespace: the topic is named after the source
+     * table and the platform creates it here, the same way a relational whole-database
+     * target auto-creates its tables. Single/multi-table groups keep the explicit wizard
+     * step so the operator controls partitioning, so this is only called for DATABASE scope.
+     */
+    void ensureTopicExists(DataSource target, String topic) {
+        if (StringUtils.isBlank(topic)) throw new ServiceException("Kafka topic 不能为空");
+        try (AdminClient admin = AdminClient.create(adminProperties(bootstrapServers(target)))) {
+            if (admin.listTopics().names().get(10, TimeUnit.SECONDS).contains(topic)) return;
+            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 1))).all().get(10, TimeUnit.SECONDS);
+        } catch (Exception ex) {
+            if (ex.getCause() instanceof TopicExistsException) return;
+            throw new ServiceException("自动创建 Kafka topic 失败：" + safeMessage(ex));
+        }
+    }
+
     /** The output topic is user-owned and must exist; only the private raw topic is created here. */
     void ensureTopics(SyncTask task, DataSource target) {
         String bootstrapServers = bootstrapServers(target);
