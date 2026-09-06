@@ -77,12 +77,15 @@ class KafkaTaskBridgeService {
         if (StringUtils.isBlank(task.getTargetTable())) throw new ServiceException("Kafka topic 不能为空");
         List<String> keyFields = SyncColumnSelectionValidator.parseColumns(task.getSyncKeyColumns());
         if (keyFields.isEmpty()) throw new ServiceException("Kafka 任务必须配置可靠同步键");
+        // Persisted at save time as the fully expanded, real-cased column list; used to
+        // undo the Oracle-compat UPPER CASE folding a GoldenDB JDBC snapshot applies.
+        List<String> sourceColumns = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
         ensureTopics(task, target);
         workers.compute(task.getTaskId(), (taskId, existing) -> {
             if (existing != null && existing.isRunning()) return existing;
             if (existing != null) existing.close();
             Worker worker = new Worker(taskId, bootstrapServers(target), rawTopic(task), task.getTargetTable(),
-                task.getSourceTable(), sourceDatabase, keyFields, persistTaskMetrics);
+                task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics);
             worker.future = executor.submit(worker);
             return worker;
         });
@@ -184,6 +187,7 @@ class KafkaTaskBridgeService {
         private final String sourceDatabase;
         private final String sourceTable;
         private final List<String> keyFields;
+        private final List<String> sourceColumns;
         private final boolean persistTaskMetrics;
         private final AtomicBoolean running = new AtomicBoolean(true);
         private volatile KafkaConsumer<String, String> consumer;
@@ -193,6 +197,7 @@ class KafkaTaskBridgeService {
         private Worker(Long taskId, String bootstrapServers, String rawTopic, String targetTopic, String sourceTable,
                        String sourceDatabase,
                        List<String> keyFields,
+                       List<String> sourceColumns,
                        boolean persistTaskMetrics) {
             this.taskId = taskId;
             this.bootstrapServers = bootstrapServers;
@@ -202,6 +207,7 @@ class KafkaTaskBridgeService {
             int separator = sourceTable == null ? -1 : sourceTable.lastIndexOf('.');
             this.sourceTable = separator < 0 ? sourceTable : sourceTable.substring(separator + 1);
             this.keyFields = List.copyOf(keyFields);
+            this.sourceColumns = List.copyOf(sourceColumns);
             this.persistTaskMetrics = persistTaskMetrics;
         }
 
@@ -263,7 +269,7 @@ class KafkaTaskBridgeService {
             if (snapshotRows) {
                 String database = StringUtils.isBlank(sourceDatabase) ? "unknown" : sourceDatabase;
                 List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalizeSnapshotRows(
-                    rawEvents, database, sourceTable, keyFields);
+                    rawEvents, database, sourceTable, keyFields, sourceColumns);
                 if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events);
                 else producer.publish(bootstrapServers, targetTopic, events);
                 return;

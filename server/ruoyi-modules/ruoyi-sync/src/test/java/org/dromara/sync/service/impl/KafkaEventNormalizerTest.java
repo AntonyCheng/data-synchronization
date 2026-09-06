@@ -10,6 +10,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Tag("dev")
 class KafkaEventNormalizerTest {
@@ -84,7 +85,7 @@ class KafkaEventNormalizerTest {
             mapper.readTree("{\"id\":1,\"name\":\"A\"}"),
             mapper.readTree("{\"id\":2,\"name\":\"B\"}"));
         List<KafkaEventNormalizer.NormalizedEvent> normalized =
-            normalizer.normalizeSnapshotRows(rows, "source_db", "customers", List.of("id"));
+            normalizer.normalizeSnapshotRows(rows, "source_db", "customers", List.of("id"), List.of("id", "name"));
         assertEquals(2, normalized.size());
         assertEquals("INSERT", normalized.getFirst().op());
         assertEquals("SNAPSHOT", normalized.getFirst().phase());
@@ -92,6 +93,17 @@ class KafkaEventNormalizerTest {
         assertEquals("customers", normalized.getFirst().sourceTable());
         assertEquals("1", normalized.getFirst().key().path("id").asText());
         assertEquals("A", normalized.getFirst().data().path("name").asText());
+    }
+
+    @Test
+    void canonicalisesUpperCaseSnapshotColumnsFromOracleCompatSource() throws Exception {
+        // GoldenDB in ORA_COMPATIBLE_MODE folds JDBC result-set labels to UPPER CASE.
+        List<JsonNode> rows = List.of(mapper.readTree("{\"ID\":1,\"NAME\":\"A\"}"));
+        List<KafkaEventNormalizer.NormalizedEvent> normalized =
+            normalizer.normalizeSnapshotRows(rows, "test", "t_test", List.of("id"), List.of("id", "name"));
+        assertEquals("1", normalized.getFirst().key().path("id").asText());
+        assertEquals("A", normalized.getFirst().data().path("name").asText());
+        assertTrue(normalized.getFirst().data().has("id"));
     }
 
     private JsonNode event(String op, String before, String after, long ts) {

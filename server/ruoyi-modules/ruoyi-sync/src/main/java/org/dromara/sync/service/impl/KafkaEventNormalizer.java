@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /** Converts SeaTunnel Debezium JSON into the PRD Kafka event envelope. */
@@ -72,7 +73,7 @@ public class KafkaEventNormalizer {
 
     /** Converts bounded JDBC JSON rows into the same PRD snapshot event contract. */
     public List<NormalizedEvent> normalizeSnapshotRows(List<JsonNode> rows, String database, String table,
-                                                        List<String> keyFields) {
+                                                        List<String> keyFields, List<String> canonicalColumns) {
         if (rows == null || rows.isEmpty()) return List.of();
         if (database == null || database.isBlank() || table == null || table.isBlank()) {
             throw new ServiceException("Kafka 快照缺少源库或源表");
@@ -80,23 +81,58 @@ public class KafkaEventNormalizer {
         if (keyFields == null || keyFields.isEmpty()) throw new ServiceException("Kafka 必须配置可靠同步键");
         String eventTime = Instant.now().toString();
         List<NormalizedEvent> result = new ArrayList<>(rows.size());
-        for (JsonNode row : rows) {
-            if (row == null || !row.isObject()) throw new ServiceException("Kafka 快照行不是 JSON 对象");
+        for (JsonNode raw : rows) {
+            if (raw == null || !raw.isObject()) throw new ServiceException("Kafka 快照行不是 JSON 对象");
+            JsonNode row = canonicalizeRow(raw, canonicalColumns);
             result.add(new NormalizedEvent("INSERT", key(row, keyFields), null, row,
                 "SNAPSHOT", database, table, eventTime));
         }
         return List.copyOf(result);
     }
 
+    /**
+     * GoldenDB in Oracle-compatible mode (ORA_COMPATIBLE_MODE) returns JDBC result-set
+     * column labels folded to UPPER CASE, so a bounded snapshot row arrives as {"ID":1}
+     * while the platform's introspected schema and the CDC (Debezium) path both use the
+     * table's real casing. Rebuild the row with the canonical column names. Native MySQL
+     * already reports the real casing, so every lookup hits on the first try and the
+     * original node is returned unchanged.
+     */
+    private JsonNode canonicalizeRow(JsonNode row, List<String> canonicalColumns) {
+        if (canonicalColumns == null || canonicalColumns.isEmpty()) return row;
+        ObjectNode rebuilt = jsonMapper.createObjectNode();
+        boolean remapped = false;
+        for (String column : canonicalColumns) {
+            JsonNode value = row.get(column);
+            if (value == null) {
+                value = row.get(column.toUpperCase(Locale.ROOT));
+                if (value == null) value = row.get(column.toLowerCase(Locale.ROOT));
+                if (value != null) remapped = true;
+            }
+            if (value != null) rebuilt.set(column, value);
+        }
+        // Only substitute when every field was accounted for; otherwise keep the
+        // original row so an unexpected shape never silently drops columns.
+        return remapped && rebuilt.size() == row.size() ? rebuilt : row;
+    }
+
     private ObjectNode key(JsonNode row, List<String> keyFields) {
         if (row == null || row.isMissingNode() || row.isNull()) throw new ServiceException("Kafka 事件缺少可靠同步键数据");
         ObjectNode key = jsonMapper.createObjectNode();
         for (String field : keyFields) {
-            JsonNode value = row.get(field);
+            JsonNode value = fieldValue(row, field);
             if (value == null || value.isNull()) throw new ServiceException("Kafka 同步键字段缺失或为空：" + field);
             key.set(field, value);
         }
         return key;
+    }
+
+    /** Resolves a field case-insensitively so an Oracle-compat UPPER CASE label still matches. */
+    private static JsonNode fieldValue(JsonNode row, String field) {
+        JsonNode value = row.get(field);
+        if (value == null) value = row.get(field.toUpperCase(Locale.ROOT));
+        if (value == null) value = row.get(field.toLowerCase(Locale.ROOT));
+        return value;
     }
 
     private static String phase(int index, int snapshotCount) {
