@@ -40,6 +40,12 @@
 | [runbook-metadata-migration.md](runbook-metadata-migration.md) | 元数据库迁移手册 |
 | [git-strategy.md](git-strategy.md) | Git 管理策略 |
 
+## 启动
+
+| 文档 | 内容 |
+|---|---|
+| [agent-bootstrap.md](agent-bootstrap.md) | 在一台新机器上把项目跑起来（面向智能体，含仓库缺口清单） |
+
 ## 相关资源
 
 - 本地引擎栈（SeaTunnel 镜像构建、Compose）、离线交付模板：仓库根目录 `deploy/`。

@@ -27,6 +27,11 @@ All product API routes live under `/sync`; backend package is `org.dromara.sync`
 
 ## Essential commands
 
+> **Fresh machine?** `dev.ps1 up` self-provisions what the repo does not carry —
+> `web/.env.development` (from `.env.example`), `web/node_modules` (`pnpm install`),
+> and, for `-Poc`, the SeaTunnel connector JARs (`deploy/local-stack/seatunnel/fetch-vendor.ps1`,
+> SHA-1-checked against `vendor/checksums.sha1`). See `docs/agent-bootstrap.md`.
+
 ### One command for the whole local stack — `dev.ps1` (repo root)
 
 `dev.ps1` orchestrates docker (base services) + java21 (backend) + pnpm (frontend).

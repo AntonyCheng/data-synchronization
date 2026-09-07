@@ -61,6 +61,7 @@ $PlatformProject = 'data-sync-platform'
 $PocCompose = Join-Path $RepoRoot 'deploy\local-stack\compose.yml'
 $PocProject = 'data-sync-poc'
 $MigrateScript = Join-Path $RepoRoot 'deploy\migrate-platform-schema.ps1'
+$VendorScript = Join-Path $RepoRoot 'deploy\local-stack\seatunnel\fetch-vendor.ps1'
 $SqlDir = Join-Path $RepoRoot 'server\script\sql'
 
 $BackendPort = 18081
@@ -144,6 +145,25 @@ function Invoke-MigrationsIfChanged {
 # --------------------------------------------------------------------------- #
 # Frontend
 # --------------------------------------------------------------------------- #
+# web/.env.development and web/node_modules are gitignored, so a fresh clone has
+# neither. Seed both from what the repo does carry (.env.example, pnpm-lock.yaml).
+function Initialize-Frontend {
+    $envFile = Join-Path $WebDir '.env.development'
+    if (-not (Test-Path $envFile)) {
+        Copy-Item (Join-Path $WebDir '.env.example') $envFile
+        Write-Ok "created web/.env.development from .env.example"
+    }
+    if (-not (Test-Path (Join-Path $WebDir 'node_modules'))) {
+        Write-Step "installing frontend dependencies (pnpm install)"
+        Push-Location $WebDir
+        try {
+            & pnpm install | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "pnpm install failed" }
+        }
+        finally { Pop-Location }
+    }
+}
+
 function Start-Frontend {
     $existing = @(Get-PortListeners -Port $FrontendPort)
     if ($existing.Count -gt 0) {
@@ -222,6 +242,9 @@ function Invoke-Up {
     Test-RequiredCommand 'docker'
     Test-RequiredCommand 'pnpm'
 
+    Initialize-Frontend
+    $script:FrontendPort = Get-FrontendPort
+
     Write-Step "starting base containers ($PlatformProject)"
     Invoke-Compose -Project $PlatformProject -File $PlatformCompose -ComposeArgs @('up', '--detach')
     if (-not (Wait-DockerHealthy -Name $PlatformContainers -TimeoutSeconds 150)) {
@@ -230,6 +253,10 @@ function Invoke-Up {
     Write-Ok "$($PlatformContainers -join ' / ') healthy"
 
     if ($Poc) {
+        Write-Step "ensuring SeaTunnel connector JARs (deploy/local-stack/seatunnel/vendor)"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $VendorScript | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "SeaTunnel vendor JAR provisioning failed (see output above)" }
+
         Write-Step "starting SeaTunnel POC stack ($PocProject)"
         Invoke-Compose -Project $PocProject -File $PocCompose -ComposeArgs @('up', '--detach')
         Wait-DockerHealthy -Name $PocContainers -TimeoutSeconds 180 | Out-Null
