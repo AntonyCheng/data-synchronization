@@ -62,6 +62,7 @@ $PocCompose = Join-Path $RepoRoot 'deploy\local-stack\compose.yml'
 $PocProject = 'data-sync-poc'
 $MigrateScript = Join-Path $RepoRoot 'deploy\migrate-platform-schema.ps1'
 $VendorScript = Join-Path $RepoRoot 'deploy\local-stack\seatunnel\fetch-vendor.ps1'
+$ConnectorPatchScript = Join-Path $RepoRoot 'deploy\local-stack\seatunnel\build-patched-connector.ps1'
 $SqlDir = Join-Path $RepoRoot 'server\script\sql'
 
 $BackendPort = 18081
@@ -256,6 +257,10 @@ function Invoke-Up {
         Write-Step "ensuring SeaTunnel connector JARs (deploy/local-stack/seatunnel/vendor)"
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $VendorScript | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "SeaTunnel vendor JAR provisioning failed (see output above)" }
+
+        Write-Step "building GoldenDB-patched MySQL-CDC connector"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ConnectorPatchScript | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "GoldenDB connector patch build failed (see output above)" }
 
         Write-Step "starting SeaTunnel POC stack ($PocProject)"
         Invoke-Compose -Project $PocProject -File $PocCompose -ComposeArgs @('up', '--detach')
