@@ -134,9 +134,24 @@ class KafkaTaskBridgeService {
             }
             if (!knownTopics.contains(rawTopic)) {
                 try {
-                    admin.createTopics(List.of(new NewTopic(rawTopic, 2, (short) 1))).all().get(10, TimeUnit.SECONDS);
+                    // One partition, deliberately. The raw topic is an internal buffer read by
+                    // exactly one single-threaded bridge worker, so extra partitions buy no
+                    // throughput - they only cost ordering. A GoldenDB UPDATE arrives as a
+                    // DELETE + INSERT pair (see KafkaEventNormalizer); on a multi-partition
+                    // topic another row's event can interleave between the two halves and the
+                    // normalizer then can't merge them back into an op=UPDATE. A single
+                    // partition keeps the stream in binlog order so the pair stays adjacent.
+                    admin.createTopics(List.of(new NewTopic(rawTopic, 1, (short) 1))).all().get(10, TimeUnit.SECONDS);
                 } catch (Exception ex) {
                     if (!(ex.getCause() instanceof TopicExistsException)) throw ex;
+                }
+            } else {
+                var rawDescription = admin.describeTopics(List.of(rawTopic)).allTopicNames()
+                    .get(10, TimeUnit.SECONDS).get(rawTopic);
+                if (rawDescription != null && rawDescription.partitions().size() > 1) {
+                    log.warn("Raw bridge topic {} has {} partitions; GoldenDB UPDATE merge needs a single "
+                            + "partition. Delete the topic while the task is stopped and restart to recreate it.",
+                        rawTopic, rawDescription.partitions().size());
                 }
             }
         } catch (ServiceException ex) {

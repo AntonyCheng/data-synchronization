@@ -77,6 +77,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
 
+    /** Consecutive engine status-poll failures per group item; see the task-side counterpart. */
+    private final java.util.concurrent.ConcurrentMap<Long, Integer> itemStatusFailureStreak =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int ITEM_STATUS_FAILURE_TOLERANCE = 3;
+
     @Override
     public PageResult<SyncTaskGroupVo> queryPageList(String groupName, String status, PageQuery pageQuery) {
         LambdaQueryWrapper<SyncTaskGroup> wrapper = new LambdaQueryWrapper<SyncTaskGroup>()
@@ -533,6 +538,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Transactional
     public SyncTaskGroupStatus refreshStatus(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
+        DataSource groupTarget = dataSourceMapper.selectById(group.getTargetId());
+        boolean kafkaGroup = isKafkaTarget(groupTarget);
+        String sourceDatabase = kafkaGroup
+            ? requireSource(group.getSourceId(), "源").getDatabaseName() : null;
         List<String> statuses = new java.util.ArrayList<>();
         SyncTaskGroupStatus result = new SyncTaskGroupStatus();
         result.setGroupId(groupId);
@@ -547,9 +556,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             } else {
                 try {
                     var snapshot = restClient.status(item.getEngineJobId());
+                    itemStatusFailureStreak.remove(item.getItemId());
                     String status = mapStatus(snapshot.status());
                     boolean ddlBlocked = latestOpenDdlEvent(item.getItemId()) != null;
                     item.setStatus(ddlBlocked ? "DDL_BLOCKED" : status);
+                    if (kafkaGroup && "RUNNING".equals(status) && !ddlBlocked
+                        && !kafkaTaskBridgeService.isRunning(item.getItemId())) {
+                        // Engine job alive, bridge dead - heal it (mirrors the task-side reconcile).
+                        kafkaTaskBridgeService.startGroupItem(
+                            SyncTaskGroupConfigGenerator.toTask(group, item), groupTarget, sourceDatabase);
+                    }
                     item.setLastError(truncateForColumn(StringUtils.defaultIfBlank(snapshot.errorMessage(), "")));
                     try {
                         var checkpoint = restClient.checkpoints(item.getEngineJobId());
@@ -571,12 +587,23 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     applyMetrics(itemStatus, snapshot);
                     statuses.add(status);
                 } catch (RuntimeException ex) {
-                    item.setStatus("FAILED");
-                    item.setLastError(truncateForColumn(ex.getMessage()));
-                    itemMapper.updateById(item);
-                    itemStatus.setStatus("FAILED");
-                    itemStatus.setErrorMessage(truncateForColumn(ex.getMessage()));
-                    statuses.add("FAILED");
+                    int streak = itemStatusFailureStreak.merge(item.getItemId(), 1, Integer::sum);
+                    if (streak < ITEM_STATUS_FAILURE_TOLERANCE && !isRecoveryBoundaryError(ex.getMessage())) {
+                        // Transient engine unreachability - hold the item's last-known status
+                        // and its bridge; only fail it after ITEM_STATUS_FAILURE_TOLERANCE.
+                        itemStatus.setStatus(item.getStatus());
+                        itemStatus.setErrorMessage("SeaTunnel 状态暂不可达（第 " + streak + "/"
+                            + ITEM_STATUS_FAILURE_TOLERANCE + " 次）：" + truncateForColumn(StringUtils.defaultIfBlank(ex.getMessage(), "")));
+                        statuses.add(item.getStatus());
+                    } else {
+                        itemStatusFailureStreak.remove(item.getItemId());
+                        item.setStatus("FAILED");
+                        item.setLastError(truncateForColumn(ex.getMessage()));
+                        itemMapper.updateById(item);
+                        itemStatus.setStatus("FAILED");
+                        itemStatus.setErrorMessage(truncateForColumn(ex.getMessage()));
+                        statuses.add("FAILED");
+                    }
                 }
             }
             result.getItems().add(itemStatus);
@@ -1119,6 +1146,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     private static String safeMessage(RuntimeException ex) {
         return StringUtils.defaultIfBlank(ex.getMessage(), "元数据读取失败");
+    }
+
+    /** A checkpoint/binlog/offset boundary error must fail fast, not sit in the transient grace window. */
+    private static boolean isRecoveryBoundaryError(String error) {
+        if (StringUtils.isBlank(error)) return false;
+        String normalized = error.toLowerCase(java.util.Locale.ROOT);
+        return normalized.contains("checkpoint") || normalized.contains("savepoint")
+            || normalized.contains("binlog") || normalized.contains("offset")
+            || normalized.contains("restore") || normalized.contains("恢复")
+            || normalized.contains("位点") || normalized.contains("日志已过期");
     }
 
     private static void applyMetrics(SyncTaskGroupItemStatus result, SeaTunnelRestClient.JobSnapshot snapshot) {

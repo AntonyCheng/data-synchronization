@@ -51,6 +51,29 @@ class SeaTunnelJobConfigGeneratorTest {
     }
 
     /**
+     * Regression: the FULL-mode Jdbc source carried serverTimezone=Asia/Shanghai, which
+     * makes Connector/J reinterpret a zoneless DATETIME as Shanghai and shift it to the
+     * (UTC) engine JVM zone - source 00:01:00 landed downstream as the previous day
+     * 16:01:00, and disagreed with the CDC path. The FULL Jdbc source must pin
+     * serverTimezone=UTC so DATETIME round-trips; the MySQL-CDC path keeps Asia/Shanghai
+     * (Debezium needs it to resolve GoldenDB's ambiguous CST and does not shift DATETIME).
+     */
+    @Test
+    void fullModeJdbcSourcePinsUtcTimezoneSoDatetimeDoesNotShift() {
+        SyncTask full = cdcTask(1L);
+        full.setSyncMode("FULL");
+        String fullConfig = SeaTunnelJobConfigGenerator.generate(full, mysql(), postgres(), new SeaTunnelProperties()).config();
+        String jdbcSourceLine = fullConfig.lines()
+            .filter(line -> line.contains("url = \"jdbc:mysql://"))
+            .findFirst().orElseThrow(() -> new AssertionError("no Jdbc source url:\n" + fullConfig));
+        assertTrue(jdbcSourceLine.contains("serverTimezone=UTC"), jdbcSourceLine);
+        assertFalse(jdbcSourceLine.contains("serverTimezone=Asia"), jdbcSourceLine);
+
+        String cdcConfig = SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties()).config();
+        assertTrue(cdcConfig.contains("server-time-zone = \"Asia/Shanghai\""), cdcConfig);
+    }
+
+    /**
      * A partial column selection still needs the projection transform to actually narrow
      * the columns the CDC connector emits. This also exercises the "can't reach the
      * source to check" fallback in isFullColumnSelection() (mysql.example is unreachable

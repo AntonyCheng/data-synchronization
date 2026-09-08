@@ -201,7 +201,7 @@ final class SeaTunnelJobConfigGenerator {
             + "  read_limit.rows_per_second = " + rowsPerSecond + "\n"
             + "  read_limit.bytes_per_second = " + bytesPerSecond + "\n"
             + "}\n\nsource {\n  Jdbc {\n"
-            + "    url = " + quote(engineMysqlJdbcUrl(source, properties)) + "\n"
+            + "    url = " + quote(fullJdbcSourceUrl(source, properties)) + "\n"
             + "    driver = \"com.mysql.cj.jdbc.Driver\"\n"
             + "    user = " + quote(source.getUsername()) + "\n"
             + "    password = " + quote(source.getPassword()) + "\n"
@@ -244,7 +244,7 @@ final class SeaTunnelJobConfigGenerator {
                                            String sourceTable, String targetTable, List<String> primaryKeys,
                                            List<String> selectedColumns,
                                            SeaTunnelProperties properties) {
-        String sourceJdbc = quote(engineMysqlJdbcUrl(source, properties));
+        String sourceJdbc = quote(fullJdbcSourceUrl(source, properties));
         String targetJdbc = quote(engineTargetJdbcUrl(target, properties));
         String targetMode = "OVERWRITE".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT"))
             ? "DROP_DATA" : "APPEND_DATA";
@@ -451,6 +451,31 @@ final class SeaTunnelJobConfigGenerator {
         return "jdbc:mysql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
             + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
             + "&allowPublicKeyRetrieval=true&serverTimezone=Asia%2FShanghai&useInformationSchema=true";
+    }
+
+    /**
+     * JDBC URL for the FULL-mode {@code Jdbc} source (a plain {@code SELECT}).
+     *
+     * <p>The generic {@link #engineMysqlJdbcUrl} carries {@code serverTimezone=Asia/Shanghai}
+     * so Connector/J can resolve GoldenDB's ambiguous {@code CST} system zone. But for a
+     * plain-SELECT source the connector reads {@code DATETIME} through the driver's
+     * timezone machinery, so a zoneless wall-clock value gets reinterpreted as Shanghai
+     * and converted to the engine JVM's zone (UTC in this stack) - source
+     * {@code 2026-01-01 00:01:00} lands in Kafka as {@code 2025-12-31T16:01:00}. The
+     * MySQL-CDC / Debezium path keeps the wall-clock value, so a FULL_CDC job's snapshot
+     * rows and CDC rows would then disagree.
+     *
+     * <p>Pinning {@code serverTimezone=UTC} makes the driver read the stored value as UTC;
+     * with the engine JVM also on UTC there is no net conversion and {@code DATETIME}
+     * round-trips unchanged, matching the CDC path. {@code TIMESTAMP} columns are read in
+     * the UTC session and so line up with Debezium's UTC instants too. This assumes the
+     * SeaTunnel container runs on UTC (compose and the offline template both set
+     * {@code TZ=UTC}); a non-UTC engine would reintroduce a DATETIME offset here.
+     */
+    private static String fullJdbcSourceUrl(DataSource source, SeaTunnelProperties properties) {
+        return "jdbc:mysql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
+            + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
+            + "&allowPublicKeyRetrieval=true&serverTimezone=UTC&useInformationSchema=true";
     }
 
     private static String enginePostgresJdbcUrl(DataSource source, SeaTunnelProperties properties) {

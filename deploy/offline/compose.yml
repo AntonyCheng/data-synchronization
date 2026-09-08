@@ -50,6 +50,10 @@ services:
     image: ${SEATUNNEL_IMAGE:-data-sync-poc/seatunnel:2.3.13}
     pull_policy: never
     restart: unless-stopped
+    environment:
+      # The FULL-mode Jdbc source pins serverTimezone=UTC so a zoneless DATETIME
+      # round-trips unchanged; that only holds if the engine JVM is on UTC too.
+      TZ: UTC
     depends_on:
       kafka:
         condition: service_healthy
