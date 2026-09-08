@@ -60,14 +60,29 @@ self-test.
 
 ## How it is applied
 
-`build-patched-connector.ps1` compiles this source against the pristine
-`vendor/connectors/connector-cdc-mysql-2.3.13.jar`, then writes a copy of that jar with
-the two recompiled classes replaced into `vendor/patched/`. The Dockerfile copies
-`vendor/patched/` **after** `vendor/connectors/`, so the patched jar overwrites the
-pristine one inside the image and no duplicate class ends up on the classpath.
-`vendor/connectors/` stays pristine and keeps matching `vendor/checksums.sha1`.
+Which jar to patch matters. SeaTunnel 2.3.13 scans **`/opt/seatunnel/connectors/`** -
+that is where `plugin-mapping.properties` lives - not `connectors/seatunnel/`, and the
+`apache/seatunnel` base image ships its own connector build there. That build is a
+different artifact from the Maven Central one in `vendor/connectors/` (different md5,
+same bundled `com.zendesk:mysql-binlog-connector-java:0.27.2`), so patching the Maven
+jar has no effect on the running engine.
 
-`dev.ps1 up -Poc` runs `fetch-vendor.ps1` and then `build-patched-connector.ps1`.
+`build-patched-connector.ps1` therefore:
+
+1. pulls `connector-cdc-mysql-2.3.13.jar` out of the base image (`docker create` +
+   `docker cp`, cached in `vendor/base/`),
+2. compiles `patch/` against it,
+3. runs `GoldenDbTableMapSelfTest` - two real captured GoldenDB events plus a standard
+   MySQL event - and refuses to publish unless all three pass,
+4. writes a copy of the base jar with the two recompiled classes replaced into
+   `vendor/patched/`.
+
+The Dockerfile then copies `vendor/patched/` into `/opt/seatunnel/connectors/`,
+overwriting the base image's own jar, so exactly one copy is on the scanned path.
+
+`dev.ps1 up -Poc` runs `fetch-vendor.ps1`, then `build-patched-connector.ps1`, then
+`docker compose up --detach --build` (the `--build` is what carries a rebuilt patch
+into the image).
 
 ## Upstream
 

@@ -262,8 +262,10 @@ function Invoke-Up {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ConnectorPatchScript | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "GoldenDB connector patch build failed (see output above)" }
 
+        # --build so a rebuilt patched connector actually reaches the image; docker's
+        # layer cache makes this a no-op when vendor/ and the Dockerfile are unchanged.
         Write-Step "starting SeaTunnel POC stack ($PocProject)"
-        Invoke-Compose -Project $PocProject -File $PocCompose -ComposeArgs @('up', '--detach')
+        Invoke-Compose -Project $PocProject -File $PocCompose -ComposeArgs @('up', '--detach', '--build')
         Wait-DockerHealthy -Name $PocContainers -TimeoutSeconds 180 | Out-Null
         Write-Ok "POC stack up"
     }
