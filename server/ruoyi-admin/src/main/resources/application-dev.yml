@@ -1,6 +1,6 @@
---- # 本地/自动化测试关闭验证码，避免每次登录都要识别图形验证码
+--- # 登录验证码（math 单元数字计算）；需要关闭自动化登录时临时改回 false
 captcha:
-  enable: false
+  enable: true
 
 --- # 监控中心配置
 spring.boot.admin.client:
