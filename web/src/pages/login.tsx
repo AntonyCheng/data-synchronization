@@ -1,18 +1,12 @@
 import { LockOutlined, SafetyOutlined, UserOutlined } from '@ant-design/icons';
 import { LoginForm, ProFormCheckbox, ProFormText } from '@ant-design/pro-components';
 import { history, useSearchParams } from '@umijs/max';
-import { Button, ConfigProvider, message, Space, Tooltip } from 'antd';
+import { Button, ConfigProvider, message } from 'antd';
 import enUS from 'antd/locale/en_US';
 import zhCN from 'antd/locale/zh_CN';
 import { useCallback, useEffect, useState } from 'react';
 import type { VerifyCodeResult } from '@/api/types';
 import { getCodeImg, login } from '@/api/login';
-import { authRouterUrl } from '@/api/system/social/auth';
-import giteeIcon from '@/assets/icons/svg/gitee.svg';
-import githubIcon from '@/assets/icons/svg/github.svg';
-import maxkeyIcon from '@/assets/icons/svg/maxkey.svg';
-import topiamIcon from '@/assets/icons/svg/topiam.svg';
-import wechatIcon from '@/assets/icons/svg/wechat.svg';
 import { useAppStore } from '@/stores/appStore';
 import { useTagsViewStore } from '@/stores/tagsViewStore';
 import { getToken, setToken } from '@/utils/auth';
@@ -26,14 +20,6 @@ function normalizeLoginRedirect(redirect?: string | null) {
   if (redirect === '/login' || redirect.startsWith('/login?')) return DEFAULT_LOGIN_REDIRECT;
   return redirect;
 }
-
-const socialProviders = [
-  { source: 'wechat', label: '微信登录', icon: wechatIcon },
-  { source: 'maxkey', label: 'MaxKey登录', icon: maxkeyIcon },
-  { source: 'topiam', label: 'TopIam登录', icon: topiamIcon },
-  { source: 'gitee', label: 'Gitee登录', icon: giteeIcon },
-  { source: 'github', label: 'Github登录', icon: githubIcon }
-];
 
 function getRememberedLogin() {
   if (typeof window === 'undefined') return { rememberMe: false };
@@ -63,7 +49,6 @@ const authText = {
     code: '验证码',
     rememberMe: '记住我',
     register: '注册账号',
-    social: '第三方登录',
     loginSuccess: '登录成功',
     loginFail: '登录失败',
     usernameRequired: '请输入用户名',
@@ -86,7 +71,6 @@ const authText = {
     code: 'Captcha',
     rememberMe: 'Remember me',
     register: 'Create account',
-    social: 'Social sign-in',
     loginSuccess: 'Signed in successfully',
     loginFail: 'Sign in failed',
     usernameRequired: 'Please enter username',
@@ -128,11 +112,6 @@ export default function Login() {
   useEffect(() => {
     document.title = appEnv.title;
   }, []);
-
-  const doSocialLogin = async (source: string) => {
-    const res = await authRouterUrl(source);
-    window.location.href = res.data;
-  };
 
   return (
     <ConfigProvider locale={appLocale === 'zh_CN' ? zhCN : enUS}>
@@ -225,20 +204,6 @@ export default function Login() {
                 <Button type="link" onClick={() => history.push('/register')}>
                   {text.register}
                 </Button>
-              </div>
-              <div className="login-social-panel">
-                <span>{text.social}</span>
-                <Space size={8}>
-                  {socialProviders.map(item => (
-                    <Tooltip key={item.source} title={item.label}>
-                      <Button
-                        shape="circle"
-                        icon={<img className="login-social-icon" src={item.icon} alt="" />}
-                        onClick={() => doSocialLogin(item.source)}
-                      />
-                    </Tooltip>
-                  ))}
-                </Space>
               </div>
             </LoginForm>
           </div>
