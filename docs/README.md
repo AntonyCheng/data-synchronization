@@ -30,6 +30,7 @@
 | [monitoring-and-consistency.md](monitoring-and-consistency.md) | 运行监控与数据核对 |
 | [credential-protection.md](credential-protection.md) | 凭证 AES 保护与迁移 |
 | [task-creation-wizard.md](task-creation-wizard.md) | 任务创建向导页面规则 |
+| [kafka-event-formats.md](kafka-event-formats.md) | Kafka 目标消息格式（默认 JSON 与 Canal/Debezium/Maxwell/OGG 兼容格式） |
 | [type-mapping-mysql-postgresql.md](type-mapping-mysql-postgresql.md) | MySQL -> PostgreSQL 类型映射 |
 
 ## 运维

@@ -46,6 +46,7 @@ final class SyncTaskGroupConfigGenerator {
         task.setTargetTable(item.getTargetTable());
         task.setSyncMode(group.getSyncMode());
         task.setConfigVersion(group.getConfigVersion());
+        task.setKafkaOutputFormat(group.getKafkaOutputFormat());
         task.setDdlPolicy(item.getDdlPolicy());
         task.setSelectedColumns(item.getSelectedColumns());
         task.setSyncKeyColumns(item.getSyncKeyColumns());

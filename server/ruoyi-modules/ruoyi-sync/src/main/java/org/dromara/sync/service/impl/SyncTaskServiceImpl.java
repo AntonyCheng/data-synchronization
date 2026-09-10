@@ -11,6 +11,7 @@ import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.domain.DataSource;
+import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskConfigVersion;
 import org.dromara.sync.domain.bo.SyncTaskBo;
@@ -164,7 +165,9 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         }
         if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
             entity.setFullDataMode(null);
+            entity.setKafkaOutputFormat(KafkaOutputFormat.parse(entity.getKafkaOutputFormat()).name());
         } else {
+            entity.setKafkaOutputFormat(null);
             if (StringUtils.isBlank(entity.getFullDataMode())) entity.setFullDataMode("UPSERT");
             if (!java.util.Set.of("UPSERT", "OVERWRITE").contains(entity.getFullDataMode().toUpperCase())) {
                 throw new ServiceException("不支持的全量目标数据模式：" + entity.getFullDataMode());
@@ -283,6 +286,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         snapshot.put("ddlPolicy", task.getDdlPolicy());
         snapshot.put("selectedColumns", task.getSelectedColumns());
         snapshot.put("syncKeyColumns", task.getSyncKeyColumns());
+        snapshot.put("kafkaOutputFormat", task.getKafkaOutputFormat());
         snapshot.put("scheduleMode", task.getScheduleMode());
         snapshot.put("cronExpression", task.getCronExpression());
         snapshot.put("readLimitRowsPerSecond", task.getReadLimitRowsPerSecond());

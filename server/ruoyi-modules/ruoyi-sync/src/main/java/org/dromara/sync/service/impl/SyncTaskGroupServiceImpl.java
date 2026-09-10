@@ -11,6 +11,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.domain.DataSource;
+import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupDdlEvent;
 import org.dromara.sync.domain.SyncTaskGroupItem;
@@ -779,6 +780,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (!Set.of("POSTGRESQL", "MYSQL", "KAFKA").contains(StringUtils.defaultIfBlank(target.getSourceType(), "").toUpperCase())) {
             throw new ServiceException("多表 MVP 目标端必须是 PostgreSQL、MySQL 或 Kafka");
         }
+        entity.setKafkaOutputFormat("KAFKA".equalsIgnoreCase(target.getSourceType())
+            ? KafkaOutputFormat.parse(bo.getKafkaOutputFormat()).name() : null);
         String syncMode = entity.getSyncMode().toUpperCase(Locale.ROOT);
         if (!Set.of("FULL", "INCREMENTAL", "FULL_CDC").contains(syncMode)) {
             throw new ServiceException("不支持的同步模式：" + syncMode);
@@ -838,6 +841,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         vo.setAutoDiscover(entity.getAutoDiscover());
         vo.setSyncMode(entity.getSyncMode());
         vo.setDdlPolicy(entity.getDdlPolicy());
+        vo.setKafkaOutputFormat(entity.getKafkaOutputFormat());
         vo.setReadLimitRowsPerSecond(entity.getReadLimitRowsPerSecond());
         vo.setReadLimitBytesPerSecond(entity.getReadLimitBytesPerSecond());
         vo.setSnapshotParallelism(entity.getSnapshotParallelism());

@@ -4,6 +4,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
@@ -37,12 +38,14 @@ public class KafkaEventProducer {
 
     private final JsonMapper jsonMapper;
     private final SyncTaskMapper syncTaskMapper;
+    private final KafkaEventSerializer serializer;
     private final ConcurrentMap<String, KafkaProducer<String, String>> producers = new ConcurrentHashMap<>();
 
     @Autowired
     public KafkaEventProducer(JsonMapper jsonMapper, SyncTaskMapper syncTaskMapper) {
         this.jsonMapper = jsonMapper;
         this.syncTaskMapper = syncTaskMapper;
+        this.serializer = new KafkaEventSerializer(jsonMapper);
     }
 
     /** Constructor retained for envelope-only unit tests. */
@@ -53,9 +56,15 @@ public class KafkaEventProducer {
     /** Publish normalized events for a platform task and persist delivery metrics. */
     public List<PublishResult> publishForTask(Long taskId, String bootstrapServers, String topic,
                                                List<KafkaEventNormalizer.NormalizedEvent> events) {
+        return publishForTask(taskId, bootstrapServers, topic, events, KafkaOutputFormat.ENVELOPE);
+    }
+
+    public List<PublishResult> publishForTask(Long taskId, String bootstrapServers, String topic,
+                                               List<KafkaEventNormalizer.NormalizedEvent> events,
+                                               KafkaOutputFormat format) {
         if (syncTaskMapper == null) throw new ServiceException("Kafka 任务发布器未配置任务存储");
         if (syncTaskMapper.selectById(taskId) == null) throw new ServiceException("同步任务不存在");
-        List<PublishResult> results = publish(bootstrapServers, topic, events);
+        List<PublishResult> results = publish(bootstrapServers, topic, events, format);
         persistMetrics(taskId, events, results);
         return results;
     }
@@ -89,6 +98,12 @@ public class KafkaEventProducer {
 
     public List<PublishResult> publish(String bootstrapServers, String topic,
                                        List<KafkaEventNormalizer.NormalizedEvent> events) {
+        return publish(bootstrapServers, topic, events, KafkaOutputFormat.ENVELOPE);
+    }
+
+    public List<PublishResult> publish(String bootstrapServers, String topic,
+                                       List<KafkaEventNormalizer.NormalizedEvent> events,
+                                       KafkaOutputFormat format) {
         if (bootstrapServers == null || bootstrapServers.isBlank()) throw new ServiceException("Kafka broker 地址不能为空");
         if (topic == null || topic.isBlank()) throw new ServiceException("Kafka topic 不能为空");
         if (events == null || events.isEmpty()) return List.of();
@@ -103,7 +118,7 @@ public class KafkaEventProducer {
             for (KafkaEventNormalizer.NormalizedEvent event : events) {
                 String key = event.key().toString();
                 keys.add(key);
-                futures.add(producer.send(new ProducerRecord<>(topic, key, toEnvelope(event).toString())));
+                futures.add(producer.send(new ProducerRecord<>(topic, key, serializer.serialize(format, event))));
             }
             List<PublishResult> results = new ArrayList<>(events.size());
             for (int index = 0; index < futures.size(); index++) {
@@ -138,19 +153,7 @@ public class KafkaEventProducer {
     }
 
     ObjectNode toEnvelope(KafkaEventNormalizer.NormalizedEvent event) {
-        ObjectNode envelope = jsonMapper.createObjectNode();
-        envelope.put("op", event.op());
-        envelope.set("key", event.key());
-        if (event.data() == null || event.data().isMissingNode()) envelope.putNull("data");
-        else envelope.set("data", event.data());
-        if (event.before() == null || event.before().isMissingNode()) envelope.putNull("before");
-        else envelope.set("before", event.before());
-        ObjectNode source = envelope.putObject("source");
-        source.put("database", event.sourceDatabase());
-        source.put("table", event.sourceTable());
-        envelope.put("sourceEventTime", event.sourceEventTime());
-        envelope.put("phase", event.phase());
-        return envelope;
+        return serializer.envelope(event);
     }
 
     private static String safeMessage(Exception ex) {

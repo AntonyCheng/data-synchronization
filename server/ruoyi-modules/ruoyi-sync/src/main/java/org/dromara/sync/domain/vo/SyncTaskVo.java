@@ -41,6 +41,7 @@ public class SyncTaskVo implements Serializable {
     private String overwriteStageTable;
     private String selectedColumns;
     private String syncKeyColumns;
+    private String kafkaOutputFormat;
     private Integer readLimitRowsPerSecond;
     private Long readLimitBytesPerSecond;
     private Integer snapshotParallelism;

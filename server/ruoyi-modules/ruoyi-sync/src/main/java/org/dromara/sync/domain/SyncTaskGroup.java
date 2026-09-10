@@ -23,6 +23,7 @@ public class SyncTaskGroup extends BaseEntity {
     private String autoDiscover;
     private String syncMode;
     private String ddlPolicy;
+    private String kafkaOutputFormat;
     private Integer readLimitRowsPerSecond;
     private Long readLimitBytesPerSecond;
     private Integer snapshotParallelism;

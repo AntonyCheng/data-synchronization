@@ -49,6 +49,7 @@ create table if not exists ds_sync_task
     overwrite_stage_table varchar(255) default null comment '覆盖刷新临时表',
     selected_columns varchar(2000) default null comment '纳入同步的源字段，逗号分隔',
     sync_key_columns varchar(1000) default null comment '用户确认的同步键字段，逗号分隔',
+    kafka_output_format varchar(32) not null default 'ENVELOPE' comment 'Kafka 输出格式 ENVELOPE/CANAL_JSON/COMPATIBLE_DEBEZIUM_JSON/MAXWELL_JSON/OGG_JSON',
     read_limit_rows_per_second int default 1000 comment '源端读取最大行数每秒',
     read_limit_bytes_per_second bigint default 10485760 comment '源端读取最大字节每秒',
     snapshot_parallelism int default 1 comment '快照阶段并行度',

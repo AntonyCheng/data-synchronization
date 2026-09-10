@@ -53,6 +53,7 @@ public class SyncTaskBo implements Serializable {
     private Integer configVersion;
     private String selectedColumns;
     private String syncKeyColumns;
+    private String kafkaOutputFormat;
     private Integer readLimitRowsPerSecond;
     private Long readLimitBytesPerSecond;
     private Integer snapshotParallelism;

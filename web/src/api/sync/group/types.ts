@@ -22,6 +22,7 @@ export interface SyncTaskGroupForm {
   autoDiscover?: '0' | '1';
   syncMode?: string;
   ddlPolicy?: string;
+  kafkaOutputFormat?: string;
   readLimitRowsPerSecond?: number;
   readLimitBytesPerSecond?: number;
   snapshotParallelism?: number;

@@ -11,7 +11,15 @@ import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
 
-const emptyForm: SyncTaskGroupForm = { syncScope: 'MULTI_TABLE', autoDiscover: '0', syncMode: 'FULL_CDC', ddlPolicy: 'FAIL', readLimitRowsPerSecond: 1000, readLimitBytesPerSecond: 10485760, snapshotParallelism: 1, sourceConnectionLimit: 2, items: [{ targetSchema: 'public' }] };
+const emptyForm: SyncTaskGroupForm = { syncScope: 'MULTI_TABLE', autoDiscover: '0', syncMode: 'FULL_CDC', ddlPolicy: 'FAIL', kafkaOutputFormat: 'ENVELOPE', readLimitRowsPerSecond: 1000, readLimitBytesPerSecond: 10485760, snapshotParallelism: 1, sourceConnectionLimit: 2, items: [{ targetSchema: 'public' }] };
+const kafkaOutputFormatOptions = [
+  { label: '默认JSON', value: 'ENVELOPE' },
+  { label: 'Canal JSON', value: 'CANAL_JSON' },
+  { label: '兼容 Debezium JSON', value: 'COMPATIBLE_DEBEZIUM_JSON' },
+  { label: 'Maxwell JSON', value: 'MAXWELL_JSON' },
+  { label: 'OGG JSON', value: 'OGG_JSON' }
+];
+const kafkaOutputFormatLabel = (value?: string) => kafkaOutputFormatOptions.find(option => option.value === value)?.label || value || '-';
 
 const groupStatusLabels: Record<string, string> = {
   DRAFT: '草稿',
@@ -131,6 +139,7 @@ export default function SyncTaskGroupPage() {
     const databaseScope = values.syncScope === 'DATABASE';
     const payload = {
       ...values,
+      kafkaOutputFormat: dataSources.find(item => String(item.sourceId) === String(values.targetId))?.sourceType === 'KAFKA' ? values.kafkaOutputFormat : undefined,
       // Form.List values remain mounted when users switch to whole-database mode.
       // Whole-database groups discover their items server-side and must not submit them.
       items: databaseScope ? [] : values.items?.map(item => ({ ...item, selectedColumns: Array.isArray(item.selectedColumns) ? item.selectedColumns.join(',') : item.selectedColumns }))
@@ -208,6 +217,16 @@ export default function SyncTaskGroupPage() {
         </Radio.Group>
       </Form.Item>
        <Space style={{ width: '100%' }} align="start"><ProFormSelect name="sourceId" label="源数据源（MySQL）" options={sourceOptions} rules={[{ required: true }]} fieldProps={{ style: { width: 300 }, onChange: value => void loadTables(value as string | number) }} /><ProFormDependency name={['sourceId']}>{({ sourceId }) => <ProFormSelect name="targetId" label="目标数据源（MySQL / PostgreSQL / Kafka）" options={targetOptions.filter(option => String(option.value) !== String(sourceId))} rules={[{ required: true }]} fieldProps={{ style: { width: 300 }, onChange: value => { const target = dataSources.find(item => String(item.sourceId) === String(value)); const items = form.getFieldValue('items') || []; form.setFieldsValue({ items: items.map((item: NonNullable<SyncTaskGroupForm['items']>[number]) => ({ ...item, targetSchema: target?.sourceType === 'POSTGRESQL' ? (item.targetSchema || 'public') : undefined })) }); setTargetTables([]); void loadTargetTables(value as string | number); } }} />}</ProFormDependency></Space>
+      {kafkaTarget && (
+        <Form.Item
+          name="kafkaOutputFormat"
+          label="Kafka 输出格式（组内全部表项统一）"
+          rules={[{ required: true, message: '请选择输出格式' }]}
+          extra="组级配置：整库同步自动发现的新表同样继承该格式。消息 Key 始终为同步键 JSON，分区与顺序不变。"
+        >
+          <Select options={kafkaOutputFormatOptions} style={{ width: 300 }} placeholder="默认JSON" />
+        </Form.Item>
+      )}
       <Divider titlePlacement="left" plain>源库保护（每个表项）</Divider>
       <Space wrap align="start">
         <ProFormDigit name="readLimitRowsPerSecond" label="最大行数/秒" min={1} max={100000} rules={[{ required: true }]} fieldProps={{ style: { width: 170 }}} />
@@ -225,6 +244,7 @@ export default function SyncTaskGroupPage() {
           <Descriptions.Item label="同步粒度">{detail.syncScope === 'DATABASE' ? '整库' : '多表'}</Descriptions.Item>
           <Descriptions.Item label="表数量">{detail.items.length}</Descriptions.Item>
           <Descriptions.Item label="同步模式">{{ FULL: '全量', INCREMENTAL: '增量', FULL_CDC: '全量 + CDC' }[detail.syncMode || ''] || detail.syncMode || '-'}</Descriptions.Item>
+          {detailTarget?.sourceType === 'KAFKA' && <Descriptions.Item label="Kafka 输出格式">{kafkaOutputFormatLabel(detail.kafkaOutputFormat)}</Descriptions.Item>}
           <Descriptions.Item label="配置版本">{detail.configVersion || '-'}</Descriptions.Item>
           <Descriptions.Item label="最近检查点">{detail.lastCheckpointTime || '-'}</Descriptions.Item>
           <Descriptions.Item label="每表最大行数/秒">{detail.readLimitRowsPerSecond ?? '-'}</Descriptions.Item>

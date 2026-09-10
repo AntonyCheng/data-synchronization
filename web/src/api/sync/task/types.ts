@@ -20,6 +20,7 @@ export interface SyncTaskForm {
   configVersion?: number;
   selectedColumns?: string | string[];
   syncKeyColumns?: string;
+  kafkaOutputFormat?: string;
   readLimitRowsPerSecond?: number;
   readLimitBytesPerSecond?: number;
   snapshotParallelism?: number;

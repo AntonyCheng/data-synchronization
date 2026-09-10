@@ -69,6 +69,10 @@ MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POST
 
 对于 `FULL_CDC` 和 `INCREMENTAL`，SeaTunnel 配置使用 `Sql` Transform 投影已选列，JDBC sink 只接收投影后的字段；`FULL` 任务使用显式列清单的 JDBC `SELECT`。因此字段排除同时作用于全量和 CDC 变更，不只是界面配置。`tinyint(1)`、TEXT/BLOB/JSON 和非 Unicode 源字符集会在创建表单显示风险提示，不会隐式改变字段类型。
 
+## Kafka 输出格式
+
+目标端为 Kafka 的任务可选 `kafkaOutputFormat` 字段：`ENVELOPE`（界面显示「默认JSON」，平台自带的事件信封）、`CANAL_JSON`、`COMPATIBLE_DEBEZIUM_JSON`、`MAXWELL_JSON`、`OGG_JSON`，留空按 `ENVELOPE` 处理，非法值保存时报错；非 Kafka 目标该字段被置空。单表任务存于 `ds_sync_task`，任务组为组级统一配置（`ds_sync_task_group`，整库自动发现的表项同样继承）。格式只影响平台桥接写入目标 topic 的消息体：引擎侧 raw topic 的 HOCON 与配置指纹不变，Kafka 消息 Key 恒为同步键 JSON。修改格式与其它编辑一样提升 `configVersion`，下次启动使用新的 raw topic（重新全量）。各格式的完整消息结构与再消费方式见 [kafka-event-formats.md](kafka-event-formats.md)。
+
 ## 源库保护参数
 
 单表任务和任务组请求都可携带以下任务级字段；任务组字段按每个独立表项作业生效，不代表对整个组的共享连接预算：

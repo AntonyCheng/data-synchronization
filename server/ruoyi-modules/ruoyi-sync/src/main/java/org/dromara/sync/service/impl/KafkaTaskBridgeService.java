@@ -15,6 +15,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.domain.DataSource;
+import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
@@ -81,11 +82,12 @@ class KafkaTaskBridgeService {
         // undo the Oracle-compat UPPER CASE folding a GoldenDB JDBC snapshot applies.
         List<String> sourceColumns = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
         ensureTopics(task, target);
+        KafkaOutputFormat outputFormat = KafkaOutputFormat.parse(task.getKafkaOutputFormat());
         workers.compute(task.getTaskId(), (taskId, existing) -> {
             if (existing != null && existing.isRunning()) return existing;
             if (existing != null) existing.close();
             Worker worker = new Worker(taskId, bootstrapServers(target), rawTopic(task), task.getTargetTable(),
-                task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics);
+                task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
             worker.future = executor.submit(worker);
             return worker;
         });
@@ -204,6 +206,7 @@ class KafkaTaskBridgeService {
         private final List<String> keyFields;
         private final List<String> sourceColumns;
         private final boolean persistTaskMetrics;
+        private final KafkaOutputFormat outputFormat;
         private final AtomicBoolean running = new AtomicBoolean(true);
         private volatile KafkaConsumer<String, String> consumer;
         private volatile Future<?> future;
@@ -213,7 +216,8 @@ class KafkaTaskBridgeService {
                        String sourceDatabase,
                        List<String> keyFields,
                        List<String> sourceColumns,
-                       boolean persistTaskMetrics) {
+                       boolean persistTaskMetrics,
+                       KafkaOutputFormat outputFormat) {
             this.taskId = taskId;
             this.bootstrapServers = bootstrapServers;
             this.rawTopic = rawTopic;
@@ -224,6 +228,7 @@ class KafkaTaskBridgeService {
             this.keyFields = List.copyOf(keyFields);
             this.sourceColumns = List.copyOf(sourceColumns);
             this.persistTaskMetrics = persistTaskMetrics;
+            this.outputFormat = outputFormat;
         }
 
         @Override
@@ -285,16 +290,16 @@ class KafkaTaskBridgeService {
                 String database = StringUtils.isBlank(sourceDatabase) ? "unknown" : sourceDatabase;
                 List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalizeSnapshotRows(
                     rawEvents, database, sourceTable, keyFields, sourceColumns);
-                if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events);
-                else producer.publish(bootstrapServers, targetTopic, events);
+                if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat);
+                else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
                 return;
             }
             int snapshotCount = 0;
             while (snapshotCount < rawEvents.size()
                 && "r".equals(rawEvents.get(snapshotCount).path("op").asText())) snapshotCount++;
             List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalize(rawEvents, snapshotCount, keyFields);
-            if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events);
-            else producer.publish(bootstrapServers, targetTopic, events);
+            if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat);
+            else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
         }
 
         private void close() {
