@@ -35,17 +35,18 @@ $missing = @($required | Where-Object { -not (Test-Path (Join-Path $root $_)) })
 if ($missing.Count -gt 0) { throw "Offline package prerequisites are missing: $($missing -join ', ')" }
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-foreach ($directory in 'backend', 'database', 'database\migrations', 'frontend', 'images', 'runtime\mysql', 'runtime\redis', 'runtime\seatunnel\checkpoint', 'runtime\seatunnel\logs', 'seatunnel') {
+foreach ($directory in 'database', 'database\migrations', 'frontend', 'images', 'runtime\mysql', 'runtime\redis', 'runtime\seatunnel\checkpoint', 'runtime\seatunnel\logs', 'runtime\backend', 'seatunnel') {
     New-Item -ItemType Directory -Force -Path (Join-Path $output $directory) | Out-Null
 }
+
+$backendImage = 'data-sync-mvp/backend:latest'
+& docker build --file (Join-Path $root 'server\ruoyi-admin\Dockerfile') --tag $backendImage (Join-Path $root 'server\ruoyi-admin')
+if ($LASTEXITCODE -ne 0) { throw 'Backend Docker image build failed.' }
 
 Copy-Item (Join-Path $template 'compose.yml') (Join-Path $output 'compose.yml') -Force
 Copy-Item (Join-Path $template 'Caddyfile') (Join-Path $output 'Caddyfile') -Force
 Copy-Item (Join-Path $template '.env.example') (Join-Path $output '.env.example') -Force
 Copy-Item (Join-Path $template 'README.md') (Join-Path $output 'README.md') -Force
-Copy-Item (Join-Path $template 'start-backend.ps1') (Join-Path $output 'start-backend.ps1') -Force
-Copy-Item (Join-Path $template 'migrate-schema.ps1') (Join-Path $output 'migrate-schema.ps1') -Force
-Copy-Item (Join-Path $root 'server\ruoyi-admin\target\ruoyi-admin.jar') (Join-Path $output 'backend\ruoyi-admin.jar') -Force
 Copy-Item (Join-Path $root 'server\script\sql\ry_vue.sql') (Join-Path $output 'database\ry_vue.sql') -Force
 Copy-Item (Join-Path $root 'server\script\sql\ry_sync.sql') (Join-Path $output 'database\ry_sync.sql') -Force
 Copy-Item (Join-Path $root 'platform\init\001-ry-vue.sh') (Join-Path $output 'database\001-ry-vue.sh') -Force
@@ -59,9 +60,9 @@ if ($ImageArchivePath) {
     Copy-Item $archiveSource (Join-Path $output 'images\data-sync-mvp-images.tar') -Force
 }
 elseif (!$SkipImageExport) {
-    & docker image inspect mysql:8.0 redis:7-alpine caddy:2.8.4-alpine apache/kafka:3.8.0 data-sync-poc/seatunnel:2.3.13 *> $null
+    & docker image inspect mysql:8.0 redis:7-alpine caddy:2.8.4-alpine apache/kafka:3.8.0 data-sync-poc/seatunnel:2.3.13 $backendImage *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Required offline images are missing from the local Docker cache.' }
-    & docker image save --output (Join-Path $output 'images\data-sync-mvp-images.tar') mysql:8.0 redis:7-alpine caddy:2.8.4-alpine apache/kafka:3.8.0 data-sync-poc/seatunnel:2.3.13
+    & docker image save --output (Join-Path $output 'images\data-sync-mvp-images.tar') mysql:8.0 redis:7-alpine caddy:2.8.4-alpine apache/kafka:3.8.0 data-sync-poc/seatunnel:2.3.13 $backendImage
     if ($LASTEXITCODE -ne 0) { throw 'Docker image export failed.' }
 }
 

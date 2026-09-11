@@ -93,8 +93,28 @@ services:
       timeout: 5s
       retries: 30
 
-  web:
-    image: ${CADDY_IMAGE:-caddy:2.8.4-alpine}
+  migrate:
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    pull_policy: never
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_PWD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ./database/migrations:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /migrations/ry_sync_migration_*.sql; do
+          echo "Applying $$f"
+          mysql -h mysql -uroot --default-character-set=utf8mb4 --show-warnings "${MYSQL_DATABASE:-ry-vue}" < "$$f"
+        done
+
+  backend:
+    image: ${BACKEND_IMAGE:-data-sync-mvp/backend:latest}
     pull_policy: never
     restart: unless-stopped
     depends_on:
@@ -102,12 +122,40 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
-      BACKEND_PORT: ${BACKEND_PORT:-18082}
+      TZ: Asia/Shanghai
+      SPRING_PROFILES_ACTIVE: dev
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-ry-vue}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=GMT%2B8&autoReconnect=true&rewriteBatchedStatements=true&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true"
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_USERNAME: root
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SEATUNNEL_ENDPOINT: http://seatunnel:8080
+      SYNC_CREDENTIAL_ENCRYPTION_ENABLED: ${SYNC_CREDENTIAL_ENCRYPTION_ENABLED:-true}
+      SYNC_CREDENTIAL_ENCRYPTION_PASSWORD: ${SYNC_CREDENTIAL_ENCRYPTION_PASSWORD}
+    ports:
+      - "${BACKEND_PORT:-18082}:8080"
+    volumes:
+      - ./runtime/backend:/ruoyi/server/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  web:
+    image: ${CADDY_IMAGE:-caddy:2.8.4-alpine}
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
     ports:
       - "${WEB_PORT:-18083}:80"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./frontend:/srv:ro
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
