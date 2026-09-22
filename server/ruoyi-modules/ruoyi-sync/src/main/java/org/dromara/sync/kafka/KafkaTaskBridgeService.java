@@ -102,6 +102,11 @@ public class KafkaTaskBridgeService {
         return worker != null && worker.isRunning();
     }
 
+    /** Ids (task ids or group item ids) that currently have a worker in this process, live or not. */
+    public Set<Long> localOwnerIds() {
+        return Set.copyOf(workers.keySet());
+    }
+
     /**
      * Whole-database groups own their topic namespace: the topic is named after the source
      * table and the platform creates it here, the same way a relational whole-database

@@ -2,14 +2,29 @@
 
 ## 监控指标
 
-单表状态接口 `POST /sync/task/{id}/status` 在刷新 SeaTunnel 作业状态时，同时读取引擎 `job-info.metrics` 投影到任务详情：
+单表状态接口 `POST /sync/task/{id}/status` 和任务组状态接口在刷新 SeaTunnel 作业状态时，同时读取引擎 `job-info.metrics` 投影到任务 / 表项详情：
 
-- 阶段：`SNAPSHOT` 或 `CDC`。MVP 根据引擎作业状态映射，SeaTunnel 尚未提供独立快照完成事件时采用保守映射。
-- 源端已读取、目标端已提交：行数和字节数（引擎返回时展示）。
-- 源端和目标端吞吐：QPS（引擎返回时展示）。
-- CDC 延迟：只有引擎同时返回源事件时间和目标提交时间，且时间顺序可信时计算；否则明确显示“暂不可计算”，不能以请求时间代替延迟。
+- 阶段：`SNAPSHOT` 或 `CDC`。根据引擎作业状态映射，SeaTunnel 尚未提供独立的快照完成事件时采用保守映射。
+- 源端已读取、目标端已提交：行数和字节数；源端和目标端吞吐：引擎自己的 QPS。
+- 积压：源端已读取 − 目标端已提交（不为负），是关系型目标唯一可得的"落后程度"指标。
+- 端到端延迟：仅 Kafka 目标可得，由平台桥接按"源事件时间 → broker ack"计算；关系型目标显示为空，不以请求时间冒充延迟。
 
-指标是手动点击“刷新状态”时读取的 MVP 快照，不是服务端推送。引擎未返回某项指标时，接口返回空值和 `metricsMessage`，不阻断状态刷新。
+**Zeta 2.3.13 的两个事实**：`job-info.metrics` 把所有数值序列化成 JSON 字符串（`"SourceReceivedCount":"50"`），投影层同时接受字符串与数值；它不返回任何事件时间戳，因此关系型目标无法计算时间型 CDC 延迟。
+
+### 指标历史
+
+每次成功的引擎轮询（30 秒对账 + 手动刷新）为任务 / 表项追加一条采样到 `ds_sync_metrics_sample`；写入失败只告警，不影响对账本身。
+
+- `GET /sync/task/{id}/metrics?minutes=60`、`GET /sync/group/{groupId}/item/{itemId}/metrics?minutes=60` 返回窗口内的采样序列（最早在前）和最新一条采样；窗口限制在 5～1440 分钟，超过 `sync.metrics.max-points`（1500）时等距抽稀。
+- 任务列表 / 详情和任务组表项携带 `latestMetrics`（最新采样），列表页无需再点"刷新状态"即可看到吞吐与积压。
+- 保留 `sync.metrics.retention-days`（默认 7 天）内的采样，每小时清理；删除任务 / 任务组时连带删除。
+- 前端"运行指标历史"面板：吞吐（源端 / 目标端）与积压两张单轴折线图，Kafka 目标另有端到端延迟图，可选 15 分钟 / 1 小时 / 6 小时 / 24 小时窗口，30 秒自动刷新。
+
+## Kafka 桥接的进程内对账
+
+Kafka 目标的桥接 worker 运行在后端进程内。`KafkaBridgeReconciler` 在每个实例上每 `sync.kafka-bridge.reconcile-interval-ms`（30 秒）执行一次：为库中 `RUNNING` 的 Kafka 任务和存活任务组中 `RUNNING` 的表项确保本地 worker 存在，并停止其他一切 worker（在别的实例上被停止 / 暂停 / 重建的任务留下的 worker 因此不会变成僵尸消费者）。桥接需要与否的唯一规则是"表项 / 任务处于 RUNNING"；状态刷新里的即时修复遵循同一规则。
+
+raw topic 只有一个分区，所以多个实例的 worker 加入同一 consumer group 时只有一个实际消费，其余待命；某实例崩溃后 Kafka 在下一次 rebalance 把分区交给幸存实例，平台不需要额外协调。启动失败（典型是输出 topic 不存在）每个 owner 只告警一次，恢复时再记一条。
 
 ## 数据核对
 
@@ -29,4 +44,4 @@
 
 ## MVP 边界
 
-本阶段不引入主动告警、历史时序指标、自动 DDL 修复或非 MySQL -> PostgreSQL 目标。
+本阶段不引入主动告警、自动 DDL 修复；指标历史只保留原始采样，不做聚合归档。

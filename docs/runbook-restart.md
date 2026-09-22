@@ -8,7 +8,7 @@
 
 1. 启动 `dbs-mysql`、`dbs-redis`，确认健康检查通过。
 2. 启动 SeaTunnel，确认 `/running-jobs` 可访问。
-3. 在开发机使用本机 Java 21 启动后端。单表任务由 `SeaTunnelJobServiceImpl.recoverRunningTasks()` 对账；任务组由 `SyncTaskGroupServiceImpl.recoverRunningGroups()` 对账。
+3. 在开发机使用本机 Java 21 启动后端。单表任务由 `SeaTunnelJobServiceImpl.recoverRunningTasks()` 对账；任务组由 `SyncTaskGroupServiceImpl.recoverRunningGroups()` 对账；Kafka 桥接 worker 由 `KafkaBridgeReconciler` 在启动 40 秒后开始每 30 秒对齐一次。
 4. 对账结果写回元数据库：引擎仍运行则保持 `RUNNING`，已取消/完成则映射为 `STOPPED`/`FINISHED`，引擎不可达或作业不存在则标记 `FAILED`。
 
 ## 本机开发启动

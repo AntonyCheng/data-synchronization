@@ -27,7 +27,7 @@
 | [job-lifecycle.md](job-lifecycle.md) | SeaTunnel 作业生命周期 |
 | [scheduling-and-overwrite.md](scheduling-and-overwrite.md) | 调度与覆盖策略 |
 | [ddl-change-management.md](ddl-change-management.md) | 运行时表结构变更管理 |
-| [monitoring-and-consistency.md](monitoring-and-consistency.md) | 运行监控与数据核对 |
+| [monitoring-and-consistency.md](monitoring-and-consistency.md) | 运行监控、指标历史、Kafka 桥接对账与数据核对 |
 | [credential-protection.md](credential-protection.md) | 凭证 AES 保护与迁移 |
 | [task-creation-wizard.md](task-creation-wizard.md) | 任务创建向导页面规则 |
 | [kafka-event-formats.md](kafka-event-formats.md) | Kafka 目标消息格式（默认 JSON 与 Canal/Debezium/Maxwell/OGG 兼容格式） |

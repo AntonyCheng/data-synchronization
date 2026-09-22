@@ -173,6 +173,10 @@ sync:
     retention-days: ${SYNC_METRICS_RETENTION_DAYS:7}
     max-window-minutes: ${SYNC_METRICS_MAX_WINDOW_MINUTES:1440}
     max-points: ${SYNC_METRICS_MAX_POINTS:1500}
+  kafka-bridge:
+    # 每个实例定期让本地 Kafka 桥接 worker 与库中 RUNNING 的 Kafka 任务/表项对齐（补起、停掉）。
+    # raw topic 单分区 + 所有实例加入同一 consumer group = 天然的故障转移。
+    reconcile-interval-ms: ${SYNC_KAFKA_BRIDGE_RECONCILE_INTERVAL_MS:30000}
 springdoc:
   api-docs:
     # 是否开启接口文档

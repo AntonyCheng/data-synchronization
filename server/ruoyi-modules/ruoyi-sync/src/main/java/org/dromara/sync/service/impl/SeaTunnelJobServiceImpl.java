@@ -162,12 +162,14 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         }
         String platformStatus = EngineJobStates.toPlatformStatus(snapshot.status());
         if (kafka) {
-            if (Set.of(SyncStatus.STOPPED, SyncStatus.FAILED, SyncStatus.FINISHED).contains(platformStatus)) {
+            // A bridge is wanted exactly while the task is RUNNING (KafkaBridgeReconciler applies
+            // the same rule process-wide). Raw events buffered during a pause are consumed after
+            // resume - offsets are only committed after the broker acked the normalized event.
+            if (!SyncStatus.RUNNING.equals(platformStatus)) {
                 kafkaTaskBridgeService.stop(taskId);
-            } else if (SyncStatus.isActive(platformStatus) && !kafkaTaskBridgeService.isRunning(taskId)) {
-                // The engine job is alive but the bridge is not - it was torn down by an
-                // earlier status failure, or died on its own. Nothing else restarts it
-                // between user actions, so heal it here on the periodic reconcile.
+            } else if (!kafkaTaskBridgeService.isRunning(taskId)) {
+                // Engine job alive, bridge dead (torn down by an earlier status failure or died
+                // on its own) - heal it right here rather than waiting for the next reconcile pass.
                 startBridge(task);
             }
         }
@@ -211,7 +213,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     public void recoverRunningTasks() {
         syncTaskMapper.selectActive().forEach(task -> {
             try {
-                if (isKafkaTask(task)) startBridge(task);
+                if (SyncStatus.RUNNING.equals(task.getStatus()) && isKafkaTask(task)) startBridge(task);
                 refreshStatus(task.getTaskId());
             } catch (Exception ex) {
                 markFailed(task, task.getEngineJobId(), ex.getMessage());
