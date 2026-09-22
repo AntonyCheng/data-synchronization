@@ -35,6 +35,7 @@ export function discoverSyncTaskGroupTables(id: string | number) { return reques
 export function checkSyncTaskGroupDdl(id: string | number) { return request<R<SyncTaskGroupDdlCheckResult>>({ url: `/sync/group/${id}/ddl-check`, method: 'post' }); }
 export function checkSyncTaskGroupData(id: string | number) { return request<R<SyncTaskGroupDataCheckResult>>({ url: `/sync/group/${id}/check`, method: 'post' }); }
 export function resumeSyncTaskGroupItemAfterDdl(groupId: string | number, itemId: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${groupId}/item/${itemId}/resume-after-ddl`, method: 'post' }); }
+export function reinitializeSyncTaskGroupItem(groupId: string | number, itemId: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${groupId}/item/${itemId}/reinitialize`, method: 'post' }); }
 export function refreshSyncTaskGroupStatus(id: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${id}/status`, method: 'post' }); }
 export function pauseSyncTaskGroup(id: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${id}/pause`, method: 'post' }); }
 export function resumeSyncTaskGroup(id: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${id}/resume`, method: 'post' }); }

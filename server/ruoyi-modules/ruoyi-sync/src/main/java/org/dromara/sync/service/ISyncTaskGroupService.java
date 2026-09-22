@@ -41,6 +41,15 @@ public interface ISyncTaskGroupService {
      */
     SyncTaskGroupOperationResult resumeItem(Long groupId, Long itemId);
 
+    /**
+     * Discard one table item's engine job and recovery state and rebuild it from a fresh
+     * snapshot, leaving the other tables untouched. The way out of an isolated (FAILED /
+     * DDL_BLOCKED) table whose savepoint can no longer be reused - e.g. after a source
+     * column was added. A selection that covered every column at start follows the
+     * table and picks the new column up; an explicit partial selection is kept.
+     */
+    SyncTaskGroupOperationResult reinitializeItem(Long groupId, Long itemId);
+
     SyncTaskGroupStatus refreshStatus(Long groupId);
 
     SyncTaskGroupOperationResult pause(Long groupId);

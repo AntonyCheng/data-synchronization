@@ -12,6 +12,12 @@ import java.time.LocalDateTime;
 @TableName("ds_sync_task_group_ddl_event")
 public class SyncTaskGroupDdlEvent {
 
+    /** Drift detected; the target still has to be fixed before the table can resume. */
+    public static final String STATUS_PENDING_FIX = "PENDING_FIX";
+    /** Target is compatible again; an operator may resume the table from its savepoint. */
+    public static final String STATUS_READY_TO_RESUME = "READY_TO_RESUME";
+    public static final String STATUS_RESOLVED = "RESOLVED";
+
     @TableId(value = "event_id", type = IdType.ASSIGN_ID)
     private Long eventId;
     private Long groupId;

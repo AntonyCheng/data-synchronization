@@ -41,9 +41,8 @@ import java.time.LocalDateTime;
 @Service
 public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
 
-    private static final String EVENT_PENDING_FIX = "PENDING_FIX";
-    private static final String EVENT_READY_TO_RESUME = "READY_TO_RESUME";
-    private static final String EVENT_RESOLVED = "RESOLVED";
+    private static final String EVENT_PENDING_FIX = SyncTaskGroupDdlEvent.STATUS_PENDING_FIX;
+    private static final String EVENT_READY_TO_RESUME = SyncTaskGroupDdlEvent.STATUS_READY_TO_RESUME;
 
     private final SyncTaskGroupMapper groupMapper;
     private final SyncTaskGroupItemMapper itemMapper;
@@ -125,7 +124,7 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
                 if (existing != null) {
                     existing.setStatus(EVENT_READY_TO_RESUME);
                     existing.setDetails("源表结构已恢复为启动快照。请确认目标端结构后恢复该表。");
-                    existing.setRemediation("确认目标端仍与源端兼容后，使用“恢复该表”继续从 savepoint 同步。");
+                    existing.setRemediation("确认目标端仍与源端兼容后，使用“恢复该表”继续从 savepoint 同步；若被拒绝，使用“重新初始化该表”重建。");
                     ddlEventMapper.updateById(existing);
                     result.getEvents().add(toVo(existing, item, target));
                     readyToResume++;
@@ -163,9 +162,7 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
         }
         // The lock is reentrant, so the group service's own locking simply nests here.
         groupService.resumeItem(groupId, itemId);
-        event.setStatus(EVENT_RESOLVED);
-        event.setResolvedAt(LocalDateTime.now());
-        ddlEventMapper.updateById(event);
+        ddlEventMapper.resolveOpen(itemId, null);
         return SyncTaskGroupOperationResult.of(requireGroup(groupId), "表 " + item.getSourceTable() + " 已通过结构校验并恢复");
     }
 

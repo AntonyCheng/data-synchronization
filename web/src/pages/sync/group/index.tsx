@@ -4,7 +4,7 @@ import { Alert, AutoComplete, Button, Checkbox, Descriptions, Divider, Form, Inp
 import { useEffect, useRef, useState } from 'react';
 import { createKafkaTopic, getDataSourceMetadata, listDataSourceTables, listDataSources, listKafkaTopics } from '@/api/sync/data-source';
 import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
-import { addSyncTaskGroup, checkSyncTaskGroupData, checkSyncTaskGroupDdl, deleteSyncTaskGroup, discoverSyncTaskGroupTables, getSyncTaskGroup, listSyncTaskGroups, pauseSyncTaskGroup, previewSyncTaskGroupConfig, refreshSyncTaskGroupStatus, resumeSyncTaskGroup, resumeSyncTaskGroupItemAfterDdl, startSyncTaskGroup, stopSyncTaskGroup, updateSyncTaskGroup, validateSyncTaskGroup } from '@/api/sync/group';
+import { addSyncTaskGroup, checkSyncTaskGroupData, checkSyncTaskGroupDdl, deleteSyncTaskGroup, discoverSyncTaskGroupTables, getSyncTaskGroup, listSyncTaskGroups, pauseSyncTaskGroup, previewSyncTaskGroupConfig, refreshSyncTaskGroupStatus, reinitializeSyncTaskGroupItem, resumeSyncTaskGroup, resumeSyncTaskGroupItemAfterDdl, startSyncTaskGroup, stopSyncTaskGroup, updateSyncTaskGroup, validateSyncTaskGroup } from '@/api/sync/group';
 import type { SyncTaskGroupDataCheckResult, SyncTaskGroupForm, SyncTaskGroupQuery, SyncTaskGroupVO } from '@/api/sync/group/types';
 import { useTableScroll } from '@/hooks/useTableScroll';
 import { useUserStore } from '@/stores/userStore';
@@ -36,6 +36,27 @@ const groupStatusLabels: Record<string, string> = {
 
 function groupStatusLabel(status?: string) {
   return status ? groupStatusLabels[status] || status : '草稿';
+}
+
+const itemStatusLabels: Record<string, string> = {
+  PENDING: '待启动',
+  RUNNING: '运行中',
+  PAUSING: '暂停中',
+  PAUSED: '已暂停',
+  STOPPED: '已停止',
+  FAILED: '失败',
+  DDL_BLOCKED: '结构变更阻塞',
+  FINISHED: '已完成',
+};
+
+// Mirrors REINITIALIZABLE_ITEM_STATUSES on the backend.
+const reinitializableItemStatuses = ['FAILED', 'DDL_BLOCKED', 'STOPPED', 'FINISHED'];
+
+function itemStatusColor(status?: string) {
+  if (status === 'RUNNING') return 'success';
+  if (status === 'FAILED' || status === 'DDL_BLOCKED') return 'error';
+  if (status === 'PAUSING' || status === 'PAUSED') return 'warning';
+  return 'default';
 }
 
 function keyOptions(metadata?: DataSourceMetadataVO) {
@@ -171,6 +192,22 @@ export default function SyncTaskGroupPage() {
     const result = await checkSyncTaskGroupDdl(row.groupId);
     setDdlResult(result.data);
   };
+  // Table-level rebuild: the way out of an isolated table whose savepoint can no longer be
+  // reused (e.g. after a source column was added). Only that table is re-snapshotted.
+  const reinitializeItem = (row: SyncTaskGroupVO, itemId: string | number, sourceTable?: string) => Modal.confirm({
+    title: `重新初始化表 ${sourceTable || itemId}`,
+    content: '将丢弃该表的作业与 savepoint 并重新全量同步；其他表不受影响。若启动时选择的是全部字段，源表新增的字段会一并纳入。是否继续？',
+    okText: '确认重新初始化',
+    cancelText: '取消',
+    onOk: async () => {
+      const result = await reinitializeSyncTaskGroupItem(row.groupId, itemId);
+      message.success(result.data.message);
+      const latest = await getSyncTaskGroup(row.groupId);
+      setDetail(current => current ? latest.data : current);
+      if (ddlResult) await ddlCheck(latest.data);
+      actionRef.current?.reload();
+    },
+  });
   const checkData = async () => {
     if (!detail) return;
     const result = await checkSyncTaskGroupData(detail.groupId);
@@ -270,7 +307,7 @@ export default function SyncTaskGroupPage() {
         </Space>
         {validationResult && <Alert type={validationResult.valid ? 'success' : 'error'} showIcon closable onClose={() => setValidationResult(undefined)} message={validationResult.message} description={<Descriptions size="small" column={1}><Descriptions.Item label="源连接">{validationResult.source.message}</Descriptions.Item><Descriptions.Item label="目标连接">{validationResult.target.message}</Descriptions.Item>{validationResult.items.map(item => <Descriptions.Item key={String(item.itemId)} label={`${item.sourceTable} → ${item.targetTable}`}><Tag color={item.passed ? 'success' : 'error'}>{item.passed ? '通过' : '失败'}</Tag> {item.message}</Descriptions.Item>)}</Descriptions>} />}
         {configPreview && <Alert type="success" showIcon closable onClose={() => setConfigPreview(undefined)} message={`${configPreview.groupName} 配置预览`} description={<Input.TextArea value={configPreview.config} readOnly autoSize={{ minRows: 12, maxRows: 24 }} style={{ width: '100%', resize: 'vertical' }} />} />}
-        {ddlResult && <Alert type={ddlResult.events.length ? 'warning' : 'success'} showIcon closable onClose={() => setDdlResult(undefined)} message={ddlResult.message} description={ddlResult.events.length === 0 ? undefined : <Space direction="vertical" style={{ width: '100%' }} size={12}>{ddlResult.events.map(event => <Descriptions key={String(event.eventId)} size="small" bordered column={1} title={<Space><span>{event.sourceTable} → {event.targetTable}</span><Tag color={event.riskLevel === 'HIGH' ? 'error' : 'warning'}>{event.riskLevel === 'HIGH' ? '高风险' : '低风险'}</Tag><Tag color={event.status === 'READY_TO_RESUME' ? 'success' : 'error'}>{event.status === 'READY_TO_RESUME' ? '可恢复' : '待修复'}</Tag></Space>}><Descriptions.Item label="变更类型">{event.changeType}</Descriptions.Item><Descriptions.Item label="变更详情">{event.details}</Descriptions.Item><Descriptions.Item label="处理建议">{event.remediation}</Descriptions.Item><Descriptions.Item label="操作">{event.status === 'READY_TO_RESUME' ? <Button type="primary" size="small" onClick={async () => { await resumeSyncTaskGroupItemAfterDdl(detail.groupId, event.itemId); message.success('表项已恢复'); await ddlCheck(detail); }}>恢复该表</Button> : <span>修复目标表后重新执行检查</span>}</Descriptions.Item></Descriptions>)}</Space>} />}
+        {ddlResult && <Alert type={ddlResult.events.length ? 'warning' : 'success'} showIcon closable onClose={() => setDdlResult(undefined)} message={ddlResult.message} description={ddlResult.events.length === 0 ? undefined : <Space direction="vertical" style={{ width: '100%' }} size={12}>{ddlResult.events.map(event => <Descriptions key={String(event.eventId)} size="small" bordered column={1} title={<Space><span>{event.sourceTable} → {event.targetTable}</span><Tag color={event.riskLevel === 'HIGH' ? 'error' : 'warning'}>{event.riskLevel === 'HIGH' ? '高风险' : '低风险'}</Tag><Tag color={event.status === 'READY_TO_RESUME' ? 'success' : 'error'}>{event.status === 'READY_TO_RESUME' ? '可恢复' : '待修复'}</Tag></Space>}><Descriptions.Item label="变更类型">{event.changeType}</Descriptions.Item><Descriptions.Item label="变更详情">{event.details}</Descriptions.Item><Descriptions.Item label="处理建议">{event.remediation}</Descriptions.Item><Descriptions.Item label="操作"><Space wrap size={8}>{event.status === 'READY_TO_RESUME' ? <Button type="primary" size="small" onClick={async () => { await resumeSyncTaskGroupItemAfterDdl(detail.groupId, event.itemId); message.success('表项已恢复'); await ddlCheck(detail); }}>恢复该表</Button> : <span>修复目标表后重新执行检查</span>}{can('sync:group:reinitialize') && <Button size="small" danger onClick={() => reinitializeItem(detail, event.itemId, event.sourceTable)}>重新初始化该表</Button>}</Space></Descriptions.Item></Descriptions>)}</Space>} />}
         <Divider titlePlacement="left" plain>危险操作</Divider>
         <Button danger icon={<DeleteOutlined />} disabled={['RUNNING', 'PAUSING', 'DEGRADED'].includes(detail.status || '')} title={['RUNNING', 'PAUSING', 'DEGRADED'].includes(detail.status || '') ? '运行中的任务组不能删除' : undefined} onClick={() => Modal.confirm({ title: '删除同步任务组', content: `是否确认删除任务组“${detail.groupName}”？`, okText: '确认删除', cancelText: '取消', onOk: () => remove(detail) })}>删除任务组</Button>
         <Divider titlePlacement="left" plain>数据质量核对</Divider>
@@ -282,6 +319,11 @@ export default function SyncTaskGroupPage() {
           <Descriptions.Item label="核对范围">{dataCheckResult.tableCount} 张表</Descriptions.Item>
           <Descriptions.Item label="说明" span={4}>{dataCheckResult.consistencyNote}</Descriptions.Item>
         </Descriptions>} />}
+        <Descriptions bordered size="small" column={1} title="表项状态">
+          {detail.items.map(item => <Descriptions.Item key={String(item.itemId)} label={`${item.sourceDatabase || '-'} . ${item.sourceTable} -> ${detailTarget?.sourceType === 'POSTGRESQL' ? `${item.targetSchema || 'public'} . ` : ''}${item.targetTable}`}>
+            <Space wrap size={8}><Tag color={itemStatusColor(item.status)}>{item.status ? itemStatusLabels[item.status] || item.status : '-'}</Tag>{item.engineJobId && <span>作业 {item.engineJobId}</span>}{item.lastError && <span style={{ color: '#cf1322' }}>{item.lastError}</span>}{can('sync:group:reinitialize') && reinitializableItemStatuses.includes(item.status || '') && !['DRAFT', 'PAUSING'].includes(detail.status || '') && <Button size="small" danger onClick={() => reinitializeItem(detail, item.itemId, item.sourceTable)}>重新初始化该表</Button>}</Space>
+          </Descriptions.Item>)}
+        </Descriptions>
         <Descriptions bordered size="small" column={1} title="逐表最近核对结果">
           {detail.items.map(item => <Descriptions.Item key={String(item.itemId)} label={`${item.sourceDatabase || '-'} . ${item.sourceTable} -> ${detailTarget?.sourceType === 'POSTGRESQL' ? `${item.targetSchema || 'public'} . ` : ''}${item.targetTable}`}>
             {item.lastCheckTime ? <Space wrap size={8}><Tag color={item.lastCheckMatched === '1' ? 'success' : 'error'}>{item.lastCheckMatched === '1' ? '行数一致' : '未一致 / 失败'}</Tag><span>源 {item.lastCheckSourceRows ?? '-'}，目标 {item.lastCheckTargetRows ?? '-'}，差异 {item.lastCheckDifference ?? '-'}</span><span>{item.lastCheckTime}</span><span>{item.lastCheckMessage}</span></Space> : <Tag>尚未核对</Tag>}

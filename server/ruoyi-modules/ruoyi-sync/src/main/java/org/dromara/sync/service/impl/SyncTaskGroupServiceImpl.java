@@ -1,6 +1,7 @@
 package org.dromara.sync.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.PageResult;
@@ -84,6 +85,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private static final Set<String> EDITABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED);
     private static final Set<String> DELETABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED, SyncStatus.FAILED, SyncStatus.FINISHED);
     private static final Set<String> RESUMABLE_STATUSES = Set.of(SyncStatus.PAUSED, SyncStatus.FAILED);
+    /** Item states a single table may be rebuilt from without touching its siblings. */
+    private static final Set<String> REINITIALIZABLE_ITEM_STATUSES = Set.of(SyncStatus.FAILED, SyncStatus.DDL_BLOCKED, SyncStatus.STOPPED, SyncStatus.FINISHED);
     /** Group states in which table jobs are live on the engine. */
     private static final Set<String> LIVE_STATUSES = Set.of(SyncStatus.RUNNING, SyncStatus.DEGRADED);
 
@@ -258,6 +261,12 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         int isolatedFailures = 0;
         try {
             for (SyncTaskGroupItem item : items(groupId)) {
+                if (SyncStatus.isActive(item.getStatus()) && StringUtils.isNotBlank(item.getEngineJobId())) {
+                    // Already has a live engine job (a DEGRADED group, or a table resumed /
+                    // reinitialized on its own) - keep it rather than submitting a duplicate.
+                    jobIds.add(item.getEngineJobId());
+                    continue;
+                }
                 if (databaseScope && GroupStatuses.isIsolated(item.getStatus())) {
                     isolatedFailures++;
                     continue;
@@ -267,6 +276,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
                     jobIds.add(submitItem(group, item, source, target));
                     submittedItems.add(item);
+                    // A fresh job on a fresh baseline supersedes any drift event still open on this
+                    // table; leaving it open would make the next status refresh flag the running
+                    // table DDL_BLOCKED again.
+                    ddlEventMapper.resolveOpen(item.getItemId(), "已通过重新启动任务组处理。");
                 } catch (RuntimeException ex) {
                     if (!databaseScope) throw ex;
                     isolateItem(item, ex.getMessage());
@@ -279,8 +292,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             group.setLastError(isolatedFailures == 0 ? "" : "已隔离 " + isolatedFailures + " 张失败表，其他表继续运行");
             groupMapper.updateById(group);
             return SyncTaskGroupOperationResult.of(group, databaseScope
-                ? "整库任务已提交 " + jobIds.size() + " 个作业，隔离失败 " + isolatedFailures + " 张"
-                : "任务组已提交 " + jobIds.size() + " 个作业");
+                ? "整库任务已提交 " + submittedItems.size() + " 个作业，隔离失败 " + isolatedFailures + " 张"
+                : "任务组已提交 " + submittedItems.size() + " 个作业");
         } catch (RuntimeException ex) {
             String error = StringUtils.defaultIfBlank(ex.getMessage(), "SeaTunnel 作业提交失败");
             for (SyncTaskGroupItem submittedItem : submittedItems) {
@@ -449,6 +462,69 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         group.setLastError("");
         groupMapper.updateById(group);
         return SyncTaskGroupOperationResult.of(group, "表 " + item.getSourceTable() + " 已从 savepoint 恢复");
+    }
+
+    @Override
+    @Transactional
+    public SyncTaskGroupOperationResult reinitializeItem(Long groupId, Long itemId) {
+        return locks.withGroupLock(groupId, () -> doReinitializeItem(groupId, itemId));
+    }
+
+    private SyncTaskGroupOperationResult doReinitializeItem(Long groupId, Long itemId) {
+        SyncTaskGroup group = requireGroup(groupId);
+        SyncTaskGroupItem item = itemMapper.selectOneOfGroup(groupId, itemId);
+        if (item == null) throw new ServiceException("表项不存在或不属于当前任务组");
+        if (SyncStatus.DRAFT.equals(group.getStatus())) throw new ServiceException("任务组尚未启动，请直接启动任务组");
+        if (SyncStatus.PAUSING.equals(group.getStatus())) throw new ServiceException("任务组正在暂停，请等待 savepoint 完成后再重新初始化表项");
+        if (item.getStatus() == null || !REINITIALIZABLE_ITEM_STATUSES.contains(item.getStatus())) {
+            throw new ServiceException("只有失败、结构阻塞、已停止或已完成的表项可以重新初始化");
+        }
+        DataSource source = requireSource(group);
+        DataSource target = requireTarget(group);
+
+        // 1. Discard the old job and its recovery state. It may already be gone; that is fine.
+        String oldJobId = item.getEngineJobId();
+        if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.stop(itemId);
+        if (StringUtils.isNotBlank(oldJobId)) {
+            try {
+                restClient.stop(oldJobId, false, true);
+            } catch (ServiceException ignored) {
+                // Nothing to stop or the engine no longer knows the job - the rebuild is still valid.
+            }
+        }
+
+        // 2. Re-derive the projection against the live source schema. A selection that covered
+        // the whole table at start keeps following the table (so an added column is picked
+        // up); an explicit subset is validated as-is. The sync key is never re-chosen here.
+        DataSourceMetadataVo metadata = readSourceMetadata(item, source);
+        List<String> configured = SyncColumnSelectionValidator.parseColumns(item.getSelectedColumns());
+        TableSchemaSnapshot.Snapshot baseline = StringUtils.isBlank(item.getSchemaSnapshot()) ? null : TableSchemaSnapshot.fromJson(item.getSchemaSnapshot());
+        boolean followTable = TableSchemaSnapshot.coversAllColumns(baseline, configured);
+        SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(metadata,
+            followTable ? null : item.getSelectedColumns(), item.getSyncKeyColumns());
+        item.setSelectedColumns(SyncColumnSelectionValidator.serialize(selection.selectedColumns()));
+        item.setSyncKeyColumns(SyncColumnSelectionValidator.serialize(selection.syncKeyColumns()));
+        TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
+            item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
+        if (!compatibility.isPassed()) throw new ServiceException("目标表兼容性未通过：" + compatibility.getMessage());
+        if (isDatabaseScope(group) && DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
+
+        // 3. Fresh baseline, fresh job, no inherited checkpoint.
+        TableSchemaSnapshot.baseline(item, metadata);
+        String newJobId = submitItem(group, item, source, target);
+        itemMapper.update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
+            .eq(SyncTaskGroupItem::getItemId, itemId)
+            .set(SyncTaskGroupItem::getLastCheckpointId, null)
+            .set(SyncTaskGroupItem::getLastCheckpointTime, null)
+            .set(SyncTaskGroupItem::getLastCheckpointStatus, null));
+        ddlEventMapper.resolveOpen(itemId, "已通过重新初始化该表处理。");
+
+        group.setEngineJobId(replaceJobId(group.getEngineJobId(), oldJobId, newJobId));
+        group.setStatus(GroupStatuses.aggregate(itemStatuses(groupId)));
+        group.setLastError("");
+        groupMapper.updateById(group);
+        return SyncTaskGroupOperationResult.of(group, "表 " + item.getSourceTable() + " 已重新初始化，正在重新全量同步"
+            + (followTable && selection.selectedColumns().size() > configured.size() ? "（已纳入源表新增字段）" : ""));
     }
 
     @Override
@@ -883,6 +959,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     private static int nextConfigVersion(SyncTaskGroup group) {
         return (group.getConfigVersion() == null ? 1 : group.getConfigVersion()) + 1;
+    }
+
+    /** Swaps one job id for another in the group's comma-separated list (appends when the old one is absent). */
+    private static String replaceJobId(String current, String oldJobId, String newJobId) {
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        if (StringUtils.isNotBlank(current)) values.addAll(List.of(current.split(",")));
+        if (StringUtils.isNotBlank(oldJobId)) values.remove(oldJobId);
+        values.add(newJobId);
+        return String.join(",", values);
     }
 
     private static String appendJobIds(String current, List<String> appended) {

@@ -13,6 +13,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
@@ -52,6 +53,19 @@ public final class TableSchemaSnapshot {
         item.setSchemaHash(SyncText.sha256Hex(snapshot));
     }
 
+    /**
+     * True when {@code selectedColumns} covers every column recorded in the baseline snapshot -
+     * i.e. the projection was "all columns" when the table was started. Used by table
+     * reinitialization to decide whether a column added since should be picked up
+     * automatically (a full selection follows the table) or the explicit selection kept.
+     * Unknown (no snapshot yet) is treated as "not full".
+     */
+    public static boolean coversAllColumns(Snapshot baseline, List<String> selectedColumns) {
+        if (baseline == null || baseline.getColumns().isEmpty() || selectedColumns == null) return false;
+        Set<String> selected = selectedColumns.stream().map(TableSchemaSnapshot::normalize).collect(Collectors.toSet());
+        return baseline.getColumns().stream().map(Column::getName).allMatch(selected::contains);
+    }
+
     public static Diff diff(Snapshot baseline, Snapshot current) {
         if (baseline == null) return new Diff("TABLE_UNAVAILABLE", "HIGH", "无法读取原始表结构快照", true);
         Map<String, Column> before = byName(baseline);
@@ -88,9 +102,9 @@ public final class TableSchemaSnapshot {
             ? "平台未启用自动 DDL。请在目标表补齐新增的可空字段，或确认目标已具备等价字段。"
             : "高风险结构变更已隔离该表。请评估字段和同步键语义，备份目标数据后将目标表调整为兼容结构。";
         if (!compatibility.isPassed()) {
-            return prefix + " 当前兼容性检查未通过：" + compatibility.getMessage() + "。修复后重新执行结构检查。";
+            return prefix + " 当前兼容性检查未通过：" + compatibility.getMessage() + "。修复后重新执行结构检查，或修复后使用“重新初始化该表”重建。";
         }
-        return prefix + " 当前目标表兼容性已通过；请确认业务影响后使用“恢复该表”继续同步。";
+        return prefix + " 当前目标表兼容性已通过。若该表启动时选择了全部字段，请使用“重新初始化该表”以纳入新增字段（此时“恢复该表”会因引擎配置变化被拒绝）；仅当字段范围不变时可用“恢复该表”从 savepoint 继续。";
     }
 
     private static Map<String, Column> byName(Snapshot snapshot) {

@@ -50,6 +50,7 @@
 | POST | `/group/{groupId}/ddl-check` | 对组内表项执行源表结构差异检查并隔离变更表 |
 | POST | `/group/{groupId}/check` | 逐表只读比较源端和目标端行数，并持久化每个表项最近核对结果 |
 | POST | `/group/{groupId}/item/{itemId}/resume-after-ddl` | 目标结构修复且兼容性通过后，使用原 savepoint 恢复单个表项 |
+| POST | `/group/{groupId}/item/{itemId}/reinitialize` | 丢弃单个表项的作业与 savepoint，按当前源表结构重新全量同步；其他表不受影响，启动时为全字段选择的表项自动纳入源表新增字段 |
 | POST | `/group/{groupId}/status` | 刷新所有表项作业状态 |
 | POST | `/group/{groupId}/pause` | 对运行中的表项执行 savepoint 暂停 |
 | POST | `/group/{groupId}/resume` | 使用表项 savepoint 恢复作业 |

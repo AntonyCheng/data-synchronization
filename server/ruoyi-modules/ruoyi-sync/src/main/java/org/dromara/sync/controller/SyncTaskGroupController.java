@@ -127,6 +127,14 @@ public class SyncTaskGroupController extends BaseController {
         return R.ok(ddlService.resumeDdlItem(groupId, itemId));
     }
 
+    @SaCheckPermission("sync:group:reinitialize")
+    @Log(title = "重新初始化任务组表项", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
+    @PostMapping("/{groupId}/item/{itemId}/reinitialize")
+    public R<SyncTaskGroupOperationResult> reinitializeItem(@PathVariable Long groupId, @PathVariable Long itemId) {
+        return R.ok(groupService.reinitializeItem(groupId, itemId));
+    }
+
     @SaCheckPermission("sync:group:status")
     @Log(title = "刷新同步任务组状态", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/status")
