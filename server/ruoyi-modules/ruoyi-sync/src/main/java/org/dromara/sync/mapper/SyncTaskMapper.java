@@ -18,4 +18,10 @@ public interface SyncTaskMapper extends BaseMapperPlus<SyncTask, SyncTaskVo> {
         return selectList(new LambdaQueryWrapper<SyncTask>()
             .in(SyncTask::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING));
     }
+
+    /** Tasks that use the data source on either side. */
+    default long countByDataSource(Long sourceId) {
+        return selectCount(new LambdaQueryWrapper<SyncTask>()
+            .and(w -> w.eq(SyncTask::getSourceId, sourceId).or().eq(SyncTask::getTargetId, sourceId)));
+    }
 }

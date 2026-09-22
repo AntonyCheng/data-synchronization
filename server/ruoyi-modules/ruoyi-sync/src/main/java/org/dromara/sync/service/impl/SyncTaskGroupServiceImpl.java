@@ -52,6 +52,8 @@ import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
 import org.dromara.sync.support.TableSchemaSnapshot;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -67,6 +69,8 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Multi-table / whole-database release lifecycle. One SeaTunnel job per table item; the
@@ -95,6 +99,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     /** Consecutive engine status-poll failures tolerated per item; see the task-side counterpart. */
     private static final int ITEM_STATUS_FAILURE_TOLERANCE = 3;
+    /**
+     * Per-group mutation lock. Status refresh, DDL check and table discovery run on
+     * different schedules and all rewrite the same item rows, so each pass - and each
+     * user action - takes this lock; background passes skip a busy group instead of queueing.
+     */
+    private static final String GROUP_LOCK_PREFIX = "sync:group:lock:";
+    private static final long LOCK_WAIT_SECONDS = 10;
 
     private final SyncTaskGroupMapper groupMapper;
     private final SyncTaskGroupItemMapper itemMapper;
@@ -106,6 +117,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final SeaTunnelRestClient restClient;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
+    private final RedissonClient redissonClient;
 
     private final ConcurrentMap<Long, Integer> itemStatusFailureStreak = new ConcurrentHashMap<>();
 
@@ -236,6 +248,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult start(Long groupId) {
+        return withGroupLock(groupId, () -> doStart(groupId));
+    }
+
+    private SyncTaskGroupOperationResult doStart(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (SyncStatus.isActive(group.getStatus())) throw new ServiceException("任务组当前正在运行");
         resourceProtectionPolicy.applyDefaultsAndValidate(group);
@@ -310,6 +326,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult discover(Long groupId) {
+        return withGroupLock(groupId, () -> doDiscover(groupId));
+    }
+
+    private SyncTaskGroupOperationResult doDiscover(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (!isDatabaseScope(group)) {
             throw new ServiceException("仅整库同步任务组支持发现新增表");
@@ -374,6 +394,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult pause(Long groupId) {
+        return withGroupLock(groupId, () -> doPause(groupId));
+    }
+
+    private SyncTaskGroupOperationResult doPause(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (!SyncStatus.RUNNING.equals(group.getStatus())) throw new ServiceException("只有运行中的任务组可以暂停");
         DataSource target = requireTarget(group);
@@ -388,6 +412,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult resume(Long groupId) {
+        return withGroupLock(groupId, () -> doResume(groupId));
+    }
+
+    private SyncTaskGroupOperationResult doResume(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (group.getStatus() == null || !RESUMABLE_STATUSES.contains(group.getStatus())) {
             throw new ServiceException("只有已暂停或失败任务组可以恢复");
@@ -403,10 +431,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             if (configChanged(item, generated.config())) {
                 throw new ServiceException("表 " + item.getSourceTable() + " 配置已变化，不能直接恢复");
             }
-            restClient.submit(generated.jobName(), generated.config(), item.getEngineJobId(), true);
+            submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
             item.setStatus(SyncStatus.RUNNING);
             itemMapper.updateById(item);
-            if (DataSourceType.isKafka(target)) startItemBridge(group, item, source, target);
         }
         group.setStatus(SyncStatus.RUNNING);
         groupMapper.updateById(group);
@@ -416,6 +443,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult stop(Long groupId) {
+        return withGroupLock(groupId, () -> doStop(groupId));
+    }
+
+    private SyncTaskGroupOperationResult doStop(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         DataSource target = requireTarget(group);
         for (SyncTaskGroupItem item : items(groupId)) {
@@ -429,6 +460,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupStatus refreshStatus(Long groupId) {
+        return withGroupLock(groupId, () -> doRefreshStatus(groupId));
+    }
+
+    private SyncTaskGroupStatus doRefreshStatus(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         DataSource target = requireTarget(group);
         boolean kafkaGroup = DataSourceType.isKafka(target);
@@ -522,6 +557,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}")
     public void refreshRunningGroupStatus() {
         groupMapper.selectActive().forEach(group -> {
+            if (isGroupBusy(group)) return;
             try {
                 refreshStatus(group.getGroupId());
             } catch (RuntimeException ex) {
@@ -534,6 +570,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Scheduled(fixedDelayString = "${sync.discovery.interval-ms:60000}", initialDelayString = "${sync.discovery.initial-delay-ms:30000}")
     public void discoverDatabaseGroups() {
         groupMapper.selectLiveAutoDiscoverDatabaseGroups().forEach(group -> {
+            if (isGroupBusy(group)) return;
             try {
                 discover(group.getGroupId());
             } catch (RuntimeException ignored) {
@@ -546,6 +583,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Scheduled(fixedDelayString = "${sync.ddl-check.interval-ms:60000}", initialDelayString = "${sync.ddl-check.initial-delay-ms:45000}")
     public void checkRunningGroupDdl() {
         groupMapper.selectLive().forEach(group -> {
+            if (isGroupBusy(group)) return;
             try {
                 checkDdl(group.getGroupId());
             } catch (RuntimeException ignored) {
@@ -563,6 +601,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupDdlCheckResult checkDdl(Long groupId) {
+        return withGroupLock(groupId, () -> doCheckDdl(groupId));
+    }
+
+    private SyncTaskGroupDdlCheckResult doCheckDdl(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
@@ -637,6 +679,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult resumeDdlItem(Long groupId, Long itemId) {
+        return withGroupLock(groupId, () -> doResumeDdlItem(groupId, itemId));
+    }
+
+    private SyncTaskGroupOperationResult doResumeDdlItem(Long groupId, Long itemId) {
         SyncTaskGroup group = requireGroup(groupId);
         SyncTaskGroupItem item = itemMapper.selectById(itemId);
         if (item == null || !groupId.equals(item.getGroupId())) throw new ServiceException("表项不存在或不属于当前任务组");
@@ -652,7 +698,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (configChanged(item, generated.config())) {
             throw new ServiceException("表结构变更导致引擎配置版本变化，不能直接从原 savepoint 恢复，请创建新配置版本并重新初始化该表");
         }
-        restClient.submit(generated.jobName(), generated.config(), item.getEngineJobId(), true);
+        // The DDL isolation paused the engine job but left the bridge alone; after a platform
+        // restart the bridge is gone, so (re)starting it here is what makes the resumed table
+        // actually publish again. Bridge start is idempotent for a live worker.
+        submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
         captureSchemaBaseline(item, source);
         item.setStatus(SyncStatus.RUNNING);
         item.setLastError("");
@@ -806,17 +855,35 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     // ------------------------------------------------------------------ engine helpers
 
-    /** Submits one table item as its own SeaTunnel job and, for Kafka targets, starts its bridge. Returns the engine job id. */
+    /**
+     * Submits one table item as its own SeaTunnel job. Returns the engine job id.
+     * <p>For Kafka targets the bridge is started first, mirroring the single-task path:
+     * its topic precheck fails before any engine job exists (no orphan to clean up), and
+     * it creates the single-partition raw topic before the engine can auto-create it with
+     * broker defaults. A failed submit tears the bridge down again.
+     */
     private String submitItem(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
         var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties);
-        var submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
-        item.setEngineJobId(submitted.jobId());
+        String jobId = submitWithBridge(group, item, source, target, generated, null, false);
+        item.setEngineJobId(jobId);
         item.setEngineConfigHash(SyncText.sha256Hex(generated.config()));
         item.setStatus(SyncStatus.RUNNING);
         item.setLastError("");
         itemMapper.updateById(item);
-        if (DataSourceType.isKafka(target)) startItemBridge(group, item, source, target);
-        return submitted.jobId();
+        return jobId;
+    }
+
+    /** Bridge (Kafka only) -> engine submit; the bridge is stopped again if the submit fails. */
+    private String submitWithBridge(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target,
+                                    SeaTunnelJobConfigGenerator.GeneratedConfig generated, String existingJobId, boolean withSavepoint) {
+        boolean kafka = DataSourceType.isKafka(target);
+        if (kafka) startItemBridge(group, item, source, target);
+        try {
+            return restClient.submit(generated.jobName(), generated.config(), existingJobId, withSavepoint).jobId();
+        } catch (RuntimeException ex) {
+            if (kafka) kafkaTaskBridgeService.stop(item.getItemId());
+            throw ex;
+        }
     }
 
     private void stopItem(SyncTaskGroupItem item, DataSource target, boolean withSavepoint, String newStatus) {
@@ -961,6 +1028,27 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     // ------------------------------------------------------------------ lookups & small helpers
+
+    /** Runs {@code action} under the per-group lock; the lease is watchdog-renewed for as long as the thread works. */
+    private <T> T withGroupLock(Long groupId, Supplier<T> action) {
+        RLock lock = redissonClient.getLock(GROUP_LOCK_PREFIX + groupId);
+        boolean acquired = false;
+        try {
+            acquired = lock.tryLock(LOCK_WAIT_SECONDS, -1, TimeUnit.SECONDS);
+            if (!acquired) throw new ServiceException("任务组正在执行其他操作，请稍后重试");
+            return action.get();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new ServiceException("等待任务组锁被中断");
+        } finally {
+            if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
+        }
+    }
+
+    /** Background passes must not pile up behind a user action or another pass on the same group. */
+    private boolean isGroupBusy(SyncTaskGroup group) {
+        return redissonClient.getLock(GROUP_LOCK_PREFIX + group.getGroupId()).isLocked();
+    }
 
     private List<SyncTaskGroupItem> items(Long groupId) {
         return itemMapper.selectByGroupId(groupId);

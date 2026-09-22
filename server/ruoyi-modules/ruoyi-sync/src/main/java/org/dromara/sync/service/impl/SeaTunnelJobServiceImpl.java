@@ -23,7 +23,7 @@ import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISeaTunnelJobService;
 import org.dromara.sync.service.ISyncTaskService;
-import org.dromara.sync.support.PostgresTableSwap;
+import org.dromara.sync.support.TargetTableSwap;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
 import org.redisson.api.RLock;
@@ -38,6 +38,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Single-table task lifecycle against SeaTunnel: preview, start, status reconciliation,
@@ -54,6 +55,14 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
      * and Debezium keeps buffering into the raw topic, so give up only after this many.
      */
     private static final int STATUS_FAILURE_TOLERANCE = 3;
+    /**
+     * Per-task mutation lock, shared with {@link SyncTaskScheduler}. Every operation that
+     * reads a task row, talks to the engine and writes the row back holds it, so a user
+     * action and a background reconcile pass never interleave their full-row updates.
+     */
+    static final String TASK_LOCK_PREFIX = "sync:task:start:";
+    /** How long an interactive call waits for a task busy in a background pass. */
+    private static final long LOCK_WAIT_SECONDS = 10;
     private static final Set<String> REINITIALIZABLE_STATUSES = Set.of(SyncStatus.REINITIALIZE_REQUIRED, SyncStatus.FAILED, SyncStatus.STOPPED);
 
     private final SyncTaskMapper syncTaskMapper;
@@ -85,12 +94,14 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult start(Long taskId) {
-        RLock lock = redissonClient.getLock("sync:task:start:" + taskId);
+        RLock lock = redissonClient.getLock(TASK_LOCK_PREFIX + taskId);
         boolean acquired = false;
         boolean submissionStarted = false;
         boolean kafkaBridgeStarted = false;
         try {
-            acquired = lock.tryLock(0, 60, TimeUnit.SECONDS);
+            // Wait briefly so a click that lands during a ~100 ms background refresh does not
+            // bounce; a genuinely concurrent second start still fails once the first holds RUNNING.
+            acquired = lock.tryLock(LOCK_WAIT_SECONDS, -1, TimeUnit.SECONDS);
             if (!acquired) throw new ServiceException("任务正在提交运行实例，请勿重复启动");
             SyncTask task = requireTask(taskId);
             ensureStartable(task);
@@ -124,6 +135,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobStatus refreshStatus(Long taskId) {
+        return withTaskLock(taskId, () -> doRefreshStatus(taskId));
+    }
+
+    private SeaTunnelJobStatus doRefreshStatus(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
         boolean kafka = isKafkaTask(task);
@@ -221,6 +236,9 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}")
     public void refreshRunningTaskStatus() {
         syncTaskMapper.selectActive().forEach(task -> {
+            // Someone (a user action, the scheduler, or another pass) already holds this task;
+            // skipping is cheaper than queueing behind it - the next cycle picks it up.
+            if (redissonClient.getLock(TASK_LOCK_PREFIX + task.getTaskId()).isLocked()) return;
             try {
                 refreshStatus(task.getTaskId());
             } catch (Exception ex) {
@@ -231,6 +249,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult pause(Long taskId) {
+        return withTaskLock(taskId, () -> doPause(taskId));
+    }
+
+    private SeaTunnelJobOperationResult doPause(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
         if (!SyncStatus.isActive(task.getStatus())) {
@@ -246,6 +268,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult resume(Long taskId) {
+        return withTaskLock(taskId, () -> doResume(taskId));
+    }
+
+    private SeaTunnelJobOperationResult doResume(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
         if (!SyncStatus.PAUSED.equals(task.getStatus()) && !SyncStatus.FAILED.equals(task.getStatus())) {
@@ -288,6 +314,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult stop(Long taskId) {
+        return withTaskLock(taskId, () -> doStop(taskId));
+    }
+
+    private SeaTunnelJobOperationResult doStop(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
         if (SyncStatus.STOPPED.equals(task.getStatus()) || SyncStatus.DRAFT.equals(task.getStatus())) {
@@ -308,6 +338,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult reinitialize(Long taskId) {
+        return withTaskLock(taskId, () -> doReinitialize(taskId));
+    }
+
+    private SeaTunnelJobOperationResult doReinitialize(Long taskId) {
         SyncTask task = requireTask(taskId);
         if (SyncMode.INCREMENTAL.equalsIgnoreCase(task.getSyncMode())) {
             throw new ServiceException("纯增量任务没有全量初始化语义，请新建全量 + CDC 任务并先建立目标基线");
@@ -332,10 +366,8 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
             if (kafka) startBridge(task);
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
-            task.setLastCheckpointId(null);
-            task.setLastCheckpointTime(null);
-            task.setLastCheckpointStatus(null);
             markRunning(task, submitted.jobId(), generated.config());
+            clearCheckpoint(task);
             return operation(task, "已丢弃旧恢复状态并重新启动全量初始化");
         } catch (ServiceException ex) {
             if (kafka) kafkaTaskBridgeService.stop(taskId);
@@ -345,6 +377,22 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (kafka) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw new ServiceException("重新初始化任务失败：" + SyncText.safeMessage(ex, "未知错误"));
+        }
+    }
+
+    /** Runs {@code action} under the per-task lock; the lease is watchdog-renewed for as long as the thread works. */
+    private <T> T withTaskLock(Long taskId, Supplier<T> action) {
+        RLock lock = redissonClient.getLock(TASK_LOCK_PREFIX + taskId);
+        boolean acquired = false;
+        try {
+            acquired = lock.tryLock(LOCK_WAIT_SECONDS, -1, TimeUnit.SECONDS);
+            if (!acquired) throw new ServiceException("任务正在执行其他操作，请稍后重试");
+            return action.get();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new ServiceException("等待任务锁被中断");
+        } finally {
+            if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
         }
     }
 
@@ -384,13 +432,29 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
         String schema = StringUtils.defaultIfBlank(task.getTargetSchema(), TableNames.DEFAULT_POSTGRES_SCHEMA);
         String backupName = "__ds_backup_" + task.getTaskId() + "_v" + configVersionOf(task);
-        PostgresTableSwap.swap(target, schema, task.getTargetTable(), task.getOverwriteStageTable(), backupName);
+        TargetTableSwap.swap(target, schema, task.getTargetTable(), task.getOverwriteStageTable(), backupName);
         task.setOverwriteStageTable(null);
         // MyBatis-Plus skips null fields for ordinary updates. Explicitly clear the stage
         // marker so a later status refresh is idempotent.
         syncTaskMapper.update(null, new LambdaUpdateWrapper<SyncTask>()
             .eq(SyncTask::getTaskId, task.getTaskId())
             .set(SyncTask::getOverwriteStageTable, null));
+    }
+
+    /**
+     * The old checkpoint belongs to the job that was just discarded. The global not_null
+     * update strategy would silently drop these nulls from {@code updateById}, leaving the
+     * stale checkpoint on display until the new job happens to report one.
+     */
+    private void clearCheckpoint(SyncTask task) {
+        task.setLastCheckpointId(null);
+        task.setLastCheckpointTime(null);
+        task.setLastCheckpointStatus(null);
+        syncTaskMapper.update(null, new LambdaUpdateWrapper<SyncTask>()
+            .eq(SyncTask::getTaskId, task.getTaskId())
+            .set(SyncTask::getLastCheckpointId, null)
+            .set(SyncTask::getLastCheckpointTime, null)
+            .set(SyncTask::getLastCheckpointStatus, null));
     }
 
     private static int configVersionOf(SyncTask task) {

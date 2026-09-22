@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -46,6 +47,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class KafkaTaskBridgeService {
 
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
+    /** Bounded by POLL_TIMEOUT plus one commit round-trip; anything longer means the worker is wedged. */
+    private static final Duration GRACEFUL_STOP_TIMEOUT = Duration.ofSeconds(5);
     private final KafkaEventNormalizer normalizer;
     private final KafkaEventProducer producer;
     private final JsonMapper jsonMapper;
@@ -278,18 +281,26 @@ public class KafkaTaskBridgeService {
             else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
         }
 
+        /**
+         * Stop cooperatively first: {@code wakeup()} makes the blocked {@code poll()} /
+         * {@code commitSync()} throw, the loop exits and try-with-resources closes the
+         * consumer cleanly (leaving the group without a rebalance timeout). Interrupting
+         * straight away, as this used to, made the Kafka client log an ERROR with a stack
+         * trace on every ordinary pause / stop. The interrupt is kept only as a last resort
+         * for a worker stuck in a producer ack wait, which {@code wakeup()} cannot unblock.
+         */
         private void close() {
             running.set(false);
             KafkaConsumer<String, String> opened = consumer;
             if (opened != null) opened.wakeup();
             Future<?> current = future;
-            if (current != null) {
+            if (current == null) return;
+            try {
+                current.get(GRACEFUL_STOP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException ex) {
                 current.cancel(true);
-                try {
-                    current.get(3, TimeUnit.SECONDS);
-                } catch (Exception ignored) {
-                    // The consumer may already have stopped after wakeup/cancellation.
-                }
+            } catch (Exception ignored) {
+                // Already finished (possibly with the WakeupException we asked for).
             }
         }
     }

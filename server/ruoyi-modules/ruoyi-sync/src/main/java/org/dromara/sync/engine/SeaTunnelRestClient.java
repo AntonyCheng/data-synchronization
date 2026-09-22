@@ -6,6 +6,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.support.SyncText;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
@@ -14,6 +15,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -99,10 +102,13 @@ public class SeaTunnelRestClient {
     }
 
     /**
-     * RestClient is thread-safe and meant to be shared - rebuilding one per call (the
-     * previous behaviour) discards the underlying HTTP connection pool every time,
-     * forcing a fresh connection for every submit/status/stop/checkpoints call across
-     * every running task.
+     * RestClient is thread-safe and meant to be shared - rebuilding one per call discards
+     * the underlying HTTP connection pool every time. Both connect and read are bounded by
+     * {@code sync.engine.request-timeout}: every caller here runs either in a request
+     * thread or on the shared scheduling pool, and an unbounded call against a wedged
+     * engine would otherwise stall every reconciler behind it. A timeout surfaces as the
+     * same ServiceException as any other REST failure, so the status-failure tolerance in
+     * the lifecycle services applies unchanged.
      */
     private RestClient client() {
         RestClient client = cachedClient;
@@ -110,12 +116,24 @@ public class SeaTunnelRestClient {
             synchronized (this) {
                 client = cachedClient;
                 if (client == null) {
-                    client = RestClient.builder().baseUrl(trimEndpoint(properties.getEndpoint())).build();
+                    Duration timeout = requestTimeout();
+                    JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(
+                        HttpClient.newBuilder().connectTimeout(timeout).build());
+                    requestFactory.setReadTimeout(timeout);
+                    client = RestClient.builder()
+                        .baseUrl(trimEndpoint(properties.getEndpoint()))
+                        .requestFactory(requestFactory)
+                        .build();
                     cachedClient = client;
                 }
             }
         }
         return client;
+    }
+
+    private Duration requestTimeout() {
+        Duration configured = properties.getRequestTimeout();
+        return configured == null || configured.isZero() || configured.isNegative() ? Duration.ofSeconds(10) : configured;
     }
 
     private URI uri(String path, java.util.function.Consumer<UriComponentsBuilder> customizer) {

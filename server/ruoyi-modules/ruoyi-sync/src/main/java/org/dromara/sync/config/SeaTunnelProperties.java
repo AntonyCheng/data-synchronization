@@ -17,7 +17,7 @@ public class SeaTunnelProperties {
     /** SeaTunnel REST API base URL. */
     private String endpoint = "http://localhost:18080";
 
-    /** Timeout used by future submit/status operations. */
+    /** Connect + read timeout for every call to the SeaTunnel REST API. */
     private Duration requestTimeout = Duration.ofSeconds(10);
 
     /** Checkpoint interval written into generated jobs. */

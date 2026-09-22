@@ -141,7 +141,7 @@ Table/column metadata is read on demand from source JDBC and **not persisted**.
 | `controller` / `service` / `service.impl` / `mapper` / `domain{,.bo,.vo}` | Standard RuoYi layering. `service.impl` holds only the six `*ServiceImpl` beans plus `SyncTaskScheduler`. |
 | `engine` | SeaTunnel adapter: `SeaTunnelRestClient`, `SeaTunnelJobConfigGenerator`, `SyncTaskGroupConfigGenerator`, `EngineJobStates` (engine→platform status mapping, recovery-boundary detection, metrics projection). |
 | `kafka` | Kafka-target runtime: `KafkaTaskBridgeService`, `KafkaEventNormalizer`, `KafkaEventSerializer`, `KafkaEventProducer`, `KafkaAdminClients`. |
-| `support` | Pure helpers shared by the services: `JdbcUrls` (platform-side JDBC), `SyncText` (SHA-256 / column-safe truncation / secret redaction), `TableNames`, `SyncColumnSelectionValidator`, `TableSchemaSnapshot` (DDL-drift snapshot + diff), `PostgresTableSwap` (FULL/OVERWRITE stage swap). |
+| `support` | Pure helpers shared by the services: `JdbcUrls` (platform-side JDBC), `SyncText` (SHA-256 / column-safe truncation / secret redaction), `TableNames`, `SyncColumnSelectionValidator`, `TableSchemaSnapshot` (DDL-drift snapshot + diff), `TargetTableSwap` (FULL/OVERWRITE stage swap, PostgreSQL + MySQL). |
 | `constant` | `SyncStatus`, `SyncMode`, `DataSourceType` — the persisted string vocabularies; use these instead of literals. |
 | `config` | `SeaTunnelProperties` (`sync.engine.*`), `ResourceProtectionPolicy`, `CredentialEncryptionValidator`. |
 
@@ -159,7 +159,7 @@ Short wrapper queries live as `default` methods on the mappers (`selectActive()`
 ### Invariants (see `docs/architecture.md`, `docs/task-state-machine.md`)
 
 - Platform state must be reconciled against engine state — on `ApplicationReadyEvent` **and every `sync.status-refresh.interval-ms` (30 s)** the module scans `RUNNING`/`PAUSING` tasks and groups and refreshes status; a FULL job finishes on the engine in seconds, so without the poll it would sit showing `RUNNING` until someone clicked 刷新状态. Unreachable jobs become `FAILED` (never silently "running").
-- No concurrent runs of one logical task — Redis lock `sync:task:start:<id>` (Redisson).
+- No concurrent runs of one logical task — Redis lock `sync:task:start:<id>` (Redisson). The same lock also serializes every state-mutating task operation (start / refreshStatus / pause / resume / stop / reinitialize); groups use `sync:group:lock:<id>` around start / discover / refresh / DDL check / pause / resume / stop. Interactive calls wait ≤ 10 s; the background passes (which run concurrently on RuoYi's shared `schedule-pool`, cores + 1 threads, from `ThreadPoolConfig`) skip a row that is busy and pick it up next cycle. Every SeaTunnel REST call is bounded by `sync.engine.request-timeout` (10 s).
 - Relational targets do idempotent upsert + delete on the sync key; the sync key must match the source PK or an all-`NOT NULL` unique index. Kafka targets key each event on the same sync key; a source table without a real PK (unique-index key only) has its updates emitted as `DELETE` + `INSERT` on that key — net effect is correct, consumers must apply by key.
 - A semantic config-version change forbids reusing the old checkpoint; `REINITIALIZE_REQUIRED` cannot be bypassed by plain start/resume.
 - State set: `DRAFT`, `RUNNING`, `PAUSING`, `PAUSED`, `STOPPED`, `FAILED`, `REINITIALIZE_REQUIRED`, `FINISHED`. Only `DRAFT`/`STOPPED`/`REINITIALIZE_REQUIRED` are editable and startable from config.

@@ -1,0 +1,110 @@
+package org.dromara.sync.support;
+
+import org.dromara.sync.constant.DataSourceType;
+import org.dromara.sync.domain.DataSource;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+
+/**
+ * Swaps a completed FULL/OVERWRITE staging table into place on a relational target so that
+ * readers never observe a missing table: {@code target -> backup}, {@code stage -> target},
+ * then drop the backup.
+ *
+ * <ul>
+ *   <li>PostgreSQL: the renames run in one transaction (DDL is transactional).</li>
+ *   <li>MySQL: DDL is not transactional, but a multi-table {@code RENAME TABLE} is atomic,
+ *       so both renames go into a single statement.</li>
+ * </ul>
+ * A backup table left behind by an earlier failed swap of the same version is dropped first.
+ */
+public final class TargetTableSwap {
+
+    private static final String[] TABLE_TYPES = {"TABLE"};
+
+    private TargetTableSwap() {
+    }
+
+    public static void swap(DataSource target, String schema, String targetName, String stageName, String backupName)
+        throws SQLException {
+        if (DataSourceType.isMysql(target)) {
+            swapMysql(target, targetName, stageName, backupName);
+        } else {
+            swapPostgres(target, schema, targetName, stageName, backupName);
+        }
+    }
+
+    private static void swapPostgres(DataSource target, String schema, String targetName, String stageName, String backupName)
+        throws SQLException {
+        try (Connection connection = JdbcUrls.open(target)) {
+            connection.setAutoCommit(false);
+            try {
+                execute(connection, "drop table if exists " + pgName(schema, backupName));
+                if (postgresTableExists(connection, schema, targetName)) {
+                    execute(connection, "alter table " + pgName(schema, targetName) + " rename to " + pgQuote(backupName));
+                }
+                execute(connection, "alter table " + pgName(schema, stageName) + " rename to " + pgQuote(targetName));
+                execute(connection, "drop table if exists " + pgName(schema, backupName));
+                connection.commit();
+            } catch (SQLException ex) {
+                connection.rollback();
+                throw ex;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        }
+    }
+
+    private static void swapMysql(DataSource target, String targetName, String stageName, String backupName) throws SQLException {
+        String database = target.getDatabaseName();
+        try (Connection connection = JdbcUrls.open(target)) {
+            execute(connection, "DROP TABLE IF EXISTS " + myName(database, backupName));
+            boolean targetExists;
+            try (ResultSet tables = connection.getMetaData().getTables(database, null, targetName, TABLE_TYPES)) {
+                targetExists = tables.next();
+            }
+            String rename = targetExists
+                ? "RENAME TABLE " + myName(database, targetName) + " TO " + myName(database, backupName)
+                + ", " + myName(database, stageName) + " TO " + myName(database, targetName)
+                : "RENAME TABLE " + myName(database, stageName) + " TO " + myName(database, targetName);
+            execute(connection, rename);
+            if (targetExists) execute(connection, "DROP TABLE IF EXISTS " + myName(database, backupName));
+        }
+    }
+
+    private static boolean postgresTableExists(Connection connection, String schema, String table) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+            "select 1 from information_schema.tables where table_schema=? and table_name=?")) {
+            statement.setString(1, schema);
+            statement.setString(2, table);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+    private static void execute(Connection connection, String sql) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+    private static String pgName(String schema, String table) {
+        return pgQuote(schema) + "." + pgQuote(table);
+    }
+
+    private static String pgQuote(String value) {
+        return "\"" + value.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String myName(String database, String table) {
+        return myQuote(database) + "." + myQuote(table);
+    }
+
+    private static String myQuote(String value) {
+        return "`" + value.replace("`", "``") + "`";
+    }
+}

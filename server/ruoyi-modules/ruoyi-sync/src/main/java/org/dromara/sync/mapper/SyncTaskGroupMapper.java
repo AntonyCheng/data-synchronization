@@ -16,6 +16,12 @@ public interface SyncTaskGroupMapper extends BaseMapperPlus<SyncTaskGroup, SyncT
             .in(SyncTaskGroup::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING));
     }
 
+    /** Groups that use the data source on either side. */
+    default long countByDataSource(Long sourceId) {
+        return selectCount(new LambdaQueryWrapper<SyncTaskGroup>()
+            .and(w -> w.eq(SyncTaskGroup::getSourceId, sourceId).or().eq(SyncTaskGroup::getTargetId, sourceId)));
+    }
+
     /** Groups that still have live table jobs (RUNNING / DEGRADED) and so need DDL checks. */
     default List<SyncTaskGroup> selectLive() {
         return selectList(new LambdaQueryWrapper<SyncTaskGroup>()

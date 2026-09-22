@@ -18,6 +18,8 @@ import org.dromara.sync.domain.vo.DataSourceCredentialMigrationResult;
 import org.dromara.sync.domain.vo.DataSourceVo;
 import org.dromara.sync.kafka.KafkaAdminClients;
 import org.dromara.sync.mapper.DataSourceMapper;
+import org.dromara.sync.mapper.SyncTaskGroupMapper;
+import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.support.JdbcUrls;
 import org.springframework.beans.factory.ObjectProvider;
@@ -36,6 +38,8 @@ import java.util.concurrent.TimeUnit;
 public class DataSourceServiceImpl implements IDataSourceService {
 
     private final DataSourceMapper dataSourceMapper;
+    private final SyncTaskMapper syncTaskMapper;
+    private final SyncTaskGroupMapper syncTaskGroupMapper;
     private final ObjectProvider<EncryptorProperties> encryptorProperties;
 
     @Override
@@ -78,6 +82,11 @@ public class DataSourceServiceImpl implements IDataSourceService {
 
     @Override
     public Boolean deleteById(Long sourceId) {
+        long tasks = syncTaskMapper.countByDataSource(sourceId);
+        long groups = syncTaskGroupMapper.countByDataSource(sourceId);
+        if (tasks > 0 || groups > 0) {
+            throw new ServiceException("数据源仍被 " + tasks + " 个同步任务、" + groups + " 个任务组引用，请先删除或改配这些任务");
+        }
         return dataSourceMapper.deleteById(sourceId) > 0;
     }
 
