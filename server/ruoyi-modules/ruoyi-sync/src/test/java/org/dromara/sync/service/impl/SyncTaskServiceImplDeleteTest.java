@@ -7,6 +7,7 @@ import org.dromara.sync.mapper.SyncTaskConfigVersionMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
+import org.dromara.sync.service.ISyncMetricsService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
 
@@ -25,7 +26,8 @@ class SyncTaskServiceImplDeleteTest {
         mock(DataSourceMapper.class),
         mock(IDataSourceService.class),
         mock(IDataSourceMetadataService.class),
-        mock(ResourceProtectionPolicy.class)
+        mock(ResourceProtectionPolicy.class),
+        mock(ISyncMetricsService.class)
     );
 
     @Test

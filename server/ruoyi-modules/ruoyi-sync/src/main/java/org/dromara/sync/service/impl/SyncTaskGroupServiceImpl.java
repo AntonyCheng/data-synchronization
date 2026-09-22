@@ -22,6 +22,7 @@ import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.bo.SyncTaskGroupItemBo;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
+import org.dromara.sync.domain.vo.SyncMetricsSampleVo;
 import org.dromara.sync.domain.vo.SyncTaskDataCheckResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
 import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckItemResult;
@@ -45,6 +46,7 @@ import org.dromara.sync.mapper.SyncTaskGroupMapper;
 import org.dromara.sync.service.IDataConsistencyService;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
+import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskGroupService;
 import org.dromara.sync.support.GroupStatuses;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
@@ -64,6 +66,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -103,6 +106,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final SeaTunnelRestClient restClient;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
+    private final ISyncMetricsService metricsService;
     private final SyncLocks locks;
 
     private final ConcurrentMap<Long, Integer> itemStatusFailureStreak = new ConcurrentHashMap<>();
@@ -162,6 +166,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             throw new ServiceException("运行中的任务组不能删除");
         }
         itemMapper.deleteByGroupId(groupId);
+        metricsService.deleteForGroup(groupId);
         return groupMapper.deleteById(groupId) > 0;
     }
 
@@ -586,6 +591,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     itemStatus.setErrorMessage(StringUtils.isBlank(snapshot.errorMessage())
                         ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
                     EngineJobStates.applyMetrics(itemStatus, snapshot);
+                    metricsService.recordGroupItem(item, snapshot.status(), itemStatus);
                     statuses.add(status);
                 } catch (RuntimeException ex) {
                     int streak = itemStatusFailureStreak.merge(item.getItemId(), 1, Integer::sum);
@@ -783,7 +789,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     private void attachItems(SyncTaskGroupVo group) {
-        group.setItems(MapstructUtils.convert(itemMapper.selectByGroupId(group.getGroupId()), SyncTaskGroupItemVo.class));
+        List<SyncTaskGroupItemVo> items = MapstructUtils.convert(itemMapper.selectByGroupId(group.getGroupId()), SyncTaskGroupItemVo.class);
+        Map<Long, SyncMetricsSampleVo> latest = metricsService.latestForGroupItems(items.stream().map(SyncTaskGroupItemVo::getItemId).toList());
+        items.forEach(item -> item.setLatestMetrics(latest.get(item.getItemId())));
+        group.setItems(items);
     }
 
     /** Expands / validates the column projection and sync key against live source metadata. */

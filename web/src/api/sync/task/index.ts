@@ -1,4 +1,5 @@
 import type { PageResult, R } from '@/api/types';
+import type { SyncMetricsSeries } from '@/api/sync/metrics/types';
 import request from '@/api/request';
 import type {
   SeaTunnelJobConfigPreview,
@@ -19,6 +20,11 @@ export function listSyncTasks(query?: SyncTaskQuery) {
 
 export function getSyncTask(id: string | number) {
   return request<R<SyncTaskVO>>({ url: `/sync/task/${id}`, method: 'get' });
+}
+
+/** Engine metrics history of a task over the trailing window (minutes; server clamps to its configured maximum). */
+export function getSyncTaskMetrics(id: string | number, minutes: number) {
+  return request<R<SyncMetricsSeries>>({ url: `/sync/task/${id}/metrics`, method: 'get', params: { minutes } });
 }
 
 export function addSyncTask(data: SyncTaskForm) {

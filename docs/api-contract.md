@@ -26,7 +26,8 @@
 | POST | `/data-source/{sourceId}/kafka/topics` | 按名称、分区数和副本数主动创建 topic；已存在或无 Create 权限时明确失败，不覆盖已有 topic |
 | POST | `/task/{id}/engine-config` | 生成脱敏的 SeaTunnel HOCON 配置预览 |
 | POST | `/task/{id}/start` | 提交并启动新的 SeaTunnel 作业 |
-| POST | `/task/{id}/status` | 查询引擎状态并刷新任务状态、checkpoint 摘要和 SeaTunnel 运行指标投影 |
+| POST | `/task/{id}/status` | 查询引擎状态并刷新任务状态、checkpoint 摘要和 SeaTunnel 运行指标投影；每次成功轮询同时落一条指标采样 |
+| GET | `/task/{id}/metrics?minutes=60` | 运行指标历史：窗口内的采样序列（最早在前，超过上限时等距抽稀）及最新一条采样；`minutes` 被限制在 5～1440。列表与详情的 `latestMetrics` 字段即最新采样。指标含源端/目标端累计行数与字节、QPS、积压（源端已读取 − 目标已提交）；端到端延迟仅 Kafka 目标可得 |
 | POST | `/task/{id}/check` | 只读核对源表和目标表；默认整表行数，也可用 `{mode:"KEY_RANGE",blockSize:10000,strictWatermark:true}` 对单列数值同步键分块比较，并持久化最近一次核对结果 |
 | POST | `/task/{id}/pause` | 使用 savepoint 暂停作业 |
 | POST | `/task/{id}/resume` | 使用原 jobId 和 savepoint 恢复作业 |
@@ -51,7 +52,8 @@
 | POST | `/group/{groupId}/check` | 逐表只读比较源端和目标端行数，并持久化每个表项最近核对结果 |
 | POST | `/group/{groupId}/item/{itemId}/resume-after-ddl` | 目标结构修复且兼容性通过后，使用原 savepoint 恢复单个表项 |
 | POST | `/group/{groupId}/item/{itemId}/reinitialize` | 丢弃单个表项的作业与 savepoint，按当前源表结构重新全量同步；其他表不受影响，启动时为全字段选择的表项自动纳入源表新增字段 |
-| POST | `/group/{groupId}/status` | 刷新所有表项作业状态 |
+| POST | `/group/{groupId}/status` | 刷新所有表项作业状态；每个成功轮询的表项同时落一条指标采样 |
+| GET | `/group/{groupId}/item/{itemId}/metrics?minutes=60` | 单个表项的运行指标历史，语义同任务接口；表项 VO 的 `latestMetrics` 即最新采样 |
 | POST | `/group/{groupId}/pause` | 对运行中的表项执行 savepoint 暂停 |
 | POST | `/group/{groupId}/resume` | 使用表项 savepoint 恢复作业 |
 | POST | `/group/{groupId}/stop` | 停止任务组全部表项作业 |

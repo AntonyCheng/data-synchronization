@@ -1,4 +1,5 @@
 import type { PageResult, R } from '@/api/types';
+import type { SyncMetricsSeries } from '@/api/sync/metrics/types';
 import request from '@/api/request';
 import type { SyncTaskGroupConfigPreview, SyncTaskGroupDataCheckResult, SyncTaskGroupDdlCheckResult, SyncTaskGroupForm, SyncTaskGroupQuery, SyncTaskGroupValidationResult, SyncTaskGroupVO } from './types';
 
@@ -36,6 +37,7 @@ export function checkSyncTaskGroupDdl(id: string | number) { return request<R<Sy
 export function checkSyncTaskGroupData(id: string | number) { return request<R<SyncTaskGroupDataCheckResult>>({ url: `/sync/group/${id}/check`, method: 'post' }); }
 export function resumeSyncTaskGroupItemAfterDdl(groupId: string | number, itemId: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${groupId}/item/${itemId}/resume-after-ddl`, method: 'post' }); }
 export function reinitializeSyncTaskGroupItem(groupId: string | number, itemId: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${groupId}/item/${itemId}/reinitialize`, method: 'post' }); }
+export function getSyncTaskGroupItemMetrics(groupId: string | number, itemId: string | number, minutes: number) { return request<R<SyncMetricsSeries>>({ url: `/sync/group/${groupId}/item/${itemId}/metrics`, method: 'get', params: { minutes } }); }
 export function refreshSyncTaskGroupStatus(id: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${id}/status`, method: 'post' }); }
 export function pauseSyncTaskGroup(id: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${id}/pause`, method: 'post' }); }
 export function resumeSyncTaskGroup(id: string | number) { return request<R<{ groupId: string | number; status: string; message: string }>>({ url: `/sync/group/${id}/resume`, method: 'post' }); }

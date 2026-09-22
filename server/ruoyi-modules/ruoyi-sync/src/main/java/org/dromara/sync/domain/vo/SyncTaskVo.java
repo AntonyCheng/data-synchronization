@@ -67,4 +67,7 @@ public class SyncTaskVo implements Serializable {
     private String lastError;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
+
+    /** Newest engine metrics sample on record; null until the task has been polled at least once. */
+    private SyncMetricsSampleVo latestMetrics;
 }

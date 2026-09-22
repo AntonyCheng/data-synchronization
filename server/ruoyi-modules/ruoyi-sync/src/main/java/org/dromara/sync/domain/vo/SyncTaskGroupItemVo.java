@@ -40,4 +40,7 @@ public class SyncTaskGroupItemVo implements Serializable {
     private LocalDateTime lastCheckTime;
     private String lastCheckMessage;
     private String lastError;
+
+    /** Newest engine metrics sample on record; null until the item has been polled at least once. */
+    private SyncMetricsSampleVo latestMetrics;
 }

@@ -46,3 +46,4 @@ deploy/release/
 
 # Local Git metadata from imported upstream projects
 **/.git/
+.playwright-mcp/

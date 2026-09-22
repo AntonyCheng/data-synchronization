@@ -1,4 +1,5 @@
 import type { PageQuery } from '@/api/types';
+import type { SyncMetricsSample } from '@/api/sync/metrics/types';
 
 export interface SyncTaskForm {
   taskId?: string | number;
@@ -60,6 +61,8 @@ export interface SyncTaskVO extends SyncTaskForm {
   nextRunTime?: string;
   lastTriggerTime?: string;
   lastSkipReason?: string;
+  /** Newest engine metrics sample; absent until the task has been polled. */
+  latestMetrics?: SyncMetricsSample;
   overwriteStageTable?: string;
 }
 

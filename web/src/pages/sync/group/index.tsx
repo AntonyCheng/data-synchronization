@@ -4,8 +4,9 @@ import { Alert, AutoComplete, Button, Checkbox, Descriptions, Divider, Form, Inp
 import { useEffect, useRef, useState } from 'react';
 import { createKafkaTopic, getDataSourceMetadata, listDataSourceTables, listDataSources, listKafkaTopics } from '@/api/sync/data-source';
 import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
-import { addSyncTaskGroup, checkSyncTaskGroupData, checkSyncTaskGroupDdl, deleteSyncTaskGroup, discoverSyncTaskGroupTables, getSyncTaskGroup, listSyncTaskGroups, pauseSyncTaskGroup, previewSyncTaskGroupConfig, refreshSyncTaskGroupStatus, reinitializeSyncTaskGroupItem, resumeSyncTaskGroup, resumeSyncTaskGroupItemAfterDdl, startSyncTaskGroup, stopSyncTaskGroup, updateSyncTaskGroup, validateSyncTaskGroup } from '@/api/sync/group';
+import { addSyncTaskGroup, checkSyncTaskGroupData, checkSyncTaskGroupDdl, deleteSyncTaskGroup, discoverSyncTaskGroupTables, getSyncTaskGroup, getSyncTaskGroupItemMetrics, listSyncTaskGroups, pauseSyncTaskGroup, previewSyncTaskGroupConfig, refreshSyncTaskGroupStatus, reinitializeSyncTaskGroupItem, resumeSyncTaskGroup, resumeSyncTaskGroupItemAfterDdl, startSyncTaskGroup, stopSyncTaskGroup, updateSyncTaskGroup, validateSyncTaskGroup } from '@/api/sync/group';
 import type { SyncTaskGroupDataCheckResult, SyncTaskGroupForm, SyncTaskGroupQuery, SyncTaskGroupVO } from '@/api/sync/group/types';
+import MetricsHistoryPanel from '@/components/sync/MetricsHistoryPanel';
 import { useTableScroll } from '@/hooks/useTableScroll';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
@@ -85,6 +86,7 @@ export default function SyncTaskGroupPage() {
   const [validationResult, setValidationResult] = useState<Awaited<ReturnType<typeof validateSyncTaskGroup>>['data']>();
   const [configPreview, setConfigPreview] = useState<Awaited<ReturnType<typeof previewSyncTaskGroupConfig>>['data']>();
   const [ddlResult, setDdlResult] = useState<Awaited<ReturnType<typeof checkSyncTaskGroupDdl>>['data']>();
+  const [metricsItem, setMetricsItem] = useState<{ itemId: string | number; sourceTable?: string }>();
   const syncScope = Form.useWatch('syncScope', form) || 'MULTI_TABLE';
   const syncMode = Form.useWatch('syncMode', form) || 'FULL_CDC';
   const targetId = Form.useWatch('targetId', form);
@@ -321,7 +323,7 @@ export default function SyncTaskGroupPage() {
         </Descriptions>} />}
         <Descriptions bordered size="small" column={1} title="表项状态">
           {detail.items.map(item => <Descriptions.Item key={String(item.itemId)} label={`${item.sourceDatabase || '-'} . ${item.sourceTable} -> ${detailTarget?.sourceType === 'POSTGRESQL' ? `${item.targetSchema || 'public'} . ` : ''}${item.targetTable}`}>
-            <Space wrap size={8}><Tag color={itemStatusColor(item.status)}>{item.status ? itemStatusLabels[item.status] || item.status : '-'}</Tag>{item.engineJobId && <span>作业 {item.engineJobId}</span>}{item.lastError && <span style={{ color: '#cf1322' }}>{item.lastError}</span>}{can('sync:group:reinitialize') && reinitializableItemStatuses.includes(item.status || '') && !['DRAFT', 'PAUSING'].includes(detail.status || '') && <Button size="small" danger onClick={() => reinitializeItem(detail, item.itemId, item.sourceTable)}>重新初始化该表</Button>}</Space>
+            <Space wrap size={8}><Tag color={itemStatusColor(item.status)}>{item.status ? itemStatusLabels[item.status] || item.status : '-'}</Tag>{item.engineJobId && <span>作业 {item.engineJobId}</span>}{item.latestMetrics && <span>{item.latestMetrics.sinkQps == null ? '-' : `${item.latestMetrics.sinkQps < 10 ? item.latestMetrics.sinkQps.toFixed(1) : Math.round(item.latestMetrics.sinkQps)} 行/秒`} · 积压 {item.latestMetrics.backlogRows ?? '-'}{item.latestMetrics.cdcLagSeconds != null && ` · 延迟 ${item.latestMetrics.cdcLagSeconds} 秒`}</span>}{can('sync:group:status') && <Button size="small" onClick={() => setMetricsItem({ itemId: item.itemId, sourceTable: item.sourceTable })}>指标历史</Button>}{item.lastError && <span style={{ color: '#cf1322' }}>{item.lastError}</span>}{can('sync:group:reinitialize') && reinitializableItemStatuses.includes(item.status || '') && !['DRAFT', 'PAUSING'].includes(detail.status || '') && <Button size="small" danger onClick={() => reinitializeItem(detail, item.itemId, item.sourceTable)}>重新初始化该表</Button>}</Space>
           </Descriptions.Item>)}
         </Descriptions>
         <Descriptions bordered size="small" column={1} title="逐表最近核对结果">
@@ -330,6 +332,9 @@ export default function SyncTaskGroupPage() {
           </Descriptions.Item>)}
         </Descriptions>
       </Space>}
+    </Modal>
+    <Modal title={metricsItem ? `运行指标历史：${metricsItem.sourceTable || metricsItem.itemId}` : '运行指标历史'} open={Boolean(metricsItem)} width={880} footer={null} destroyOnHidden onCancel={() => setMetricsItem(undefined)}>
+      {detail && metricsItem && <MetricsHistoryPanel load={minutes => getSyncTaskGroupItemMetrics(detail.groupId, metricsItem.itemId, minutes).then(result => result.data)} />}
     </Modal>
   </PageContainer>;
 }

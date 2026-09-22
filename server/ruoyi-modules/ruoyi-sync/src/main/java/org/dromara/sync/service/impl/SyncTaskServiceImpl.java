@@ -20,6 +20,7 @@ import org.dromara.sync.domain.SyncTaskConfigVersion;
 import org.dromara.sync.domain.bo.SyncTaskBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
+import org.dromara.sync.domain.vo.SyncMetricsSampleVo;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskVo;
 import org.dromara.sync.mapper.DataSourceMapper;
@@ -27,6 +28,7 @@ import org.dromara.sync.mapper.SyncTaskConfigVersionMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
+import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskService;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.TableNames;
@@ -36,6 +38,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -60,6 +63,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     private final IDataSourceService dataSourceService;
     private final IDataSourceMetadataService metadataService;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
+    private final ISyncMetricsService metricsService;
 
     @Override
     public PageResult<SyncTaskVo> queryPageList(SyncTaskBo bo, PageQuery pageQuery) {
@@ -70,12 +74,20 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
             .eq(StringUtils.isNotBlank(bo.getStatus()), SyncTask::getStatus, bo.getStatus())
             .orderByDesc(SyncTask::getTaskId);
         Page<SyncTaskVo> page = syncTaskMapper.selectVoPage(pageQuery.build(), wrapper);
+        attachLatestMetrics(page.getRecords());
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
     @Override
     public SyncTaskVo queryById(Long taskId) {
-        return syncTaskMapper.selectVoById(taskId);
+        SyncTaskVo task = syncTaskMapper.selectVoById(taskId);
+        if (task != null) attachLatestMetrics(List.of(task));
+        return task;
+    }
+
+    private void attachLatestMetrics(List<SyncTaskVo> tasks) {
+        Map<Long, SyncMetricsSampleVo> latest = metricsService.latestForTasks(tasks.stream().map(SyncTaskVo::getTaskId).toList());
+        tasks.forEach(task -> task.setLatestMetrics(latest.get(task.getTaskId())));
     }
 
     @Override
@@ -119,7 +131,10 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
             throw new ServiceException("运行中的任务不能删除");
         }
         boolean deleted = syncTaskMapper.deleteById(taskId) > 0;
-        if (deleted) configVersionMapper.deleteByTaskId(taskId);
+        if (deleted) {
+            configVersionMapper.deleteByTaskId(taskId);
+            metricsService.deleteForTask(taskId);
+        }
         return deleted;
     }
 

@@ -1,4 +1,5 @@
 import type { PageQuery } from '@/api/types';
+import type { SyncMetricsSample } from '@/api/sync/metrics/types';
 
 export interface SyncTaskGroupItemForm {
   itemId?: string | number;
@@ -37,6 +38,8 @@ export interface SyncTaskGroupQuery extends PageQuery {
 
 export interface SyncTaskGroupItemVO extends SyncTaskGroupItemForm {
   itemId: string | number;
+  /** Newest engine metrics sample; absent until the item has been polled. */
+  latestMetrics?: SyncMetricsSample;
   groupId: string | number;
   status?: string;
   engineJobId?: string;

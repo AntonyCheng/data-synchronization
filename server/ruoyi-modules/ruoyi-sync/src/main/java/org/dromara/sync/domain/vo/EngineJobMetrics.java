@@ -23,6 +23,9 @@ public class EngineJobMetrics implements Serializable {
     private Long sinkCommittedBytes;
     private Double sourceQps;
     private Double sinkQps;
+    /** Rows the source has emitted that the sink has not yet committed (received - committed, never negative). */
+    private Long backlogRows;
+    /** End-to-end lag in seconds: from the Kafka bridge for Kafka targets; null when nothing can measure it. */
     private Long cdcLagSeconds;
     /** Set when the lag cannot be computed from what the engine returned. */
     private String metricsMessage;

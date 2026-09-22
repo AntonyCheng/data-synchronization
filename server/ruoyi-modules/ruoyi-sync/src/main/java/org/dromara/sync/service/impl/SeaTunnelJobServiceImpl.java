@@ -22,6 +22,7 @@ import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISeaTunnelJobService;
+import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskService;
 import org.dromara.sync.support.TargetTableSwap;
 import org.dromara.sync.support.SyncLocks;
@@ -63,6 +64,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final SyncLocks locks;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
+    private final ISyncMetricsService metricsService;
 
     /** Consecutive status-poll failures per task; reset on any successful poll. */
     private final ConcurrentMap<Long, Integer> statusFailureStreak = new ConcurrentHashMap<>();
@@ -195,6 +197,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             StringUtils.isBlank(snapshot.errorMessage()) ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
         copyKafkaMetrics(result, task);
         EngineJobStates.applyMetrics(result, snapshot);
+        if (kafka && result.getCdcLagSeconds() == null && task.getKafkaLagSeconds() != null) {
+            // The bridge measures source event time -> broker ack: the end-to-end lag of a Kafka target.
+            result.setCdcLagSeconds(task.getKafkaLagSeconds());
+            result.setMetricsMessage(null);
+        }
+        metricsService.recordTask(task, snapshot.status(), result);
         return result;
     }
 

@@ -43,6 +43,7 @@ import {
   checkSyncTaskData,
   deleteSyncTask,
   getSyncTask,
+  getSyncTaskMetrics,
   listSyncTasks,
   pauseSyncTask,
   previewSyncTaskConfig,
@@ -55,6 +56,7 @@ import {
   validateSyncTask
 } from '@/api/sync/task';
 import type { SeaTunnelJobStatus, SyncTaskForm, SyncTaskQuery, SyncTaskVO, TaskValidationResult } from '@/api/sync/task/types';
+import MetricsHistoryPanel from '@/components/sync/MetricsHistoryPanel';
 import { useTableScroll } from '@/hooks/useTableScroll';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
@@ -573,6 +575,12 @@ export default function SyncTaskPage() {
       valueEnum: statusLabels,
       render: (_, row) => statusTag(row.status, row.lastError)
     },
+    {
+      title: '吞吐 / 积压', dataIndex: 'latestMetrics', width: 160, search: false,
+      render: (_, row) => row.latestMetrics
+        ? <Tooltip title={`采样 ${row.latestMetrics.sampledAt}${row.latestMetrics.cdcLagSeconds == null ? '' : `，端到端延迟 ${row.latestMetrics.cdcLagSeconds} 秒`}`}>{row.latestMetrics.sinkQps == null ? '-' : `${row.latestMetrics.sinkQps < 10 ? row.latestMetrics.sinkQps.toFixed(1) : Math.round(row.latestMetrics.sinkQps)} 行/秒`} · 积压 {row.latestMetrics.backlogRows ?? '-'}</Tooltip>
+        : '-'
+    },
     { title: '更新时间', dataIndex: 'updateTime', width: 170, search: false },
     {
       title: '操作', valueType: 'option', width: 240, fixed: 'right',
@@ -636,6 +644,8 @@ export default function SyncTaskPage() {
               <Descriptions.Item label="目标吞吐">{metricsResult.sinkQps == null ? '-' : `${metricsResult.sinkQps.toFixed(2)} 行/秒`}</Descriptions.Item>
               <Descriptions.Item label="CDC 延迟">{metricsResult.cdcLagSeconds == null ? (metricsResult.metricsMessage || '暂不可计算') : `${metricsResult.cdcLagSeconds} 秒`}</Descriptions.Item>
             </Descriptions>} />}
+            <Divider titlePlacement="left" plain>运行指标历史</Divider>
+            <MetricsHistoryPanel load={minutes => getSyncTaskMetrics(selectedTask.taskId, minutes).then(result => result.data)} />
             {selectedTask.lastError && <Alert type="error" showIcon message="最近一次错误" description={<Typography.Text copyable>{selectedTask.lastError}</Typography.Text>} />}
             {selectedTask.lastSkipReason && <Alert type="warning" showIcon message="最近一次调度未执行" description={selectedTask.lastSkipReason} />}
             <Divider titlePlacement="left" plain>准备与诊断</Divider>

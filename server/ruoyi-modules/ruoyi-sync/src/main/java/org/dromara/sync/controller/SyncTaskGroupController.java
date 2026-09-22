@@ -10,6 +10,7 @@ import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.redis.annotation.RepeatSubmit;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
+import org.dromara.sync.domain.vo.SyncMetricsSeriesVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
 import org.dromara.sync.domain.vo.SyncTaskGroupDdlCheckResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckResult;
@@ -17,6 +18,7 @@ import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
+import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskGroupDdlService;
 import org.dromara.sync.service.ISyncTaskGroupService;
 import org.springframework.validation.annotation.Validated;
@@ -40,6 +42,7 @@ public class SyncTaskGroupController extends BaseController {
 
     private final ISyncTaskGroupService groupService;
     private final ISyncTaskGroupDdlService ddlService;
+    private final ISyncMetricsService metricsService;
 
     @SaCheckPermission("sync:group:list")
     @GetMapping("/list")
@@ -133,6 +136,12 @@ public class SyncTaskGroupController extends BaseController {
     @PostMapping("/{groupId}/item/{itemId}/reinitialize")
     public R<SyncTaskGroupOperationResult> reinitializeItem(@PathVariable Long groupId, @PathVariable Long itemId) {
         return R.ok(groupService.reinitializeItem(groupId, itemId));
+    }
+
+    @SaCheckPermission("sync:group:status")
+    @GetMapping("/{groupId}/item/{itemId}/metrics")
+    public R<SyncMetricsSeriesVo> itemMetrics(@PathVariable Long groupId, @PathVariable Long itemId, Integer minutes) {
+        return R.ok(metricsService.queryGroupItemSeries(groupId, itemId, minutes));
     }
 
     @SaCheckPermission("sync:group:status")

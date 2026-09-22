@@ -5,6 +5,7 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.vo.EngineJobMetrics;
 import tools.jackson.databind.JsonNode;
 
+import java.math.BigDecimal;
 import java.util.Locale;
 import java.util.Set;
 
@@ -48,7 +49,7 @@ public final class EngineJobStates {
             || normalized.contains("位点") || normalized.contains("日志已过期");
     }
 
-    /** Copies the engine's throughput counters and the derived CDC lag onto a status VO. */
+    /** Copies the engine's throughput counters, the derived backlog and (when available) the CDC lag onto a status VO. */
     public static void applyMetrics(EngineJobMetrics target, SeaTunnelRestClient.JobSnapshot snapshot) {
         JsonNode metrics = snapshot.metrics();
         String engineStatus = snapshot.status();
@@ -59,22 +60,43 @@ public final class EngineJobStates {
         target.setSinkCommittedBytes(metricLong(metrics, "SinkCommittedBytes"));
         target.setSourceQps(metricDouble(metrics, "SourceReceivedQPS"));
         target.setSinkQps(metricDouble(metrics, "SinkCommittedQPS"));
+        Long received = target.getSourceReceivedCount();
+        Long committed = target.getSinkCommittedCount();
+        target.setBacklogRows(received != null && committed != null ? Math.max(0L, received - committed) : null);
+        // Zeta 2.3.13 exposes no event timestamps over REST, so a time-based CDC lag can only
+        // come from elsewhere (the Kafka bridge for Kafka targets); it stays null here.
         Long sourceEvent = metricLong(metrics, "SourceLatestEventTime");
         Long sinkCommit = metricLong(metrics, "SinkLatestCommitTime");
         if (sourceEvent != null && sinkCommit != null && sinkCommit >= sourceEvent) {
             target.setCdcLagSeconds((sinkCommit - sourceEvent) / 1000L);
         } else {
-            target.setMetricsMessage("SeaTunnel 未返回源事件时间，CDC 延迟暂不可计算");
+            target.setMetricsMessage("引擎未返回事件时间，以待提交行数衡量积压");
         }
     }
 
+    /**
+     * Zeta serializes every metric as a JSON string ("50", "0.37"), not a number - accept
+     * both. Anything unparsable is reported as absent rather than as zero.
+     */
     private static Long metricLong(JsonNode metrics, String key) {
-        JsonNode node = metrics == null ? null : metrics.get(key);
-        return node != null && node.canConvertToLong() ? node.asLong() : null;
+        BigDecimal value = metricNumber(metrics, key);
+        return value == null ? null : value.longValue();
     }
 
     private static Double metricDouble(JsonNode metrics, String key) {
+        BigDecimal value = metricNumber(metrics, key);
+        return value == null ? null : value.doubleValue();
+    }
+
+    private static BigDecimal metricNumber(JsonNode metrics, String key) {
         JsonNode node = metrics == null ? null : metrics.get(key);
-        return node != null && node.isNumber() ? node.asDouble() : null;
+        if (node == null || node.isNull()) return null;
+        if (node.isNumber()) return node.decimalValue();
+        if (!node.isTextual() || StringUtils.isBlank(node.asText())) return null;
+        try {
+            return new BigDecimal(node.asText().trim());
+        } catch (NumberFormatException ex) {
+            return null;
+        }
     }
 }

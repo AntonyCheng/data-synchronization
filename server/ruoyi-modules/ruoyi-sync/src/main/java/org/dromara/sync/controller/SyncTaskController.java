@@ -12,6 +12,7 @@ import org.dromara.common.redis.annotation.RepeatSubmit;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.sync.domain.bo.SyncTaskBo;
 import org.dromara.sync.domain.bo.SyncTaskDataCheckRequest;
+import org.dromara.sync.domain.vo.SyncMetricsSeriesVo;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskVo;
 import org.dromara.sync.domain.vo.SeaTunnelJobConfigPreview;
@@ -22,6 +23,7 @@ import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataConsistencyService;
 import org.dromara.sync.service.ISeaTunnelJobService;
+import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -46,6 +48,7 @@ public class SyncTaskController extends BaseController {
     private final ISeaTunnelJobService seaTunnelJobService;
     private final IDataConsistencyService dataConsistencyService;
     private final IDataSourceMetadataService metadataService;
+    private final ISyncMetricsService metricsService;
 
     @SaCheckPermission("sync:task:list")
     @GetMapping("/list")
@@ -116,6 +119,12 @@ public class SyncTaskController extends BaseController {
     @PostMapping("/{taskId}/status")
     public R<SeaTunnelJobStatus> status(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId) {
         return R.ok(seaTunnelJobService.refreshStatus(taskId));
+    }
+
+    @SaCheckPermission("sync:task:status")
+    @GetMapping("/{taskId}/metrics")
+    public R<SyncMetricsSeriesVo> metrics(@NotNull(message = "任务ID不能为空") @PathVariable Long taskId, Integer minutes) {
+        return R.ok(metricsService.queryTaskSeries(taskId, minutes));
     }
 
     @SaCheckPermission("sync:task:check")
