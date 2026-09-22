@@ -1,7 +1,6 @@
 package org.dromara.sync.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.PageResult;
@@ -517,11 +516,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         // 3. Fresh baseline, fresh job, no inherited checkpoint.
         TableSchemaSnapshot.baseline(item, metadata);
         String newJobId = submitItem(group, item, source, target);
-        itemMapper.update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
-            .eq(SyncTaskGroupItem::getItemId, itemId)
-            .set(SyncTaskGroupItem::getLastCheckpointId, null)
-            .set(SyncTaskGroupItem::getLastCheckpointTime, null)
-            .set(SyncTaskGroupItem::getLastCheckpointStatus, null));
+        itemMapper.clearCheckpoint(itemId);
         ddlEventMapper.resolveOpen(itemId, "已通过重新初始化该表处理。");
 
         group.setEngineJobId(replaceJobId(group.getEngineJobId(), oldJobId, newJobId));
@@ -592,7 +587,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                         ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
                     EngineJobStates.applyMetrics(itemStatus, snapshot);
                     metricsService.recordGroupItem(item, snapshot.status(), itemStatus);
-                    statuses.add(status);
+                    statuses.add(item.getStatus());
                 } catch (RuntimeException ex) {
                     int streak = itemStatusFailureStreak.merge(item.getItemId(), 1, Integer::sum);
                     if (streak < ITEM_STATUS_FAILURE_TOLERANCE && !EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) {

@@ -1,6 +1,5 @@
 package org.dromara.sync.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
@@ -273,16 +272,24 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             throw new ServiceException("只有已暂停或可恢复失败任务可以恢复");
         }
         boolean kafka = isKafkaTask(task);
+        // Both preconditions mean the savepoint can never be reused, so the task lands in
+        // REINITIALIZE_REQUIRED on purpose - not FAILED, which would invite another resume.
+        SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
+        if (StringUtils.isNotBlank(task.getEngineConfigHash()) && !task.getEngineConfigHash().equals(SyncText.sha256Hex(generated.config()))) {
+            throw refuseResume(task, jobId, "任务配置已变化，不能使用原 checkpoint 恢复，请重新初始化");
+        }
+        SeaTunnelRestClient.CheckpointSnapshot checkpoint;
         try {
-            SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
-            String configHash = SyncText.sha256Hex(generated.config());
-            if (StringUtils.isNotBlank(task.getEngineConfigHash()) && !task.getEngineConfigHash().equals(configHash)) {
-                throw new ServiceException("任务配置已变化，不能使用原 checkpoint 恢复，请重新初始化");
-            }
-            SeaTunnelRestClient.CheckpointSnapshot checkpoint = restClient.checkpoints(jobId);
-            if (checkpoint.id() == null) {
-                throw new ServiceException("任务没有可用的 checkpoint/savepoint，不能从未知位点恢复，请重新初始化");
-            }
+            checkpoint = restClient.checkpoints(jobId);
+        } catch (ServiceException ex) {
+            if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) throw refuseResume(task, jobId, ex.getMessage());
+            markFailed(task, jobId, ex.getMessage());
+            throw ex;
+        }
+        if (checkpoint.id() == null) {
+            throw refuseResume(task, jobId, "任务没有可用的 checkpoint/savepoint，不能从未知位点恢复，请重新初始化");
+        }
+        try {
             if (kafka) startBridge(task);
             restClient.submit(generated.jobName(), generated.config(), jobId, true);
             task.setStatus(SyncStatus.RUNNING);
@@ -291,13 +298,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             return operation(task, "作业已从 savepoint 恢复");
         } catch (ServiceException ex) {
             // The Kafka bridge (if any) is started before restClient.submit() above, so a
-            // ServiceException from submit()/checkpoints() must stop it too - otherwise the
-            // bridge's consumer thread and Kafka consumer-group membership are orphaned.
+            // ServiceException from submit() must stop it too - otherwise the bridge's
+            // consumer thread and Kafka consumer-group membership are orphaned.
             if (kafka) kafkaTaskBridgeService.stop(taskId);
-            if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) {
-                markReinitializeRequired(task, jobId, ex.getMessage());
-                throw new ServiceException(ex.getMessage());
-            }
+            if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) throw refuseResume(task, jobId, ex.getMessage());
             markFailed(task, jobId, ex.getMessage());
             throw ex;
         } catch (Exception ex) {
@@ -305,6 +309,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             markFailed(task, jobId, ex.getMessage());
             throw new ServiceException("恢复同步任务失败：" + SyncText.safeMessage(ex, "未知错误"));
         }
+    }
+
+    /** Persists REINITIALIZE_REQUIRED with the reason and returns the exception to throw. */
+    private ServiceException refuseResume(SyncTask task, String jobId, String reason) {
+        markReinitializeRequired(task, jobId, reason);
+        return new ServiceException(reason);
     }
 
     @Override
@@ -413,11 +423,8 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         String backupName = "__ds_backup_" + task.getTaskId() + "_v" + configVersionOf(task);
         TargetTableSwap.swap(target, schema, task.getTargetTable(), task.getOverwriteStageTable(), backupName);
         task.setOverwriteStageTable(null);
-        // MyBatis-Plus skips null fields for ordinary updates. Explicitly clear the stage
-        // marker so a later status refresh is idempotent.
-        syncTaskMapper.update(null, new LambdaUpdateWrapper<SyncTask>()
-            .eq(SyncTask::getTaskId, task.getTaskId())
-            .set(SyncTask::getOverwriteStageTable, null));
+        // updateById drops nulls, so the stage marker is cleared explicitly - a later refresh must be idempotent.
+        syncTaskMapper.clearOverwriteStage(task.getTaskId());
     }
 
     /**
@@ -429,11 +436,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         task.setLastCheckpointId(null);
         task.setLastCheckpointTime(null);
         task.setLastCheckpointStatus(null);
-        syncTaskMapper.update(null, new LambdaUpdateWrapper<SyncTask>()
-            .eq(SyncTask::getTaskId, task.getTaskId())
-            .set(SyncTask::getLastCheckpointId, null)
-            .set(SyncTask::getLastCheckpointTime, null)
-            .set(SyncTask::getLastCheckpointStatus, null));
+        syncTaskMapper.clearCheckpoint(task.getTaskId());
     }
 
     private static int configVersionOf(SyncTask task) {

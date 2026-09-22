@@ -51,6 +51,18 @@ class TableSchemaSnapshotTest {
         assertFalse(TableSchemaSnapshot.diff(baseline, TableSchemaSnapshot.of(metadata("id", "name"))).changed());
     }
 
+    /** The JSON is persisted in ds_sync_task_group_item.schema_snapshot; its shape is a contract. */
+    @Test
+    void snapshotJsonShapeIsStableAndRoundTrips() {
+        TableSchemaSnapshot.Snapshot snapshot = TableSchemaSnapshot.of(metadata("Id", "name"));
+        String json = TableSchemaSnapshot.toJson(snapshot);
+        assertEquals("{\"columns\":[{\"name\":\"id\",\"typeName\":\"varchar\",\"jdbcType\":null,\"size\":null,\"scale\":null,\"nullable\":true},"
+            + "{\"name\":\"name\",\"typeName\":\"varchar\",\"jdbcType\":null,\"size\":null,\"scale\":null,\"nullable\":true}],\"primaryKeys\":[\"id\"]}", json);
+        assertEquals(snapshot, TableSchemaSnapshot.fromJson(json));
+        // A field added to the format later must not break reading rows written before it.
+        assertTrue(TableSchemaSnapshot.fromJson("{\"columns\":[],\"primaryKeys\":[],\"unknownLater\":1}").getColumns().isEmpty());
+    }
+
     private static DataSourceMetadataVo metadata(String... columns) {
         DataSourceMetadataVo metadata = new DataSourceMetadataVo();
         for (String name : columns) {

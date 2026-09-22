@@ -3,10 +3,11 @@ package org.dromara.sync.support;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -25,6 +26,15 @@ import java.util.stream.Collectors;
  */
 public final class TableSchemaSnapshot {
 
+    /**
+     * Own codec rather than the Spring-managed JsonUtils: the persisted shape is plain
+     * fields in declaration order, which a default mapper renders identically, and this
+     * keeps the helper usable without an application context.
+     */
+    private static final JsonMapper JSON = JsonMapper.builder()
+        .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+        .build();
+
     private TableSchemaSnapshot() {
     }
 
@@ -39,11 +49,11 @@ public final class TableSchemaSnapshot {
     }
 
     public static String toJson(Snapshot snapshot) {
-        return JsonUtils.toJsonString(snapshot);
+        return JSON.writeValueAsString(snapshot);
     }
 
     public static Snapshot fromJson(String json) {
-        return JsonUtils.parseObject(json, Snapshot.class);
+        return JSON.readValue(json, Snapshot.class);
     }
 
     /** Records the current source schema on the item as the baseline later DDL checks diff against. */
