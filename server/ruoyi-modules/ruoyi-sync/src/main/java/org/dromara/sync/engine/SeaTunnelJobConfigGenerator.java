@@ -88,12 +88,22 @@ public final class SeaTunnelJobConfigGenerator {
         if (kafkaTarget) {
             config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, selectedColumns, syncMode, properties);
         } else if (full) {
-            ensureMysqlFullModeTargetTable(task, source, target, targetTable, selectedColumns, sourceColumns);
             config = buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties);
         } else {
             config = buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, syncMode, properties, sourceColumns);
         }
-        return new GeneratedConfig(jobName, sourceTable, targetTable, primaryKeys, config, redact(config));
+        return new GeneratedConfig(jobName, sourceTable, targetTable, primaryKeys, selectedColumns, config, redact(config));
+    }
+
+    /**
+     * The one write the generator family does against a customer database, kept out of
+     * {@link #generate} so that previews and fingerprint checks stay read-only: the
+     * start / reinitialize paths call it right before submitting a fresh FULL job.
+     */
+    public static void prepareTarget(SyncTask task, DataSource source, DataSource target,
+                                     GeneratedConfig generated, SourceColumns sourceColumns) {
+        if (!SyncMode.isFull(SyncMode.normalize(task.getSyncMode())) || DataSourceType.isKafka(target)) return;
+        ensureMysqlFullModeTargetTable(task, source, target, generated.targetTable(), generated.selectedColumns(), sourceColumns);
     }
 
     /**
@@ -534,7 +544,7 @@ public final class SeaTunnelJobConfigGenerator {
 
     /** {@code config} carries real credentials and is what gets submitted; {@code redactedConfig} is API-safe and is what gets fingerprinted. */
     public record GeneratedConfig(String jobName, String sourceTable, String targetTable,
-                                  List<String> primaryKeys, String config, String redactedConfig) {
+                                  List<String> primaryKeys, List<String> selectedColumns, String config, String redactedConfig) {
 
         /**
          * The persisted {@code engine_config_hash}. It deliberately excludes credentials so a

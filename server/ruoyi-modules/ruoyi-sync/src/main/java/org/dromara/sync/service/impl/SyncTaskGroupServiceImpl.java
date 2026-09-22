@@ -252,6 +252,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private SyncTaskGroupOperationResult doStart(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (SyncStatus.isActive(group.getStatus())) throw new ServiceException("任务组当前正在运行");
+        if (SyncStatus.PAUSED.equals(group.getStatus())) {
+            throw new ServiceException("任务组处于暂停状态，请使用恢复任务组从 savepoint 继续；如需重新全量同步，请先停止任务组");
+        }
         resourceProtectionPolicy.applyDefaultsAndValidate(group);
         groupMapper.updateById(group);
         boolean databaseScope = isDatabaseScope(group);
@@ -866,6 +869,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
      */
     private String submitItem(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
         var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
+        SeaTunnelJobConfigGenerator.prepareTarget(SyncTaskGroupConfigGenerator.toTask(group, item), source, target, generated, sourceColumns(source));
         String jobId = submitWithBridge(group, item, source, target, generated, null, false);
         item.setEngineJobId(jobId);
         item.setEngineConfigHash(generated.fingerprint());

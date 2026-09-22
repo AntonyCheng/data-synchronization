@@ -792,7 +792,7 @@ export default function SyncTaskGroupPage() {
                 <Button
                   type="primary"
                   icon={<PlayCircleOutlined />}
-                  disabled={['RUNNING', 'PAUSING', 'DEGRADED'].includes(detail.status || '')}
+                  disabled={['RUNNING', 'PAUSING', 'PAUSED'].includes(detail.status || '')}
                   onClick={() => operate(detail, 'start')}
                 >
                   启动

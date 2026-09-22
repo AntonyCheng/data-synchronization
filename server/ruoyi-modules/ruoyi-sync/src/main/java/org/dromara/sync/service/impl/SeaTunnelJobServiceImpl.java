@@ -103,6 +103,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             var validation = syncTaskService.validate(taskId);
             if (!validation.isValid()) throw new ServiceException("启动前校验未通过：" + validation.getMessage());
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
+            prepareTarget(task, generated);
             if (isKafkaTask(task)) {
                 startBridge(task);
                 kafkaBridgeStarted = true;
@@ -372,6 +373,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
                 throw new ServiceException("重新初始化前校验未通过：" + validation.getMessage());
             }
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
+            prepareTarget(task, generated);
             if (kafka) startBridge(task);
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
             markRunning(task, submitted.jobId(), generated);
@@ -392,6 +394,13 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         DataSource source = dataSourceService.requireUsable(task.getSourceId(), "源");
         DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
         return SeaTunnelJobConfigGenerator.generate(task, source, target, properties, SourceColumns.fromMetadata(metadataService, source));
+    }
+
+    /** Pre-creates a MySQL FULL target from the source DDL where SeaTunnel's inference would get the key types wrong. */
+    private void prepareTarget(SyncTask task, SeaTunnelJobConfigGenerator.GeneratedConfig generated) {
+        DataSource source = dataSourceService.requireUsable(task.getSourceId(), "源");
+        DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
+        SeaTunnelJobConfigGenerator.prepareTarget(task, source, target, generated, SourceColumns.fromMetadata(metadataService, source));
     }
 
     /** Lenient: a task whose target row is missing is simply not a Kafka task here; the start paths fail loudly later. */
@@ -458,6 +467,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         }
         if (SyncStatus.FAILED.equals(task.getStatus()) || SyncStatus.REINITIALIZE_REQUIRED.equals(task.getStatus())) {
             throw new ServiceException("任务存在恢复风险，请使用恢复任务或重新初始化");
+        }
+        if (SyncStatus.PAUSED.equals(task.getStatus())) {
+            // A fresh submit would silently throw the savepoint away and re-snapshot.
+            throw new ServiceException("任务处于暂停状态，请使用恢复任务从 savepoint 继续；如需重新全量同步，请先停止任务");
         }
     }
 

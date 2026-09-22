@@ -20,7 +20,11 @@ FAILED -> RUNNING      按相同配置版本从 checkpoint/savepoint 恢复
 FAILED -> REINITIALIZE_REQUIRED  checkpoint 损坏、binlog 过期或恢复位点不可用
 REINITIALIZE_REQUIRED -> RUNNING  丢弃旧恢复状态，执行新的全量初始化
 STOPPED -> RUNNING     重新启动（不承诺复用旧恢复状态）
+RUNNING -> PAUSING -> PAUSED   savepoint 暂停；PAUSED 只能“恢复”（复用 savepoint）或“停止”，
+                               不能直接“启动”——那会静默丢弃 savepoint 并重新全量
 ```
+
+`engine-config` 预览是只读的：MySQL 目标的 FULL 任务需要按源表 DDL 预建目标表时，这一步发生在启动/重新初始化提交作业之前（`SeaTunnelJobConfigGenerator.prepareTarget`），预览不会在目标库建表。
 
 `REINITIALIZE_REQUIRED` 禁止普通“启动”和“恢复”直接绕过；纯增量任务不能在原任务内自动重新初始化，需新建全量或全量 + CDC 任务建立可信基线。
 

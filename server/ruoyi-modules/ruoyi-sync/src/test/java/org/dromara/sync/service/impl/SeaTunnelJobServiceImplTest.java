@@ -132,6 +132,13 @@ class SeaTunnelJobServiceImplTest {
     }
 
     @Test
+    void aPausedTaskCannotBeStartedFreshOverItsSavepoint() {
+        persisted(task("PAUSED", POSTGRES_ID));
+        assertTrue(assertThrows(ServiceException.class, () -> service.start(TASK_ID)).getMessage().contains("请使用恢复任务"));
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+    }
+
+    @Test
     void startStopsAtFailedValidationWithoutTouchingTheEngine() {
         SyncTask task = persisted(task("STOPPED", POSTGRES_ID));
         when(syncTaskService.validate(TASK_ID)).thenReturn(validation(false));

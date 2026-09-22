@@ -215,6 +215,9 @@ class SyncTaskGroupServiceImplTest {
         persisted(group("RUNNING", "MULTI_TABLE", POSTGRES_ID));
         assertTrue(assertThrows(ServiceException.class, () -> service.start(GROUP_ID)).getMessage().contains("正在运行"));
 
+        persisted(group("PAUSED", "MULTI_TABLE", POSTGRES_ID));
+        assertTrue(assertThrows(ServiceException.class, () -> service.start(GROUP_ID)).getMessage().contains("请使用恢复任务组"));
+
         persisted(group("STOPPED", "MULTI_TABLE", POSTGRES_ID));
         items.add(item(11L, "customers", "PENDING"));
         when(metadataService.checkTargetCompatibility(anyLong(), anyLong(), anyString(), any(), anyString(), any(), any())).thenReturn(compatibility(false));
