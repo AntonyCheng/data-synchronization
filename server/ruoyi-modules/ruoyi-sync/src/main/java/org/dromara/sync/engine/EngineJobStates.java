@@ -1,6 +1,7 @@
 package org.dromara.sync.engine;
 
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.vo.EngineJobMetrics;
 import tools.jackson.databind.JsonNode;
@@ -16,8 +17,13 @@ import java.util.Set;
  */
 public final class EngineJobStates {
 
-    /** Engine states during which the job is still in its initial snapshot phase. */
-    private static final Set<String> SNAPSHOT_PHASE_STATES = Set.of("INITIALIZING", "CREATED", "PENDING", "STARTING");
+    /** Engine states before the job has read anything - whatever comes next starts with the snapshot. */
+    private static final Set<String> STARTUP_STATES = Set.of("INITIALIZING", "CREATED", "PENDING", "STARTING");
+
+    public static final String PHASE_SNAPSHOT = "SNAPSHOT";
+    public static final String PHASE_CDC = "CDC";
+    /** A FULL_CDC job past startup: Zeta exposes no snapshot-complete signal, so the phase cannot be told apart. */
+    public static final String PHASE_MIXED = "MIXED";
 
     private EngineJobStates() {
     }
@@ -49,11 +55,21 @@ public final class EngineJobStates {
             || normalized.contains("位点") || normalized.contains("日志已过期");
     }
 
+    /**
+     * What the job is doing, as far as it can honestly be known: a FULL job only ever
+     * snapshots, an INCREMENTAL job only ever tails the binlog, and a FULL_CDC job is
+     * SNAPSHOT until it leaves the startup states and MIXED afterwards.
+     */
+    public static String phaseOf(String syncMode, String engineStatus) {
+        if (SyncMode.isFull(syncMode)) return PHASE_SNAPSHOT;
+        if (SyncMode.INCREMENTAL.equalsIgnoreCase(syncMode)) return PHASE_CDC;
+        return engineStatus != null && STARTUP_STATES.contains(engineStatus.toUpperCase(Locale.ROOT)) ? PHASE_SNAPSHOT : PHASE_MIXED;
+    }
+
     /** Copies the engine's throughput counters, the derived backlog and (when available) the CDC lag onto a status VO. */
-    public static void applyMetrics(EngineJobMetrics target, SeaTunnelRestClient.JobSnapshot snapshot) {
+    public static void applyMetrics(EngineJobMetrics target, SeaTunnelRestClient.JobSnapshot snapshot, String syncMode) {
         JsonNode metrics = snapshot.metrics();
-        String engineStatus = snapshot.status();
-        target.setPhase(engineStatus != null && SNAPSHOT_PHASE_STATES.contains(engineStatus) ? "SNAPSHOT" : "CDC");
+        target.setPhase(phaseOf(syncMode, snapshot.status()));
         target.setSourceReceivedCount(metricLong(metrics, "SourceReceivedCount"));
         target.setSinkCommittedCount(metricLong(metrics, "SinkCommittedCount"));
         target.setSourceReceivedBytes(metricLong(metrics, "SourceReceivedBytes"));

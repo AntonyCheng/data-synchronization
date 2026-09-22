@@ -229,7 +229,12 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         setSuggestion(result, "extra_required_columns", requiredExtras.isEmpty() ? "无需修改" : "将目标额外列改为可空或补充默认值");
         boolean passed = missing.isEmpty() && incompatible.isEmpty() && keysMatch && requiredExtras.isEmpty();
         result.setPassed(passed);
-        result.setMessage(passed ? "目标表结构兼容，可以继续任务校验" : "目标表存在必须修复的兼容性问题");
+        // The summary names what failed: it is what a refused start / validate shows per table.
+        String failures = result.getChecks().stream()
+            .filter(check -> Boolean.FALSE.equals(check.getPassed()))
+            .map(check -> check.getMessage() + (StringUtils.isBlank(check.getActual()) ? "" : "（" + check.getActual() + "）"))
+            .collect(Collectors.joining("；"));
+        result.setMessage(passed ? "目标表结构兼容，可以继续任务校验" : "目标表存在必须修复的兼容性问题：" + failures);
         return result;
     }
 
@@ -534,8 +539,8 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         return JdbcUrls.open(source, database, JdbcUrls.METADATA_SOCKET_TIMEOUT_SECONDS);
     }
 
-    private String defaultSchema(DataSource source) {
-        return StringUtils.isBlank(source.getSchemaName()) ? "public" : source.getSchemaName();
+    private static String defaultSchema(DataSource source) {
+        return TableNames.defaultSchema(source);
     }
 
     private ServiceException metadataFailure(String message, SQLException ex) {

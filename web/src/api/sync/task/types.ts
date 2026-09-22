@@ -1,4 +1,4 @@
-import type { SyncMetricsSample } from '@/api/sync/metrics/types';
+import type { SyncMetricsSample, SyncPhase } from '@/api/sync/metrics/types';
 import type { PageQuery } from '@/api/types';
 
 export interface SyncTaskForm {
@@ -135,7 +135,7 @@ export interface SeaTunnelJobStatus {
   lastCheckpointId?: string;
   lastCheckpointTime?: string;
   lastCheckpointStatus?: string;
-  phase?: 'SNAPSHOT' | 'CDC';
+  phase?: SyncPhase;
   sourceReceivedCount?: number;
   sinkCommittedCount?: number;
   sourceReceivedBytes?: number;
@@ -185,7 +185,7 @@ export interface SyncTaskDataCheckRequest {
 }
 
 export interface SyncTaskMetrics {
-  phase?: 'SNAPSHOT' | 'CDC';
+  phase?: SyncPhase;
   sourceReceivedCount?: number;
   sinkCommittedCount?: number;
   sourceReceivedBytes?: number;

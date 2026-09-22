@@ -4,6 +4,7 @@ import { Button, Descriptions, Empty, Radio, Space, Spin, Tag, Typography } from
 import ReactECharts from 'echarts-for-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SyncMetricsSample, SyncMetricsSeries } from '@/api/sync/metrics/types';
+import { syncPhaseLabel } from '@/api/sync/metrics/types';
 import { useAppStore } from '@/stores/appStore';
 
 /**
@@ -229,9 +230,7 @@ export default function MetricsHistoryPanel({ load, defaultMinutes = 60 }: Metri
       {latest && (
         <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }}>
           <Descriptions.Item label="阶段">
-            <Tag>
-              {latest.phase === 'SNAPSHOT' ? '全量快照' : latest.phase === 'CDC' ? 'CDC 增量' : latest.phase || '-'}
-            </Tag>
+            <Tag>{syncPhaseLabel(latest.phase)}</Tag>
             {latest.engineStatus}
           </Descriptions.Item>
           <Descriptions.Item label="源端已读取">{formatCount(latest.sourceReceivedCount)} 行</Descriptions.Item>

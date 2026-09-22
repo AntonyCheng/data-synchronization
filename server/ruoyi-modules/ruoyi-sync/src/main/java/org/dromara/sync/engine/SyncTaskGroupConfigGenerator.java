@@ -19,12 +19,12 @@ public final class SyncTaskGroupConfigGenerator {
     }
 
     public static GeneratedConfig generate(SyncTaskGroup group, List<SyncTaskGroupItem> items,
-                                    DataSource source, DataSource target, SeaTunnelProperties properties) {
+                                    DataSource source, DataSource target, SeaTunnelProperties properties, SourceColumns sourceColumns) {
         StringBuilder config = new StringBuilder();
         StringBuilder redacted = new StringBuilder();
         for (SyncTaskGroupItem item : items) {
             SyncTask task = toTask(group, item);
-            SeaTunnelJobConfigGenerator.GeneratedConfig generated = SeaTunnelJobConfigGenerator.generate(task, source, target, properties);
+            SeaTunnelJobConfigGenerator.GeneratedConfig generated = SeaTunnelJobConfigGenerator.generate(task, source, target, properties, sourceColumns);
             config.append("# item ").append(item.getItemId()).append(' ').append(item.getSourceTable()).append("\n")
                 .append(generated.config()).append("\n");
             redacted.append("# item ").append(item.getItemId()).append(' ').append(item.getSourceTable()).append("\n")
@@ -35,8 +35,8 @@ public final class SyncTaskGroupConfigGenerator {
 
     public static SeaTunnelJobConfigGenerator.GeneratedConfig generateItem(SyncTaskGroup group, SyncTaskGroupItem item,
                                                                       DataSource source, DataSource target,
-                                                                      SeaTunnelProperties properties) {
-        return SeaTunnelJobConfigGenerator.generate(toTask(group, item), source, target, properties);
+                                                                      SeaTunnelProperties properties, SourceColumns sourceColumns) {
+        return SeaTunnelJobConfigGenerator.generate(toTask(group, item), source, target, properties, sourceColumns);
     }
 
     /** Projects a group + item onto the single-table task shape the generator and Kafka bridge consume. */

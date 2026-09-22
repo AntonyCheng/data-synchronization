@@ -22,7 +22,7 @@ class EngineJobStatesTest {
         EngineJobMetrics target = new EngineJobMetrics();
         EngineJobStates.applyMetrics(target, new SeaTunnelRestClient.JobSnapshot("1", "job", "RUNNING", null, mapper.readTree(
             "{\"SourceReceivedCount\":\"50\",\"SinkCommittedCount\":\"48\",\"SourceReceivedBytes\":\"5350\","
-                + "\"SinkCommittedBytes\":\"5100\",\"SourceReceivedQPS\":\"0.37094\",\"SinkCommittedQPS\":\"0.35\"}")));
+                + "\"SinkCommittedBytes\":\"5100\",\"SourceReceivedQPS\":\"0.37094\",\"SinkCommittedQPS\":\"0.35\"}")), "INCREMENTAL");
         assertEquals(50L, target.getSourceReceivedCount());
         assertEquals(48L, target.getSinkCommittedCount());
         assertEquals(5350L, target.getSourceReceivedBytes());
@@ -38,7 +38,7 @@ class EngineJobStatesTest {
         EngineJobMetrics target = new EngineJobMetrics();
         EngineJobStates.applyMetrics(target, new SeaTunnelRestClient.JobSnapshot("1", "job", "INITIALIZING", null, mapper.readTree(
             "{\"SourceReceivedCount\":7,\"SinkCommittedCount\":\"n/a\",\"SourceReceivedQPS\":1.5,"
-                + "\"SourceLatestEventTime\":\"1000\",\"SinkLatestCommitTime\":\"4000\"}")));
+                + "\"SourceLatestEventTime\":\"1000\",\"SinkLatestCommitTime\":\"4000\"}")), "FULL_CDC");
         assertEquals(7L, target.getSourceReceivedCount());
         assertNull(target.getSinkCommittedCount());
         assertNull(target.getBacklogRows());
@@ -51,7 +51,18 @@ class EngineJobStatesTest {
     void backlogNeverGoesNegative() {
         EngineJobMetrics target = new EngineJobMetrics();
         EngineJobStates.applyMetrics(target, new SeaTunnelRestClient.JobSnapshot("1", "job", "RUNNING", null, mapper.readTree(
-            "{\"SourceReceivedCount\":\"10\",\"SinkCommittedCount\":\"12\"}")));
+            "{\"SourceReceivedCount\":\"10\",\"SinkCommittedCount\":\"12\"}")), "FULL_CDC");
         assertEquals(0L, target.getBacklogRows());
+    }
+
+    /** Zeta has no snapshot-complete signal, so the label never claims more than the mode + engine state allow. */
+    @Test
+    void phaseIsDerivedFromSyncModeAndNeverPretendsToKnowTheSnapshotBoundary() {
+        assertEquals("SNAPSHOT", EngineJobStates.phaseOf("FULL", "RUNNING"));
+        assertEquals("SNAPSHOT", EngineJobStates.phaseOf("FULL", "FINISHED"));
+        assertEquals("CDC", EngineJobStates.phaseOf("INCREMENTAL", "INITIALIZING"));
+        assertEquals("SNAPSHOT", EngineJobStates.phaseOf("FULL_CDC", "INITIALIZING"));
+        assertEquals("MIXED", EngineJobStates.phaseOf("FULL_CDC", "RUNNING"));
+        assertEquals("MIXED", EngineJobStates.phaseOf(null, "RUNNING"));
     }
 }

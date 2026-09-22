@@ -60,7 +60,7 @@ public final class SeaTunnelJobConfigGenerator {
     }
 
     public static GeneratedConfig generate(SyncTask task, DataSource source, DataSource target,
-                                           SeaTunnelProperties properties) {
+                                           SeaTunnelProperties properties, SourceColumns sourceColumns) {
         if (!DataSourceType.isMysql(source)) throw new ServiceException("源数据源必须是 MYSQL");
         if (!DataSourceType.isSupportedTarget(target.getSourceType())) {
             throw new ServiceException("目标数据源必须是 PostgreSQL、MySQL 或 Kafka");
@@ -71,7 +71,7 @@ public final class SeaTunnelJobConfigGenerator {
         }
 
         List<String> primaryKeys = resolveSyncKeys(source, task);
-        List<String> selectedColumns = resolveSelectedColumns(source, task);
+        List<String> selectedColumns = resolveSelectedColumns(sourceColumns, task);
         boolean full = SyncMode.FULL.equals(syncMode);
         if (primaryKeys.isEmpty() && !full) {
             throw new ServiceException("源表没有主键，无法生成可恢复的 CDC 任务");
@@ -86,12 +86,12 @@ public final class SeaTunnelJobConfigGenerator {
         String jobName = "ds-task-" + task.getTaskId();
         String config;
         if (kafkaTarget) {
-            config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, syncMode, properties);
+            config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, selectedColumns, syncMode, properties);
         } else if (full) {
-            ensureMysqlFullModeTargetTable(task, source, target, targetTable, selectedColumns);
+            ensureMysqlFullModeTargetTable(task, source, target, targetTable, selectedColumns, sourceColumns);
             config = buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties);
         } else {
-            config = buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, syncMode, properties);
+            config = buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, syncMode, properties, sourceColumns);
         }
         return new GeneratedConfig(jobName, sourceTable, targetTable, primaryKeys, config, redact(config));
     }
@@ -117,7 +117,8 @@ public final class SeaTunnelJobConfigGenerator {
 
     private static String buildCdcConfig(SyncTask task, DataSource source, DataSource target,
                                          String sourceTable, String targetTable, List<String> primaryKeys,
-                                         List<String> selectedColumns, String syncMode, SeaTunnelProperties properties) {
+                                         List<String> selectedColumns, String syncMode, SeaTunnelProperties properties,
+                                         SourceColumns sourceColumns) {
         int sourceConnectionLimit = positive(task.getSourceConnectionLimit(), properties.getSourceConnectionLimit());
         String sourceOutput = "ds_source_" + task.getTaskId();
         String projectedOutput = "ds_projected_" + task.getTaskId();
@@ -127,7 +128,7 @@ public final class SeaTunnelJobConfigGenerator {
         // does not propagate NOT NULL/primary-key metadata, so a target auto-created
         // through it fails ("All parts of a PRIMARY KEY must be NOT NULL") for any table
         // whose sync key is NOT NULL - i.e. almost every well-formed table.
-        boolean needsProjection = !isFullColumnSelection(source, task.getSourceTable(), selectedColumns);
+        boolean needsProjection = !isFullColumnSelection(sourceColumns, task.getSourceTable(), selectedColumns);
         String sinkInput = needsProjection ? projectedOutput : sourceOutput;
         StringBuilder builder = new StringBuilder(1800);
         appendStreamingEnv(builder, task, properties);
@@ -149,10 +150,10 @@ public final class SeaTunnelJobConfigGenerator {
     }
 
     private static String buildKafkaConfig(SyncTask task, DataSource source, DataSource target,
-                                           String sourceTable, List<String> primaryKeys, String syncMode,
-                                           SeaTunnelProperties properties) {
+                                           String sourceTable, List<String> primaryKeys, List<String> selectedColumns,
+                                           String syncMode, SeaTunnelProperties properties) {
         if (primaryKeys.isEmpty()) throw new ServiceException("Kafka 任务必须配置可靠同步键");
-        if (SyncMode.FULL.equals(syncMode)) return buildKafkaFullConfig(task, source, target, sourceTable, properties);
+        if (SyncMode.FULL.equals(syncMode)) return buildKafkaFullConfig(task, source, target, sourceTable, selectedColumns, properties);
         StringBuilder builder = new StringBuilder(1600);
         appendStreamingEnv(builder, task, properties);
         appendMysqlCdcSourceHead(builder, task, source, sourceTable, properties);
@@ -171,8 +172,7 @@ public final class SeaTunnelJobConfigGenerator {
     }
 
     private static String buildKafkaFullConfig(SyncTask task, DataSource source, DataSource target,
-                                               String sourceTable, SeaTunnelProperties properties) {
-        List<String> selected = resolveSelectedColumns(source, task);
+                                               String sourceTable, List<String> selected, SeaTunnelProperties properties) {
         StringBuilder builder = new StringBuilder(1200);
         appendBatchEnv(builder, task, properties);
         appendJdbcFullSource(builder, source, sourceTable, selected, properties);
@@ -321,9 +321,9 @@ public final class SeaTunnelJobConfigGenerator {
      * mapping, not a DDL clone, and Postgres does not hit this specific failure anyway).
      */
     private static void ensureMysqlFullModeTargetTable(SyncTask task, DataSource source, DataSource target,
-                                                        String targetTable, List<String> selectedColumns) {
+                                                        String targetTable, List<String> selectedColumns, SourceColumns sourceColumns) {
         if (!DataSourceType.isMysql(target)) return;
-        if (!isFullColumnSelection(source, task.getSourceTable(), selectedColumns)) return;
+        if (!isFullColumnSelection(sourceColumns, task.getSourceTable(), selectedColumns)) return;
         String targetTableName = TableNames.unqualified(targetTable);
         try (Connection targetConnection = JdbcUrls.open(target)) {
             try (ResultSet existing = targetConnection.getMetaData().getTables(target.getDatabaseName(), null, targetTableName, new String[]{"TABLE"})) {
@@ -353,47 +353,28 @@ public final class SeaTunnelJobConfigGenerator {
         return configured.isEmpty() ? resolvePrimaryKeys(source, task.getSourceTable()) : configured;
     }
 
-    private static List<String> resolveSelectedColumns(DataSource source, SyncTask task) {
+    private static List<String> resolveSelectedColumns(SourceColumns sourceColumns, SyncTask task) {
         List<String> configured = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
         if (!configured.isEmpty()) return configured;
-        try {
-            List<String> columns = queryAllColumns(source, task.getSourceTable());
-            if (columns.isEmpty()) throw new ServiceException("源表没有可同步字段");
-            return columns;
-        } catch (SQLException ex) {
-            throw new ServiceException("读取源表字段失败：" + SyncText.safeMessage(ex, "连接失败"));
-        }
-    }
-
-    private static List<String> queryAllColumns(DataSource source, String tableReference) throws SQLException {
-        String table = TableNames.unqualified(tableReference);
-        try (Connection connection = JdbcUrls.open(source);
-             ResultSet resultSet = connection.getMetaData().getColumns(source.getDatabaseName(), null, table, "%")) {
-            List<String> columns = new ArrayList<>();
-            while (resultSet.next()) columns.add(resultSet.getString("COLUMN_NAME"));
-            return columns;
-        }
+        List<String> columns = sourceColumns.of(task.getSourceTable());
+        if (columns == null || columns.isEmpty()) throw new ServiceException("源表没有可同步字段");
+        return columns;
     }
 
     /**
      * True when the configured selection covers every column of the source table (in
-     * which case a downstream projection transform would be redundant). Any lookup
-     * failure conservatively returns false so the caller keeps the (slower but safe)
-     * projection path rather than risk silently dropping a real column restriction.
+     * which case a downstream projection transform would be redundant). The lookup is
+     * allowed to throw but never to guess - see {@link SourceColumns}.
      */
-    private static boolean isFullColumnSelection(DataSource source, String tableReference, List<String> selectedColumns) {
-        try {
-            List<String> allColumns = queryAllColumns(source, tableReference);
-            if (allColumns.isEmpty() || selectedColumns.size() != allColumns.size()) return false;
-            Set<String> selectedNormalized = new HashSet<>();
-            for (String column : selectedColumns) selectedNormalized.add(column.toLowerCase(Locale.ROOT));
-            for (String column : allColumns) {
-                if (!selectedNormalized.contains(column.toLowerCase(Locale.ROOT))) return false;
-            }
-            return true;
-        } catch (SQLException ex) {
-            return false;
+    private static boolean isFullColumnSelection(SourceColumns sourceColumns, String tableReference, List<String> selectedColumns) {
+        List<String> allColumns = sourceColumns.of(tableReference);
+        if (allColumns == null || allColumns.isEmpty() || selectedColumns.size() != allColumns.size()) return false;
+        Set<String> selectedNormalized = new HashSet<>();
+        for (String column : selectedColumns) selectedNormalized.add(column.toLowerCase(Locale.ROOT));
+        for (String column : allColumns) {
+            if (!selectedNormalized.contains(column.toLowerCase(Locale.ROOT))) return false;
         }
+        return true;
     }
 
     private static List<String> resolvePrimaryKeys(DataSource source, String tableReference) {
@@ -551,8 +532,22 @@ public final class SeaTunnelJobConfigGenerator {
     private record IndexedColumn(short position, String name) {
     }
 
-    /** {@code config} carries real credentials and is what gets submitted and fingerprinted; {@code redactedConfig} is API-safe. */
+    /** {@code config} carries real credentials and is what gets submitted; {@code redactedConfig} is API-safe and is what gets fingerprinted. */
     public record GeneratedConfig(String jobName, String sourceTable, String targetTable,
                                   List<String> primaryKeys, String config, String redactedConfig) {
+
+        /**
+         * The persisted {@code engine_config_hash}. It deliberately excludes credentials so a
+         * password rotation on a data source never invalidates a checkpoint; everything else
+         * (endpoints, columns, keys, limits) still does.
+         */
+        public String fingerprint() {
+            return SyncText.sha256Hex(redactedConfig);
+        }
+
+        /** True when {@code stored} is this config's fingerprint, or the pre-rotation-safe hash of the raw config. */
+        public boolean matchesFingerprint(String stored) {
+            return stored != null && (stored.equals(fingerprint()) || stored.equals(SyncText.sha256Hex(config)));
+        }
     }
 }

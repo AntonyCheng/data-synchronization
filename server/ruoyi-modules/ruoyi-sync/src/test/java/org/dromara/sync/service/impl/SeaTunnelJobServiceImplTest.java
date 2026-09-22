@@ -5,13 +5,17 @@ import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.domain.vo.DataSourceColumnVo;
+import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SeaTunnelJobStatus;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
+import org.dromara.sync.engine.SourceColumns;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
+import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskService;
@@ -27,6 +31,7 @@ import java.time.LocalDateTime;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -58,6 +63,7 @@ class SeaTunnelJobServiceImplTest {
     private final SyncTaskMapper taskMapper = mock(SyncTaskMapper.class);
     private final DataSourceMapper dataSourceMapper = mock(DataSourceMapper.class);
     private final IDataSourceService dataSourceService = mock(IDataSourceService.class);
+    private final IDataSourceMetadataService metadataService = mock(IDataSourceMetadataService.class);
     private final SeaTunnelProperties properties = new SeaTunnelProperties();
     private final SeaTunnelRestClient restClient = mock(SeaTunnelRestClient.class);
     private final ISyncTaskService syncTaskService = mock(ISyncTaskService.class);
@@ -67,7 +73,7 @@ class SeaTunnelJobServiceImplTest {
     private final JsonMapper json = JsonMapper.builder().build();
 
     private final SeaTunnelJobServiceImpl service = new SeaTunnelJobServiceImpl(taskMapper, dataSourceMapper, dataSourceService,
-        properties, restClient, syncTaskService, new ResourceProtectionPolicy(properties), locks, bridge, metrics);
+        metadataService, properties, restClient, syncTaskService, new ResourceProtectionPolicy(properties), locks, bridge, metrics);
 
     private final DataSource mysql = dataSource(MYSQL_ID, "MYSQL", "source_db");
     private final DataSource postgres = dataSource(POSTGRES_ID, "POSTGRESQL", "sink_db");
@@ -82,6 +88,19 @@ class SeaTunnelJobServiceImplTest {
         when(dataSourceService.requireUsable(eq(POSTGRES_ID), anyString())).thenReturn(postgres);
         when(dataSourceService.requireUsable(eq(KAFKA_ID), anyString())).thenReturn(kafka);
         when(syncTaskService.validate(TASK_ID)).thenReturn(validation(true));
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), anyString())).thenAnswer(invocation -> sourceSchema());
+    }
+
+    private static DataSourceMetadataVo sourceSchema() {
+        DataSourceMetadataVo metadata = new DataSourceMetadataVo();
+        for (String name : new String[]{"id", "name", "email"}) {
+            DataSourceColumnVo column = new DataSourceColumnVo();
+            column.setName(name);
+            column.setTypeName("varchar");
+            metadata.getColumns().add(column);
+        }
+        metadata.getPrimaryKeys().add("id");
+        return metadata;
     }
 
     // ------------------------------------------------------------------ start
@@ -268,6 +287,24 @@ class SeaTunnelJobServiceImplTest {
     }
 
     @Test
+    void aPasswordRotationOrALegacyRawConfigHashStillResumesFromTheSavepoint() {
+        SyncTask task = persisted(task("PAUSED", POSTGRES_ID));
+        when(restClient.checkpoints("job-1")).thenReturn(new SeaTunnelRestClient.CheckpointSnapshot("7", LocalDateTime.now(), "COMPLETED"));
+        // Rows written before the fingerprint moved to the redacted config carry the raw-config hash.
+        task.setEngineConfigHash(SyncText.sha256Hex(SeaTunnelJobConfigGenerator.generate(task, mysql, postgres, properties, columns()).config()));
+        service.resume(TASK_ID);
+        assertEquals("RUNNING", task.getStatus());
+
+        // Credentials are not part of the fingerprint, so rotating a password keeps the checkpoint usable.
+        task.setStatus("PAUSED");
+        task.setEngineConfigHash(fingerprint(task, postgres));
+        postgres.setPassword("rotated-secret");
+        service.resume(TASK_ID);
+        assertEquals("RUNNING", task.getStatus());
+        verify(restClient, times(2)).submit(eq("ds-task-42"), anyString(), eq("job-1"), eq(true));
+    }
+
+    @Test
     void resumeWithAChangedConfigLandsInReinitializeRequiredNotFailed() {
         SyncTask task = persisted(task("PAUSED", POSTGRES_ID));
         task.setEngineConfigHash("stale-fingerprint");
@@ -287,6 +324,21 @@ class SeaTunnelJobServiceImplTest {
         assertTrue(assertThrows(ServiceException.class, () -> service.resume(TASK_ID)).getMessage().contains("checkpoint/savepoint"));
         assertEquals("REINITIALIZE_REQUIRED", task.getStatus());
         verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+    }
+
+    @Test
+    void aManualStartRearmsAParkedCronSchedule() {
+        SyncTask task = persisted(task("STOPPED", POSTGRES_ID));
+        task.setScheduleMode("CRON");
+        task.setCronExpression("0 0 * * * *");
+        task.setNextRunTime(null); // parked by an earlier stop or a failed run
+        when(restClient.submit(anyString(), anyString(), isNull(), eq(false))).thenReturn(new SeaTunnelRestClient.SubmitResult("job-9", "ds-task-42"));
+
+        service.start(TASK_ID);
+
+        assertEquals("RUNNING", task.getStatus());
+        assertNotNull(task.getNextRunTime());
+        assertTrue(task.getNextRunTime().isAfter(LocalDateTime.now()));
     }
 
     @Test
@@ -371,7 +423,11 @@ class SeaTunnelJobServiceImplTest {
     }
 
     private String fingerprint(SyncTask task, DataSource target) {
-        return SyncText.sha256Hex(SeaTunnelJobConfigGenerator.generate(task, mysql, target, properties).config());
+        return SeaTunnelJobConfigGenerator.generate(task, mysql, target, properties, columns()).fingerprint();
+    }
+
+    private SourceColumns columns() {
+        return SourceColumns.fromMetadata(metadataService, mysql);
     }
 
     private SeaTunnelRestClient.JobSnapshot snapshot(String status, String error, String metricsJson) {

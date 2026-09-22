@@ -12,6 +12,11 @@ public final class TableNames {
     private TableNames() {
     }
 
+    /** The schema a table lands in when none was chosen: the data source's configured schema, else PostgreSQL's {@code public}. */
+    public static String defaultSchema(DataSource dataSource) {
+        return dataSource == null || StringUtils.isBlank(dataSource.getSchemaName()) ? DEFAULT_POSTGRES_SCHEMA : dataSource.getSchemaName().trim();
+    }
+
     /** {@code db.table} -> {@code table}; an unqualified name is returned unchanged. */
     public static String unqualified(String tableReference) {
         int separator = tableReference == null ? -1 : tableReference.lastIndexOf('.');

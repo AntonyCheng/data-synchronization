@@ -28,6 +28,7 @@ import org.springframework.stereotype.Service;
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -77,7 +78,33 @@ public class DataSourceServiceImpl implements IDataSourceService {
             entity.setPassword(current.getPassword());
         }
         normalizeAndValidate(entity, false);
+        if (connectionChanged(current, entity)) ensureNotInUse(current.getSourceId());
         return dataSourceMapper.updateById(entity) > 0;
+    }
+
+    /**
+     * Endpoint / identity fields. A running SeaTunnel job keeps the connection it was submitted
+     * with, so silently repointing the data source underneath it would leave the platform
+     * describing a job that no longer exists. Name, remark, status and - deliberately - the
+     * password (credential rotation) may change at any time; the next start picks them up.
+     */
+    static boolean connectionChanged(DataSource current, DataSource updated) {
+        return !Objects.equals(current.getSourceType(), updated.getSourceType())
+            || !Objects.equals(current.getHost(), updated.getHost())
+            || !Objects.equals(current.getPort(), updated.getPort())
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getDatabaseName(), ""), StringUtils.defaultIfBlank(updated.getDatabaseName(), ""))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getSchemaName(), ""), StringUtils.defaultIfBlank(updated.getSchemaName(), ""))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getUsername(), ""), StringUtils.defaultIfBlank(updated.getUsername(), ""))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getSslEnabled(), "0"), StringUtils.defaultIfBlank(updated.getSslEnabled(), "0"));
+    }
+
+    private void ensureNotInUse(Long sourceId) {
+        long tasks = syncTaskMapper.countActiveByDataSource(sourceId);
+        long groups = syncTaskGroupMapper.countActiveByDataSource(sourceId);
+        if (tasks > 0 || groups > 0) {
+            throw new ServiceException("数据源正被 " + tasks + " 个运行中的同步任务、" + groups
+                + " 个任务组使用，运行期间不能修改连接参数（类型/主机/端口/库名/schema/用户名/SSL）；请先停止或暂停这些任务，名称、备注和密码可直接修改");
+        }
     }
 
     @Override

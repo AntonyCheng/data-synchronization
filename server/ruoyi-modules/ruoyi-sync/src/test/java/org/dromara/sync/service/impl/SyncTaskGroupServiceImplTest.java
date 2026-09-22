@@ -15,6 +15,7 @@ import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.engine.SeaTunnelRestClient;
+import org.dromara.sync.engine.SourceColumns;
 import org.dromara.sync.engine.SyncTaskGroupConfigGenerator;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.SyncTaskGroupDdlEventMapper;
@@ -25,7 +26,6 @@ import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.support.SyncLocks;
-import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableSchemaSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -124,6 +124,30 @@ class SyncTaskGroupServiceImplTest {
     }
 
     @Test
+    void startFollowsTheSourceForFullySelectedTablesAndKeepsExplicitSubsets() {
+        persisted(group("STOPPED", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem whole = item(11L, "customers", "STOPPED");
+        whole.setSchemaSnapshot(TableSchemaSnapshot.toJson(TableSchemaSnapshot.of(metadata("id", "name"))));
+        SyncTaskGroupItem subset = item(12L, "orders", "STOPPED");
+        subset.setSelectedColumns("id");
+        subset.setSchemaSnapshot(TableSchemaSnapshot.toJson(TableSchemaSnapshot.of(metadata("id", "name"))));
+        items.add(whole);
+        items.add(subset);
+        // Both source tables grew a column since the last baseline.
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), anyString())).thenReturn(metadata("id", "name", "email"));
+
+        service.start(GROUP_ID);
+
+        assertEquals("id,name,email", whole.getSelectedColumns());
+        assertEquals("id", subset.getSelectedColumns());
+        assertTrue(whole.getSchemaSnapshot().contains("email"), "baseline moves to the live schema");
+        // The widened projection is what the pre-start target check saw.
+        verify(metadataService).checkTargetCompatibility(eq(MYSQL_ID), eq(POSTGRES_ID), eq("customers"), any(), eq("customers"), eq("id,name,email"), any());
+        assertEquals("RUNNING", whole.getStatus());
+        assertEquals("RUNNING", subset.getStatus());
+    }
+
+    @Test
     void aMultiTableStartCompensatesAlreadySubmittedJobsWhenALaterTableFails() {
         SyncTaskGroup group = persisted(group("STOPPED", "MULTI_TABLE", POSTGRES_ID));
         SyncTaskGroupItem first = item(11L, "customers", "PENDING");
@@ -194,7 +218,8 @@ class SyncTaskGroupServiceImplTest {
         persisted(group("STOPPED", "MULTI_TABLE", POSTGRES_ID));
         items.add(item(11L, "customers", "PENDING"));
         when(metadataService.checkTargetCompatibility(anyLong(), anyLong(), anyString(), any(), anyString(), any(), any())).thenReturn(compatibility(false));
-        assertTrue(assertThrows(ServiceException.class, () -> service.start(GROUP_ID)).getMessage().contains("启动前校验未通过"));
+        String refused = assertThrows(ServiceException.class, () -> service.start(GROUP_ID)).getMessage();
+        assertTrue(refused.contains("启动前校验未通过") && refused.contains("customers：目标表存在必须修复的兼容性问题"), refused);
         verify(restClient, never()).submit(anyString(), anyString(), any(), eq(false));
     }
 
@@ -437,6 +462,6 @@ class SyncTaskGroupServiceImplTest {
     }
 
     private String fingerprint(SyncTaskGroup group, SyncTaskGroupItem item, DataSource target) {
-        return SyncText.sha256Hex(SyncTaskGroupConfigGenerator.generateItem(group, item, mysql, target, properties).config());
+        return SyncTaskGroupConfigGenerator.generateItem(group, item, mysql, target, properties, SourceColumns.fromMetadata(metadataService, mysql)).fingerprint();
     }
 }

@@ -26,6 +26,13 @@ public interface SyncTaskMapper extends BaseMapperPlus<SyncTask, SyncTaskVo> {
             .and(w -> w.eq(SyncTask::getSourceId, sourceId).or().eq(SyncTask::getTargetId, sourceId)));
     }
 
+    /** Tasks with a live engine job (RUNNING / PAUSING) that use the data source on either side. */
+    default long countActiveByDataSource(Long sourceId) {
+        return selectCount(new LambdaQueryWrapper<SyncTask>()
+            .in(SyncTask::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING)
+            .and(w -> w.eq(SyncTask::getSourceId, sourceId).or().eq(SyncTask::getTargetId, sourceId)));
+    }
+
     /** Nulls the checkpoint columns; a plain updateById would drop the nulls under the global not_null strategy. */
     default int clearCheckpoint(Long taskId) {
         return update(null, new LambdaUpdateWrapper<SyncTask>()

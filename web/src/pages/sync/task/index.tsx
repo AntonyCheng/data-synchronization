@@ -68,6 +68,7 @@ import {
   listDataSources,
   testDataSource
 } from '@/api/sync/data-source';
+import { syncPhaseLabel } from '@/api/sync/metrics/types';
 import {
   addSyncTask,
   checkTargetCompatibility,
@@ -894,9 +895,7 @@ export default function SyncTaskPage() {
                 message="实时运行指标"
                 description={
                   <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }}>
-                    <Descriptions.Item label="当前阶段">
-                      {metricsResult.phase === 'SNAPSHOT' ? '全量快照' : 'CDC 增量'}
-                    </Descriptions.Item>
+                    <Descriptions.Item label="当前阶段">{syncPhaseLabel(metricsResult.phase)}</Descriptions.Item>
                     <Descriptions.Item label="源端已读取">
                       {metricsResult.sourceReceivedCount ?? '-'} 行 / {metricsResult.sourceReceivedBytes ?? '-'} 字节
                     </Descriptions.Item>

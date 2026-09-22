@@ -37,6 +37,7 @@ import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.engine.EngineJobStates;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
+import org.dromara.sync.engine.SourceColumns;
 import org.dromara.sync.engine.SyncTaskGroupConfigGenerator;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.SyncTaskGroupDdlEventMapper;
@@ -61,6 +62,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -222,7 +224,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource target = requireTarget(group);
         List<SyncTaskGroupItem> groupItems = items(groupId);
         SyncTaskGroupConfigGenerator.GeneratedConfig generated =
-            SyncTaskGroupConfigGenerator.generate(group, groupItems, source, target, properties);
+            SyncTaskGroupConfigGenerator.generate(group, groupItems, source, target, properties, sourceColumns(source));
         SyncTaskGroupConfigPreview result = new SyncTaskGroupConfigPreview();
         result.setGroupId(groupId);
         result.setGroupName(group.getGroupName());
@@ -235,8 +237,14 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     // ------------------------------------------------------------------ lifecycle
 
+    /**
+     * A refused start (validation) is not rolled back on purpose: by then the only writes
+     * are the resource-protection defaults, recovered Kafka topics and the re-derived column
+     * selections - all true statements about the group that the operator needs to see
+     * (e.g. "the target lacks the column the source just gained") when they open validate.
+     */
     @Override
-    @Transactional
+    @Transactional(noRollbackFor = ServiceException.class)
     public SyncTaskGroupOperationResult start(Long groupId) {
         return locks.withGroupLock(groupId, () -> doStart(groupId));
     }
@@ -250,6 +258,20 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
         if (databaseScope && DataSourceType.isKafka(target)) recoverDatabaseKafkaTopics(groupId, source, target);
+        // Tables that were selected in full keep following the source: a column added since
+        // the last baseline joins the projection here, so the validation below checks the
+        // target against what will actually be synced. An explicit subset stays as it is.
+        Map<Long, DataSourceMetadataVo> liveSchemas = new HashMap<>();
+        for (SyncTaskGroupItem item : items(groupId)) {
+            if (hasLiveJob(item)) continue;
+            try {
+                DataSourceMetadataVo metadata = readSourceMetadata(item, source);
+                liveSchemas.put(item.getItemId(), metadata);
+                if (followSourceColumns(item, metadata)) itemMapper.updateById(item);
+            } catch (RuntimeException ignored) {
+                // Unreadable source table - validate() reports it per table below.
+            }
+        }
         SyncTaskGroupValidationResult validation = validate(groupId);
         boolean infrastructureValid = validation.getSource() != null && validation.getSource().isSuccess()
             && validation.getTarget() != null && validation.getTarget().isSuccess()
@@ -257,7 +279,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         // A whole-database group starts as long as the infrastructure is sound; per-table
         // failures are isolated below. A multi-table group must be fully valid.
         if (!validation.isValid() && (!databaseScope || !infrastructureValid)) {
-            throw new ServiceException("启动前校验未通过：" + validation.getMessage());
+            throw new ServiceException("启动前校验未通过：" + describeFailures(validation));
         }
         List<String> jobIds = new ArrayList<>();
         List<SyncTaskGroupItem> submittedItems = new ArrayList<>();
@@ -265,7 +287,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         int isolatedFailures = 0;
         try {
             for (SyncTaskGroupItem item : items(groupId)) {
-                if (SyncStatus.isActive(item.getStatus()) && StringUtils.isNotBlank(item.getEngineJobId())) {
+                if (hasLiveJob(item)) {
                     // Already has a live engine job (a DEGRADED group, or a table resumed /
                     // reinitialized on its own) - keep it rather than submitting a duplicate.
                     jobIds.add(item.getEngineJobId());
@@ -277,7 +299,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 }
                 currentItem = item;
                 try {
-                    TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
+                    DataSourceMetadataVo metadata = liveSchemas.get(item.getItemId());
+                    TableSchemaSnapshot.baseline(item, metadata != null ? metadata : readSourceMetadata(item, source));
                     jobIds.add(submitItem(group, item, source, target));
                     submittedItems.add(item);
                     // A fresh job on a fresh baseline supersedes any drift event still open on this
@@ -338,7 +361,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource target = requireTarget(group);
         String database = StringUtils.defaultIfBlank(group.getSourceDatabase(), source.getDatabaseName());
         Set<String> existing = new HashSet<>();
-        for (SyncTaskGroupItem item : items(groupId)) existing.add(item.getSourceTable().toLowerCase(Locale.ROOT));
+        // A discovered table follows the schema the operator chose for the group's existing
+        // tables (they all share one on a whole-database group), else the target's default.
+        String targetSchema = TableNames.defaultSchema(target);
+        for (SyncTaskGroupItem item : items(groupId)) {
+            existing.add(item.getSourceTable().toLowerCase(Locale.ROOT));
+            if (StringUtils.isNotBlank(item.getTargetSchema())) targetSchema = item.getTargetSchema();
+        }
 
         int discovered = 0;
         int started = 0;
@@ -350,13 +379,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             item.setGroupId(groupId);
             item.setSourceDatabase(database);
             item.setSourceTable(table);
-            item.setTargetSchema(TableNames.DEFAULT_POSTGRES_SCHEMA);
+            item.setTargetSchema(targetSchema);
             item.setTargetTable(table);
             item.setDdlPolicy(group.getDdlPolicy());
             item.setStatus(SyncStatus.PENDING);
             String validationError;
             try {
-                applySelection(item, source);
+                DataSourceMetadataVo metadata = readSourceMetadata(item, source);
+                applySelection(item, metadata);
+                TableSchemaSnapshot.baseline(item, metadata);
                 if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
                 validationError = validateDiscoveredItem(source, target, item);
             } catch (RuntimeException ex) {
@@ -366,8 +397,6 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 item.setStatus(SyncStatus.FAILED);
                 item.setLastError(SyncText.truncateForColumn(validationError));
                 failed++;
-            } else {
-                TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
             }
             itemMapper.insert(item);
             discovered++;
@@ -427,8 +456,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource target = requireTarget(group);
         for (SyncTaskGroupItem item : items(groupId)) {
             if (StringUtils.isBlank(item.getEngineJobId())) continue;
-            var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties);
-            if (configChanged(item, generated.config())) {
+            var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
+            if (configChanged(item, generated)) {
                 throw new ServiceException("表 " + item.getSourceTable() + " 配置已变化，不能直接恢复");
             }
             submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
@@ -453,8 +482,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (StringUtils.isBlank(item.getEngineJobId())) throw new ServiceException("表项没有可恢复的引擎作业");
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
-        var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties);
-        if (configChanged(item, generated.config())) {
+        var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
+        if (configChanged(item, generated)) {
             throw new ServiceException("表 " + item.getSourceTable() + " 的引擎配置已变化，不能直接从原 savepoint 恢复，请创建新配置版本并重新初始化该表");
         }
         submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
@@ -497,17 +526,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             }
         }
 
-        // 2. Re-derive the projection against the live source schema. A selection that covered
-        // the whole table at start keeps following the table (so an added column is picked
-        // up); an explicit subset is validated as-is. The sync key is never re-chosen here.
+        // 2. Re-derive the projection against the live source schema (see followSourceColumns);
+        // an explicit subset is re-validated as-is. The sync key is never re-chosen here.
         DataSourceMetadataVo metadata = readSourceMetadata(item, source);
-        List<String> configured = SyncColumnSelectionValidator.parseColumns(item.getSelectedColumns());
-        TableSchemaSnapshot.Snapshot baseline = StringUtils.isBlank(item.getSchemaSnapshot()) ? null : TableSchemaSnapshot.fromJson(item.getSchemaSnapshot());
-        boolean followTable = TableSchemaSnapshot.coversAllColumns(baseline, configured);
-        SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(metadata,
-            followTable ? null : item.getSelectedColumns(), item.getSyncKeyColumns());
-        item.setSelectedColumns(SyncColumnSelectionValidator.serialize(selection.selectedColumns()));
-        item.setSyncKeyColumns(SyncColumnSelectionValidator.serialize(selection.syncKeyColumns()));
+        boolean widened = followSourceColumns(item, metadata);
+        if (!widened) applySelection(item, metadata);
         TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
             item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
         if (!compatibility.isPassed()) throw new ServiceException("目标表兼容性未通过：" + compatibility.getMessage());
@@ -524,7 +547,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         group.setLastError("");
         groupMapper.updateById(group);
         return SyncTaskGroupOperationResult.of(group, "表 " + item.getSourceTable() + " 已重新初始化，正在重新全量同步"
-            + (followTable && selection.selectedColumns().size() > configured.size() ? "（已纳入源表新增字段）" : ""));
+            + (widened ? "（已纳入源表新增字段）" : ""));
     }
 
     @Override
@@ -585,7 +608,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     itemStatus.setStatus(item.getStatus());
                     itemStatus.setErrorMessage(StringUtils.isBlank(snapshot.errorMessage())
                         ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
-                    EngineJobStates.applyMetrics(itemStatus, snapshot);
+                    EngineJobStates.applyMetrics(itemStatus, snapshot, group.getSyncMode());
                     metricsService.recordGroupItem(item, snapshot.status(), itemStatus);
                     statuses.add(item.getStatus());
                 } catch (RuntimeException ex) {
@@ -696,7 +719,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             try {
                 SyncTaskDataCheckResult tableResult = dataConsistencyService.check(source, target,
                     sourceDatabaseOf(item, source), item.getSourceTable(),
-                    StringUtils.defaultIfBlank(item.getTargetSchema(), TableNames.DEFAULT_POSTGRES_SCHEMA), item.getTargetTable());
+                    StringUtils.defaultIfBlank(item.getTargetSchema(), TableNames.defaultSchema(target)), item.getTargetTable());
                 itemResult.setSourceTable(tableResult.getSourceTable());
                 itemResult.setTargetTable(tableResult.getTargetTable());
                 itemResult.setSourceRows(tableResult.getSourceRows());
@@ -770,14 +793,19 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         itemMapper.deleteByGroupId(group.getGroupId());
         if (itemBos == null) return;
         DataSource source = requireSource(group);
+        DataSource target = requireTarget(group);
         for (SyncTaskGroupItemBo bo : itemBos) {
             SyncTaskGroupItem item = MapstructUtils.convert(bo, SyncTaskGroupItem.class);
             // Items are always re-created on save so a stale DDL event never re-attaches to an edited table.
             item.setItemId(null);
             item.setGroupId(group.getGroupId());
-            item.setTargetSchema(StringUtils.defaultIfBlank(item.getTargetSchema(), TableNames.DEFAULT_POSTGRES_SCHEMA));
+            item.setTargetSchema(StringUtils.defaultIfBlank(item.getTargetSchema(), TableNames.defaultSchema(target)));
             item.setDdlPolicy(StringUtils.defaultIfBlank(item.getDdlPolicy(), DEFAULT_DDL_POLICY));
-            applySelection(item, source);
+            // Selection and baseline are captured together so "selected the whole table" is a
+            // property start / reinitialize can read back later (followSourceColumns).
+            DataSourceMetadataVo metadata = readSourceMetadata(item, source);
+            applySelection(item, metadata);
+            TableSchemaSnapshot.baseline(item, metadata);
             item.setStatus(SyncStatus.PENDING);
             itemMapper.insert(item);
         }
@@ -791,11 +819,30 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     /** Expands / validates the column projection and sync key against live source metadata. */
-    private void applySelection(SyncTaskGroupItem item, DataSource source) {
-        SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(readSourceMetadata(item, source),
+    private static void applySelection(SyncTaskGroupItem item, DataSourceMetadataVo metadata) {
+        SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(metadata,
             item.getSelectedColumns(), item.getSyncKeyColumns());
         item.setSelectedColumns(SyncColumnSelectionValidator.serialize(selection.selectedColumns()));
         item.setSyncKeyColumns(SyncColumnSelectionValidator.serialize(selection.syncKeyColumns()));
+    }
+
+    /**
+     * A selection that covered every column of the previous baseline means "the whole table",
+     * so it is re-derived from the live schema and picks up columns added since; an explicit
+     * subset is left alone. The sync key is never re-chosen. Returns true when columns were added.
+     */
+    private static boolean followSourceColumns(SyncTaskGroupItem item, DataSourceMetadataVo metadata) {
+        List<String> configured = SyncColumnSelectionValidator.parseColumns(item.getSelectedColumns());
+        TableSchemaSnapshot.Snapshot baseline = StringUtils.isBlank(item.getSchemaSnapshot()) ? null : TableSchemaSnapshot.fromJson(item.getSchemaSnapshot());
+        if (!TableSchemaSnapshot.coversAllColumns(baseline, configured)) return false;
+        SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(metadata, null, item.getSyncKeyColumns());
+        item.setSelectedColumns(SyncColumnSelectionValidator.serialize(selection.selectedColumns()));
+        item.setSyncKeyColumns(SyncColumnSelectionValidator.serialize(selection.syncKeyColumns()));
+        return selection.selectedColumns().size() > configured.size();
+    }
+
+    private static boolean hasLiveJob(SyncTaskGroupItem item) {
+        return SyncStatus.isActive(item.getStatus()) && StringUtils.isNotBlank(item.getEngineJobId());
     }
 
     private void persistCheck(SyncTaskGroupItem item, SyncTaskGroupDataCheckItemResult result) {
@@ -818,10 +865,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
      * broker defaults. A failed submit tears the bridge down again.
      */
     private String submitItem(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
-        var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties);
+        var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
         String jobId = submitWithBridge(group, item, source, target, generated, null, false);
         item.setEngineJobId(jobId);
-        item.setEngineConfigHash(SyncText.sha256Hex(generated.config()));
+        item.setEngineConfigHash(generated.fingerprint());
         item.setStatus(SyncStatus.RUNNING);
         item.setLastError("");
         itemMapper.updateById(item);
@@ -867,9 +914,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
     }
 
-    private static boolean configChanged(SyncTaskGroupItem item, String generatedConfig) {
-        return StringUtils.isNotBlank(item.getEngineConfigHash())
-            && !item.getEngineConfigHash().equals(SyncText.sha256Hex(generatedConfig));
+    private static boolean configChanged(SyncTaskGroupItem item, SeaTunnelJobConfigGenerator.GeneratedConfig generated) {
+        return StringUtils.isNotBlank(item.getEngineConfigHash()) && !generated.matchesFingerprint(item.getEngineConfigHash());
     }
 
     private void isolateItem(SyncTaskGroupItem item, String error) {
@@ -943,6 +989,19 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     private DataSource requireTarget(SyncTaskGroup group) {
         return dataSourceService.requireById(group.getTargetId(), "目标");
+    }
+
+    /** The per-table reasons, so a refused start names the table and the problem instead of "表级问题". */
+    private static String describeFailures(SyncTaskGroupValidationResult validation) {
+        List<String> reasons = validation.getItems().stream()
+            .filter(item -> !item.isPassed())
+            .map(item -> item.getSourceTable() + "：" + StringUtils.defaultIfBlank(item.getMessage(), "校验未通过"))
+            .toList();
+        return reasons.isEmpty() ? validation.getMessage() : SyncText.truncateForColumn(String.join("；", reasons));
+    }
+
+    private SourceColumns sourceColumns(DataSource source) {
+        return SourceColumns.fromMetadata(metadataService, source);
     }
 
     private DataSourceMetadataVo readSourceMetadata(SyncTaskGroupItem item, DataSource source) {

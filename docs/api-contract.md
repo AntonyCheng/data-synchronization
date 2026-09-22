@@ -58,7 +58,7 @@
 | POST | `/group/{groupId}/resume` | 使用表项 savepoint 恢复作业 |
 | POST | `/group/{groupId}/stop` | 停止任务组全部表项作业 |
 
-多表首版限制：支持 MySQL -> PostgreSQL/MySQL/Kafka、`FULL_CDC`，每组最多 20 张表；当前每张表独立 SeaTunnel job，Kafka 表项另有 raw topic -> 标准事件桥接，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式；Kafka 单表的纯 `FULL` 有界快照适配器仍未开放。
+多表首版限制：支持 MySQL -> PostgreSQL/MySQL/Kafka、`FULL_CDC`，每组最多 20 张表；当前每张表独立 SeaTunnel job，Kafka 表项另有 raw topic -> 标准事件桥接，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式，三种模式对 PostgreSQL、MySQL、Kafka 目标均可用。
 
 整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。
 
@@ -101,7 +101,7 @@ CDC 前置检查返回 `passed`、`message`、`serverId`、`gtidMode`、`binlogR
 
 `POST /task/{id}/engine-config` 只生成配置，不提交或启动作业。接口会重新读取源表 JDBC 元数据并解析主键列，支持联合主键；没有主键的表会被拒绝，以避免 CDC upsert 无法稳定定位目标行。返回的 `config` 已将 `password` 字段替换为 `******`，平台日志和前端不得尝试还原凭证。
 
-启动接口在服务端生成同一份未脱敏配置并通过 SeaTunnel REST API 提交，平台只保存配置 SHA-256 指纹，不保存配置正文。暂停调用 `stop-job` 的 `isStopWithSavePoint=true`，恢复调用 `/submit-job` 的 `isStartWithSavePoint=true` 并复用原 `jobId`；配置指纹变化时禁止恢复。
+启动接口在服务端生成同一份未脱敏配置并通过 SeaTunnel REST API 提交，平台只保存配置指纹（对脱敏后配置的 SHA-256，`engine_config_hash`），不保存配置正文；指纹不含凭证，数据源密码轮换不会使 checkpoint 失效，端点、字段、同步键、限流等任何变化都会。暂停调用 `stop-job` 的 `isStopWithSavePoint=true`，恢复调用 `/submit-job` 的 `isStartWithSavePoint=true` 并复用原 `jobId`；配置指纹变化时禁止恢复。
 
 SeaTunnel 2.3.13 connector 已通过运行镜像内的字节码核实 `connection.pool.size` 配置键，避免将平台参数写成引擎无法识别的 HOCON。任务组当前为“一表一作业”，所以组内多个表项同时启动时的累计源端连接数仍需后续调度/配额阶段治理。
 

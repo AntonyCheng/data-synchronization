@@ -1,5 +1,6 @@
 package org.dromara.sync.engine;
 
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
@@ -7,14 +8,18 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Tag("dev")
 class SeaTunnelJobConfigGeneratorTest {
+
+    private static final SourceColumns COLUMNS = SourceColumns.fixed(List.of("id", "display_name", "email"));
 
     private static final Pattern SERVER_ID = Pattern.compile("server-id = \"(\\d+)-(\\d+)\"");
 
@@ -29,7 +34,7 @@ class SeaTunnelJobConfigGeneratorTest {
         long[] taskIds = {1L, 2L, 3L, 4L, 5L, 100L, 101L};
         int[][] ranges = new int[taskIds.length][];
         for (int i = 0; i < taskIds.length; i++) {
-            String config = SeaTunnelJobConfigGenerator.generate(cdcTask(taskIds[i]), mysql(), postgres(), new SeaTunnelProperties()).config();
+            String config = SeaTunnelJobConfigGenerator.generate(cdcTask(taskIds[i]), mysql(), postgres(), new SeaTunnelProperties(), COLUMNS).config();
             ranges[i] = serverIdRange(config);
         }
         for (int i = 0; i < ranges.length; i++) {
@@ -46,7 +51,7 @@ class SeaTunnelJobConfigGeneratorTest {
     void fullModeQueryQuotesTheSourceTableIdentifier() {
         SyncTask task = cdcTask(1L);
         task.setSyncMode("FULL");
-        String config = SeaTunnelJobConfigGenerator.generate(task, mysql(), postgres(), new SeaTunnelProperties()).config();
+        String config = SeaTunnelJobConfigGenerator.generate(task, mysql(), postgres(), new SeaTunnelProperties(), COLUMNS).config();
         assertTrue(config.contains("FROM `source_db`.`customers`"), config);
     }
 
@@ -62,29 +67,41 @@ class SeaTunnelJobConfigGeneratorTest {
     void fullModeJdbcSourcePinsUtcTimezoneSoDatetimeDoesNotShift() {
         SyncTask full = cdcTask(1L);
         full.setSyncMode("FULL");
-        String fullConfig = SeaTunnelJobConfigGenerator.generate(full, mysql(), postgres(), new SeaTunnelProperties()).config();
+        String fullConfig = SeaTunnelJobConfigGenerator.generate(full, mysql(), postgres(), new SeaTunnelProperties(), COLUMNS).config();
         String jdbcSourceLine = fullConfig.lines()
             .filter(line -> line.contains("url = \"jdbc:mysql://"))
             .findFirst().orElseThrow(() -> new AssertionError("no Jdbc source url:\n" + fullConfig));
         assertTrue(jdbcSourceLine.contains("serverTimezone=UTC"), jdbcSourceLine);
         assertFalse(jdbcSourceLine.contains("serverTimezone=Asia"), jdbcSourceLine);
 
-        String cdcConfig = SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties()).config();
+        String cdcConfig = SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties(), COLUMNS).config();
         assertTrue(cdcConfig.contains("server-time-zone = \"Asia/Shanghai\""), cdcConfig);
     }
 
     /**
-     * A partial column selection still needs the projection transform to actually narrow
-     * the columns the CDC connector emits. This also exercises the "can't reach the
-     * source to check" fallback in isFullColumnSelection() (mysql.example is unreachable
-     * here) - it must default to keeping the transform rather than silently dropping the
-     * column restriction.
+     * A partial column selection needs the projection transform to actually narrow the
+     * columns the CDC connector emits; a selection that covers the whole table must not
+     * get one (the generic Sql transform drops NOT NULL / key metadata the sink needs).
      */
     @Test
-    void partialColumnSelectionKeepsTheProjectionTransform() {
-        String config = SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties()).config();
-        assertTrue(config.contains("transform {"), config);
-        assertTrue(config.contains("SELECT `id`, `display_name` FROM ds_source_1"), config);
+    void projectionTransformFollowsWhetherTheSelectionNarrowsTheTable() {
+        String narrowed = SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties(), COLUMNS).config();
+        assertTrue(narrowed.contains("transform {"), narrowed);
+        assertTrue(narrowed.contains("SELECT `id`, `display_name` FROM ds_source_1"), narrowed);
+
+        SyncTask whole = cdcTask(1L);
+        whole.setSelectedColumns("id,display_name,email");
+        String direct = SeaTunnelJobConfigGenerator.generate(whole, mysql(), postgres(), new SeaTunnelProperties(), COLUMNS).config();
+        assertFalse(direct.contains("transform {"), direct);
+        assertTrue(direct.contains("plugin_input = [\"ds_source_1\"]"), direct);
+    }
+
+    /** The column lookup may fail but never guess - a guess would change the fingerprint. */
+    @Test
+    void anUnreadableSourceSchemaIsAnErrorNotASilentProjection() {
+        SourceColumns broken = table -> { throw new ServiceException("读取源表字段失败：connection refused"); };
+        assertThrows(ServiceException.class,
+            () -> SeaTunnelJobConfigGenerator.generate(cdcTask(1L), mysql(), postgres(), new SeaTunnelProperties(), broken));
     }
 
     private static int[] serverIdRange(String config) {

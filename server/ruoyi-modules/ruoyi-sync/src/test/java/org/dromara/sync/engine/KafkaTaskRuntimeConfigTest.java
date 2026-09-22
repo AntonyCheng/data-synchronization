@@ -8,6 +8,7 @@ import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -16,10 +17,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Tag("dev")
 class KafkaTaskRuntimeConfigTest {
 
+    private static final SourceColumns COLUMNS = SourceColumns.fixed(List.of("id", "display_name", "email"));
+
     @Test
     void generatesVersionedRawTopicJobForKafkaTarget() {
         SyncTask task = task("FULL_CDC");
-        SeaTunnelJobConfigGenerator.GeneratedConfig config = SeaTunnelJobConfigGenerator.generate(task, mysql(), kafka(), new SeaTunnelProperties());
+        SeaTunnelJobConfigGenerator.GeneratedConfig config = SeaTunnelJobConfigGenerator.generate(task, mysql(), kafka(), new SeaTunnelProperties(), COLUMNS);
 
         assertEquals("customer-events", config.targetTable());
         assertEquals("__ds_raw_42_v3", KafkaTaskBridgeService.rawTopic(task));
@@ -32,7 +35,7 @@ class KafkaTaskRuntimeConfigTest {
     @Test
     void generatesBoundedKafkaFullSnapshotJob() {
         SeaTunnelJobConfigGenerator.GeneratedConfig config =
-            SeaTunnelJobConfigGenerator.generate(task("FULL"), mysql(), kafka(), new SeaTunnelProperties());
+            SeaTunnelJobConfigGenerator.generate(task("FULL"), mysql(), kafka(), new SeaTunnelProperties(), COLUMNS);
         assertTrue(config.config().contains("job.mode = \"BATCH\""));
         assertTrue(config.config().contains("format = \"JSON\""));
         assertTrue(config.config().contains("SELECT `id`, `display_name` FROM"));
@@ -48,7 +51,7 @@ class KafkaTaskRuntimeConfigTest {
     void generatesMysqlTargetJdbcConfig() {
         DataSource target = mysqlTarget();
         SeaTunnelJobConfigGenerator.GeneratedConfig config =
-            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), target, new SeaTunnelProperties());
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), target, new SeaTunnelProperties(), COLUMNS);
 
         assertEquals("customer-events", config.targetTable());
         assertTrue(config.config().contains("url = \"jdbc:mysql://target.example:3306/sink_db?"));
@@ -64,7 +67,7 @@ class KafkaTaskRuntimeConfigTest {
             "broker.example:9092", "kafka-in-engine:9092"));
 
         SeaTunnelJobConfigGenerator.GeneratedConfig config =
-            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), kafka(), properties);
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), kafka(), properties, COLUMNS);
 
         assertTrue(config.config().contains("jdbc:mysql://mysql-in-engine:3306/source_db"));
         assertTrue(config.config().contains("bootstrap.servers = \"kafka-in-engine:9092\""));

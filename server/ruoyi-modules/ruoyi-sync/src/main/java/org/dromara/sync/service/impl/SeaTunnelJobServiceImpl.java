@@ -16,15 +16,18 @@ import org.dromara.sync.domain.vo.SeaTunnelJobStatus;
 import org.dromara.sync.engine.EngineJobStates;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
+import org.dromara.sync.engine.SourceColumns;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
+import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISeaTunnelJobService;
 import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskService;
 import org.dromara.sync.support.TargetTableSwap;
 import org.dromara.sync.support.SyncLocks;
+import org.dromara.sync.support.SyncSchedules;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -33,6 +36,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.sql.SQLException;
+import java.time.LocalDateTime;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -57,6 +61,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private final SyncTaskMapper syncTaskMapper;
     private final DataSourceMapper dataSourceMapper;
     private final IDataSourceService dataSourceService;
+    private final IDataSourceMetadataService metadataService;
     private final SeaTunnelProperties properties;
     private final SeaTunnelRestClient restClient;
     private final ISyncTaskService syncTaskService;
@@ -104,7 +109,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             }
             submissionStarted = true;
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
-            markRunning(task, submitted.jobId(), generated.config());
+            markRunning(task, submitted.jobId(), generated);
             return operation(task, "作业已提交");
         } catch (ServiceException ex) {
             if (kafkaBridgeStarted) kafkaTaskBridgeService.stop(taskId);
@@ -197,7 +202,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         SeaTunnelJobStatus result = statusOf(task, jobId, snapshot.status(), platformStatus,
             StringUtils.isBlank(snapshot.errorMessage()) ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
         copyKafkaMetrics(result, task);
-        EngineJobStates.applyMetrics(result, snapshot);
+        EngineJobStates.applyMetrics(result, snapshot, task.getSyncMode());
         if (kafka && result.getCdcLagSeconds() == null && task.getKafkaLagSeconds() != null) {
             // The bridge measures source event time -> broker ack: the end-to-end lag of a Kafka target.
             result.setCdcLagSeconds(task.getKafkaLagSeconds());
@@ -275,7 +280,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         // Both preconditions mean the savepoint can never be reused, so the task lands in
         // REINITIALIZE_REQUIRED on purpose - not FAILED, which would invite another resume.
         SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
-        if (StringUtils.isNotBlank(task.getEngineConfigHash()) && !task.getEngineConfigHash().equals(SyncText.sha256Hex(generated.config()))) {
+        if (StringUtils.isNotBlank(task.getEngineConfigHash()) && !generated.matchesFingerprint(task.getEngineConfigHash())) {
             throw refuseResume(task, jobId, "任务配置已变化，不能使用原 checkpoint 恢复，请重新初始化");
         }
         SeaTunnelRestClient.CheckpointSnapshot checkpoint;
@@ -292,9 +297,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         try {
             if (kafka) startBridge(task);
             restClient.submit(generated.jobName(), generated.config(), jobId, true);
-            task.setStatus(SyncStatus.RUNNING);
-            task.setLastError("");
-            syncTaskMapper.updateById(task);
+            markRunning(task);
             return operation(task, "作业已从 savepoint 恢复");
         } catch (ServiceException ex) {
             // The Kafka bridge (if any) is started before restClient.submit() above, so a
@@ -371,7 +374,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
             if (kafka) startBridge(task);
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
-            markRunning(task, submitted.jobId(), generated.config());
+            markRunning(task, submitted.jobId(), generated);
             clearCheckpoint(task);
             return operation(task, "已丢弃旧恢复状态并重新启动全量初始化");
         } catch (ServiceException ex) {
@@ -388,7 +391,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private SeaTunnelJobConfigGenerator.GeneratedConfig generate(SyncTask task) {
         DataSource source = dataSourceService.requireUsable(task.getSourceId(), "源");
         DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
-        return SeaTunnelJobConfigGenerator.generate(task, source, target, properties);
+        return SeaTunnelJobConfigGenerator.generate(task, source, target, properties, SourceColumns.fromMetadata(metadataService, source));
     }
 
     /** Lenient: a task whose target row is missing is simply not a Kafka task here; the start paths fail loudly later. */
@@ -463,11 +466,17 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         return task.getEngineJobId();
     }
 
-    private void markRunning(SyncTask task, String jobId, String submittedConfig) {
+    private void markRunning(SyncTask task, String jobId, SeaTunnelJobConfigGenerator.GeneratedConfig submitted) {
         task.setEngineJobId(jobId);
-        task.setEngineConfigHash(SyncText.sha256Hex(submittedConfig));
+        task.setEngineConfigHash(submitted.fingerprint());
+        markRunning(task);
+    }
+
+    /** RUNNING plus a re-armed CRON schedule: a parked schedule resumes once an operator restarts the task. */
+    private void markRunning(SyncTask task) {
         task.setStatus(SyncStatus.RUNNING);
         task.setLastError("");
+        SyncSchedules.rearm(task, LocalDateTime.now());
         syncTaskMapper.updateById(task);
     }
 
@@ -489,7 +498,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private SeaTunnelJobStatus markFailedAfterEngineCompletion(SyncTask task, String jobId, String error) {
         persistTerminalError(task, SyncStatus.FAILED, error);
         SeaTunnelJobStatus result = statusOf(task, jobId, "FINISHED", SyncStatus.FAILED, task.getLastError());
-        result.setPhase("SNAPSHOT");
+        result.setPhase(EngineJobStates.PHASE_SNAPSHOT);
         return result;
     }
 

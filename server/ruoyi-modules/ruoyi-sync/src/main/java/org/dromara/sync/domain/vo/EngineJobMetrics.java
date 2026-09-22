@@ -15,7 +15,7 @@ public class EngineJobMetrics implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** SNAPSHOT while the engine is still in its initial load states, CDC afterwards. */
+    /** SNAPSHOT / CDC / MIXED - see EngineJobStates.phaseOf; MIXED is a FULL_CDC job whose snapshot boundary the engine does not expose. */
     private String phase;
     private Long sourceReceivedCount;
     private Long sinkCommittedCount;

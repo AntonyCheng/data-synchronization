@@ -4,7 +4,7 @@
 
 单表状态接口 `POST /sync/task/{id}/status` 和任务组状态接口在刷新 SeaTunnel 作业状态时，同时读取引擎 `job-info.metrics` 投影到任务 / 表项详情：
 
-- 阶段：`SNAPSHOT` 或 `CDC`。根据引擎作业状态映射，SeaTunnel 尚未提供独立的快照完成事件时采用保守映射。
+- 阶段：`SNAPSHOT` / `CDC` / `MIXED`，由同步模式和引擎状态推导（`EngineJobStates.phaseOf`）：`FULL` 恒为 `SNAPSHOT`，`INCREMENTAL` 恒为 `CDC`；`FULL_CDC` 在引擎启动态（INITIALIZING/CREATED/PENDING/STARTING）为 `SNAPSHOT`，进入 RUNNING 后为 `MIXED`——Zeta 不暴露快照完成信号，平台不假装知道边界。
 - 源端已读取、目标端已提交：行数和字节数；源端和目标端吞吐：引擎自己的 QPS。
 - 积压：源端已读取 − 目标端已提交（不为负），是关系型目标唯一可得的"落后程度"指标。
 - 端到端延迟：仅 Kafka 目标可得，由平台桥接按"源事件时间 → broker ack"计算；关系型目标显示为空，不以请求时间冒充延迟。
