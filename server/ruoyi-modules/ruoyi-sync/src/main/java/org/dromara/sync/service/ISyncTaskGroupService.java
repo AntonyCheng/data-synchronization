@@ -5,7 +5,6 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
 import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckResult;
-import org.dromara.sync.domain.vo.SyncTaskGroupDdlCheckResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
@@ -33,11 +32,14 @@ public interface ISyncTaskGroupService {
     /** Discover tables of a database-scope group and isolate new table failures. */
     SyncTaskGroupOperationResult discover(Long groupId);
 
-    SyncTaskGroupDdlCheckResult checkDdl(Long groupId);
-
     SyncTaskGroupDataCheckResult checkData(Long groupId);
 
-    SyncTaskGroupOperationResult resumeDdlItem(Long groupId, Long itemId);
+    /**
+     * Resubmit one table item from its own savepoint (e.g. after a DDL isolation has been
+     * resolved). Refuses when the regenerated engine config no longer matches the fingerprint
+     * the savepoint was taken under.
+     */
+    SyncTaskGroupOperationResult resumeItem(Long groupId, Long itemId);
 
     SyncTaskGroupStatus refreshStatus(Long groupId);
 

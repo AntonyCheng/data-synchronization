@@ -3,8 +3,6 @@ package org.dromara.sync.service;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
-import org.dromara.sync.domain.bo.KafkaTopicCreateBo;
-import org.dromara.sync.domain.vo.KafkaTopicVo;
 
 import java.util.List;
 
@@ -29,8 +27,4 @@ public interface IDataSourceMetadataService {
     TargetCompatibilityVo checkTargetCompatibility(Long sourceId, Long targetId, String sourceTable,
                                                     String targetSchema, String targetTable,
                                                     String selectedColumns, String syncKeyColumns);
-
-    List<KafkaTopicVo> listKafkaTopics(Long sourceId);
-
-    KafkaTopicVo createKafkaTopic(Long sourceId, KafkaTopicCreateBo bo);
 }

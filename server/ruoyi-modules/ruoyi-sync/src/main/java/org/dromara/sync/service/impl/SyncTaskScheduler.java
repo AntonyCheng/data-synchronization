@@ -7,6 +7,7 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.ISeaTunnelJobService;
+import org.dromara.sync.support.SyncLocks;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -37,7 +38,7 @@ public class SyncTaskScheduler {
     }
 
     private void trigger(SyncTask task, LocalDateTime now) {
-        RLock lock = redissonClient.getLock("sync:task:start:" + task.getTaskId());
+        RLock lock = redissonClient.getLock(SyncLocks.TASK_LOCK_PREFIX + task.getTaskId());
         boolean acquired = false;
         try {
             acquired = lock.tryLock(0, 30, TimeUnit.SECONDS);

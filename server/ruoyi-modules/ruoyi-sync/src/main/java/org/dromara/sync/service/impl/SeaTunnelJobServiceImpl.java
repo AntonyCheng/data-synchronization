@@ -24,10 +24,9 @@ import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISeaTunnelJobService;
 import org.dromara.sync.service.ISyncTaskService;
 import org.dromara.sync.support.TargetTableSwap;
+import org.dromara.sync.support.SyncLocks;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
-import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -37,8 +36,6 @@ import java.sql.SQLException;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
  * Single-table task lifecycle against SeaTunnel: preview, start, status reconciliation,
@@ -55,14 +52,6 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
      * and Debezium keeps buffering into the raw topic, so give up only after this many.
      */
     private static final int STATUS_FAILURE_TOLERANCE = 3;
-    /**
-     * Per-task mutation lock, shared with {@link SyncTaskScheduler}. Every operation that
-     * reads a task row, talks to the engine and writes the row back holds it, so a user
-     * action and a background reconcile pass never interleave their full-row updates.
-     */
-    static final String TASK_LOCK_PREFIX = "sync:task:start:";
-    /** How long an interactive call waits for a task busy in a background pass. */
-    private static final long LOCK_WAIT_SECONDS = 10;
     private static final Set<String> REINITIALIZABLE_STATUSES = Set.of(SyncStatus.REINITIALIZE_REQUIRED, SyncStatus.FAILED, SyncStatus.STOPPED);
 
     private final SyncTaskMapper syncTaskMapper;
@@ -72,7 +61,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private final SeaTunnelRestClient restClient;
     private final ISyncTaskService syncTaskService;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
-    private final RedissonClient redissonClient;
+    private final SyncLocks locks;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
 
     /** Consecutive status-poll failures per task; reset on any successful poll. */
@@ -94,15 +83,13 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult start(Long taskId) {
-        RLock lock = redissonClient.getLock(TASK_LOCK_PREFIX + taskId);
-        boolean acquired = false;
+        return locks.withTaskLock(taskId, () -> doStart(taskId));
+    }
+
+    private SeaTunnelJobOperationResult doStart(Long taskId) {
         boolean submissionStarted = false;
         boolean kafkaBridgeStarted = false;
         try {
-            // Wait briefly so a click that lands during a ~100 ms background refresh does not
-            // bounce; a genuinely concurrent second start still fails once the first holds RUNNING.
-            acquired = lock.tryLock(LOCK_WAIT_SECONDS, -1, TimeUnit.SECONDS);
-            if (!acquired) throw new ServiceException("任务正在提交运行实例，请勿重复启动");
             SyncTask task = requireTask(taskId);
             ensureStartable(task);
             prepareResourceProtection(task);
@@ -128,14 +115,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             SyncTask task = syncTaskMapper.selectById(taskId);
             if (submissionStarted && task != null) markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw new ServiceException("启动同步任务失败：" + SyncText.safeMessage(ex, "未知错误"));
-        } finally {
-            if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
         }
     }
 
     @Override
     public SeaTunnelJobStatus refreshStatus(Long taskId) {
-        return withTaskLock(taskId, () -> doRefreshStatus(taskId));
+        return locks.withTaskLock(taskId, () -> doRefreshStatus(taskId));
     }
 
     private SeaTunnelJobStatus doRefreshStatus(Long taskId) {
@@ -238,7 +223,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         syncTaskMapper.selectActive().forEach(task -> {
             // Someone (a user action, the scheduler, or another pass) already holds this task;
             // skipping is cheaper than queueing behind it - the next cycle picks it up.
-            if (redissonClient.getLock(TASK_LOCK_PREFIX + task.getTaskId()).isLocked()) return;
+            if (locks.isTaskBusy(task.getTaskId())) return;
             try {
                 refreshStatus(task.getTaskId());
             } catch (Exception ex) {
@@ -249,7 +234,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult pause(Long taskId) {
-        return withTaskLock(taskId, () -> doPause(taskId));
+        return locks.withTaskLock(taskId, () -> doPause(taskId));
     }
 
     private SeaTunnelJobOperationResult doPause(Long taskId) {
@@ -268,7 +253,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult resume(Long taskId) {
-        return withTaskLock(taskId, () -> doResume(taskId));
+        return locks.withTaskLock(taskId, () -> doResume(taskId));
     }
 
     private SeaTunnelJobOperationResult doResume(Long taskId) {
@@ -314,7 +299,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult stop(Long taskId) {
-        return withTaskLock(taskId, () -> doStop(taskId));
+        return locks.withTaskLock(taskId, () -> doStop(taskId));
     }
 
     private SeaTunnelJobOperationResult doStop(Long taskId) {
@@ -338,7 +323,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
     @Override
     public SeaTunnelJobOperationResult reinitialize(Long taskId) {
-        return withTaskLock(taskId, () -> doReinitialize(taskId));
+        return locks.withTaskLock(taskId, () -> doReinitialize(taskId));
     }
 
     private SeaTunnelJobOperationResult doReinitialize(Long taskId) {
@@ -377,22 +362,6 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (kafka) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw new ServiceException("重新初始化任务失败：" + SyncText.safeMessage(ex, "未知错误"));
-        }
-    }
-
-    /** Runs {@code action} under the per-task lock; the lease is watchdog-renewed for as long as the thread works. */
-    private <T> T withTaskLock(Long taskId, Supplier<T> action) {
-        RLock lock = redissonClient.getLock(TASK_LOCK_PREFIX + taskId);
-        boolean acquired = false;
-        try {
-            acquired = lock.tryLock(LOCK_WAIT_SECONDS, -1, TimeUnit.SECONDS);
-            if (!acquired) throw new ServiceException("任务正在执行其他操作，请稍后重试");
-            return action.get();
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new ServiceException("等待任务锁被中断");
-        } finally {
-            if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
         }
     }
 

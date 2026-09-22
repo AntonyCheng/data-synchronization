@@ -17,6 +17,7 @@ import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
+import org.dromara.sync.service.ISyncTaskGroupDdlService;
 import org.dromara.sync.service.ISyncTaskGroupService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -38,6 +39,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class SyncTaskGroupController extends BaseController {
 
     private final ISyncTaskGroupService groupService;
+    private final ISyncTaskGroupDdlService ddlService;
 
     @SaCheckPermission("sync:group:list")
     @GetMapping("/list")
@@ -107,7 +109,7 @@ public class SyncTaskGroupController extends BaseController {
     @Log(title = "同步任务组结构检查", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/ddl-check")
     public R<SyncTaskGroupDdlCheckResult> checkDdl(@PathVariable Long groupId) {
-        return R.ok(groupService.checkDdl(groupId));
+        return R.ok(ddlService.checkDdl(groupId));
     }
 
     @SaCheckPermission("sync:group:check")
@@ -122,7 +124,7 @@ public class SyncTaskGroupController extends BaseController {
     @RepeatSubmit()
     @PostMapping("/{groupId}/item/{itemId}/resume-after-ddl")
     public R<SyncTaskGroupOperationResult> resumeDdlItem(@PathVariable Long groupId, @PathVariable Long itemId) {
-        return R.ok(groupService.resumeDdlItem(groupId, itemId));
+        return R.ok(ddlService.resumeDdlItem(groupId, itemId));
     }
 
     @SaCheckPermission("sync:group:status")

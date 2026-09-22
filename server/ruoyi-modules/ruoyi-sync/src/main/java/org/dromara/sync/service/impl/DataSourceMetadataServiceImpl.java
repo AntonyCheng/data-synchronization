@@ -2,8 +2,6 @@ package org.dromara.sync.service.impl;
 
 import lombok.RequiredArgsConstructor;
 import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.common.errors.TopicExistsException;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.constant.DataSourceType;
@@ -14,8 +12,6 @@ import org.dromara.sync.domain.vo.DataSourceCheckItemVo;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceIndexVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
-import org.dromara.sync.domain.bo.KafkaTopicCreateBo;
-import org.dromara.sync.domain.vo.KafkaTopicVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.kafka.KafkaAdminClients;
 import org.dromara.sync.mapper.DataSourceMapper;
@@ -276,75 +272,6 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         result.setMessage(result.isPassed() ? "Kafka topic、分区与可靠分区键检查通过，启动时将确认生产 ACL"
             : "Kafka 任务需要可见的目标 topic、至少一个分区和可靠同步键");
         return result;
-    }
-
-    @Override
-    public List<KafkaTopicVo> listKafkaTopics(Long sourceId) {
-        DataSource source = requireSource(sourceId);
-        requireKafka(source);
-        try (AdminClient admin = KafkaAdminClients.open(source)) {
-            List<String> names = new ArrayList<>(admin.listTopics().names().get(10, TimeUnit.SECONDS).stream()
-                .filter(name -> !name.startsWith("__ds_raw_"))
-                .toList());
-            names.sort(String::compareTo);
-            Map<String, org.apache.kafka.clients.admin.TopicDescription> descriptions = admin.describeTopics(names)
-                .allTopicNames().get(10, TimeUnit.SECONDS);
-            List<KafkaTopicVo> result = new ArrayList<>();
-            for (String name : names) {
-                var description = descriptions.get(name);
-                if (description == null || description.partitions().isEmpty()) continue;
-                KafkaTopicVo topic = new KafkaTopicVo();
-                topic.setTopic(name);
-                topic.setPartitions(description.partitions().size());
-                topic.setReplicationFactor((short) description.partitions().getFirst().replicas().size());
-                result.add(topic);
-            }
-            return result;
-        } catch (Exception ex) {
-            throw new ServiceException("读取 Kafka topic 列表失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
-        }
-    }
-
-    @Override
-    public KafkaTopicVo createKafkaTopic(Long sourceId, KafkaTopicCreateBo bo) {
-        DataSource source = requireSource(sourceId);
-        requireKafka(source);
-        String topicName = bo.getTopic().trim();
-        if (!topicName.matches("[A-Za-z0-9._-]{1,249}")) {
-            throw new ServiceException("topic 名称只能包含字母、数字、点、下划线和连字符，长度不超过 249");
-        }
-        int partitions = bo.getPartitions() == null ? 1 : bo.getPartitions();
-        short replicationFactor = bo.getReplicationFactor() == null ? 1 : bo.getReplicationFactor();
-        if (partitions < 1 || partitions > 1000) throw new ServiceException("分区数必须在 1 到 1000 之间");
-        if (replicationFactor < 1 || replicationFactor > 100) throw new ServiceException("副本数必须在 1 到 100 之间");
-        try (AdminClient admin = KafkaAdminClients.open(source)) {
-            if (admin.listTopics().names().get(10, TimeUnit.SECONDS).contains(topicName)) {
-                throw new ServiceException("Kafka topic 已存在，请选择已有 topic 或更换名称");
-            }
-            admin.createTopics(List.of(new NewTopic(topicName, partitions, replicationFactor)))
-                .all().get(10, TimeUnit.SECONDS);
-            var description = admin.describeTopics(List.of(topicName)).allTopicNames()
-                .get(10, TimeUnit.SECONDS).get(topicName);
-            if (description == null) throw new ServiceException("Kafka topic 创建后无法读取详情");
-            KafkaTopicVo result = new KafkaTopicVo();
-            result.setTopic(topicName);
-            result.setPartitions(description.partitions().size());
-            result.setReplicationFactor((short) description.partitions().getFirst().replicas().size());
-            return result;
-        } catch (ServiceException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            if (ex.getCause() instanceof TopicExistsException) {
-                throw new ServiceException("Kafka topic 已存在，请选择已有 topic 或更换名称");
-            }
-            throw new ServiceException("创建 Kafka topic 失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
-        }
-    }
-
-    private static void requireKafka(DataSource source) {
-        if (!DataSourceType.isKafka(source)) {
-            throw new ServiceException("该数据源不是 Kafka");
-        }
     }
 
     private boolean tableExists(DataSource source, String schema, String table) {

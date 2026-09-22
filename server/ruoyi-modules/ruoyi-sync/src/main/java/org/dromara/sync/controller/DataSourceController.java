@@ -20,6 +20,7 @@ import org.dromara.sync.domain.bo.KafkaTopicCreateBo;
 import org.dromara.sync.domain.vo.KafkaTopicVo;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
+import org.dromara.sync.service.IKafkaTopicService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -43,6 +44,7 @@ public class DataSourceController extends BaseController {
 
     private final IDataSourceService dataSourceService;
     private final IDataSourceMetadataService metadataService;
+    private final IKafkaTopicService kafkaTopicService;
 
     @SaCheckPermission("sync:data-source:list")
     @GetMapping("/list")
@@ -114,7 +116,7 @@ public class DataSourceController extends BaseController {
     @SaCheckPermission("sync:data-source:metadata")
     @GetMapping("/{sourceId}/kafka/topics")
     public R<List<KafkaTopicVo>> kafkaTopics(@NotNull(message = "数据源ID不能为空") @PathVariable Long sourceId) {
-        return R.ok(metadataService.listKafkaTopics(sourceId));
+        return R.ok(kafkaTopicService.listTopics(sourceId));
     }
 
     @SaCheckPermission("sync:data-source:metadata")
@@ -123,7 +125,7 @@ public class DataSourceController extends BaseController {
     @PostMapping("/{sourceId}/kafka/topics")
     public R<KafkaTopicVo> createKafkaTopic(@NotNull(message = "数据源ID不能为空") @PathVariable Long sourceId,
                                             @Validated @RequestBody KafkaTopicCreateBo bo) {
-        return R.ok(metadataService.createKafkaTopic(sourceId, bo));
+        return R.ok(kafkaTopicService.createTopic(sourceId, bo));
     }
 
     @SaCheckPermission("sync:data-source:credential-migrate")

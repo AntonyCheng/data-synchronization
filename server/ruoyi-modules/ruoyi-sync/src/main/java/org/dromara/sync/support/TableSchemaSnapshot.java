@@ -4,6 +4,7 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.dromara.common.json.utils.JsonUtils;
+import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 
@@ -42,6 +43,13 @@ public final class TableSchemaSnapshot {
 
     public static Snapshot fromJson(String json) {
         return JsonUtils.parseObject(json, Snapshot.class);
+    }
+
+    /** Records the current source schema on the item as the baseline later DDL checks diff against. */
+    public static void baseline(SyncTaskGroupItem item, DataSourceMetadataVo metadata) {
+        String snapshot = toJson(of(metadata));
+        item.setSchemaSnapshot(snapshot);
+        item.setSchemaHash(SyncText.sha256Hex(snapshot));
     }
 
     public static Diff diff(Snapshot baseline, Snapshot current) {

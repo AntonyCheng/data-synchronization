@@ -16,6 +16,12 @@ public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupIte
             .orderByAsc(SyncTaskGroupItem::getItemId));
     }
 
+    /** The item only if it belongs to the group; null otherwise. */
+    default SyncTaskGroupItem selectOneOfGroup(Long groupId, Long itemId) {
+        SyncTaskGroupItem item = selectById(itemId);
+        return item != null && groupId.equals(item.getGroupId()) ? item : null;
+    }
+
     default int deleteByGroupId(Long groupId) {
         return delete(new LambdaQueryWrapper<SyncTaskGroupItem>().eq(SyncTaskGroupItem::getGroupId, groupId));
     }

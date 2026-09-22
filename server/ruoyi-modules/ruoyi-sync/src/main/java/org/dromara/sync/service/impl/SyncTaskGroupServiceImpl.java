@@ -16,7 +16,6 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTaskGroup;
-import org.dromara.sync.domain.SyncTaskGroupDdlEvent;
 import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.bo.SyncTaskGroupItemBo;
@@ -26,8 +25,6 @@ import org.dromara.sync.domain.vo.SyncTaskDataCheckResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
 import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckItemResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckResult;
-import org.dromara.sync.domain.vo.SyncTaskGroupDdlCheckResult;
-import org.dromara.sync.domain.vo.SyncTaskGroupDdlEventVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemStatus;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemValidationVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemVo;
@@ -48,12 +45,12 @@ import org.dromara.sync.service.IDataConsistencyService;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncTaskGroupService;
+import org.dromara.sync.support.GroupStatuses;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
+import org.dromara.sync.support.SyncLocks;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
 import org.dromara.sync.support.TableSchemaSnapshot;
-import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -69,12 +66,11 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
  * Multi-table / whole-database release lifecycle. One SeaTunnel job per table item; the
- * group status is an aggregate of its items (see {@link #aggregateStatus}).
+ * group status is an aggregate of its items (see {@link GroupStatuses#aggregate}). DDL drift
+ * handling lives in {@link SyncTaskGroupDdlServiceImpl}.
  */
 @RequiredArgsConstructor
 @Service
@@ -85,27 +81,14 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private static final int MAX_TABLES_PER_GROUP = 20;
     private static final String DEFAULT_DDL_POLICY = "FAIL";
 
-    private static final String DDL_EVENT_PENDING_FIX = "PENDING_FIX";
-    private static final String DDL_EVENT_READY_TO_RESUME = "READY_TO_RESUME";
-    private static final String DDL_EVENT_RESOLVED = "RESOLVED";
-
     private static final Set<String> EDITABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED);
     private static final Set<String> DELETABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED, SyncStatus.FAILED, SyncStatus.FINISHED);
     private static final Set<String> RESUMABLE_STATUSES = Set.of(SyncStatus.PAUSED, SyncStatus.FAILED);
     /** Group states in which table jobs are live on the engine. */
     private static final Set<String> LIVE_STATUSES = Set.of(SyncStatus.RUNNING, SyncStatus.DEGRADED);
-    /** Item states that keep a table isolated from a whole-database start. */
-    private static final Set<String> ISOLATED_ITEM_STATUSES = Set.of(SyncStatus.FAILED, SyncStatus.DDL_BLOCKED);
 
     /** Consecutive engine status-poll failures tolerated per item; see the task-side counterpart. */
     private static final int ITEM_STATUS_FAILURE_TOLERANCE = 3;
-    /**
-     * Per-group mutation lock. Status refresh, DDL check and table discovery run on
-     * different schedules and all rewrite the same item rows, so each pass - and each
-     * user action - takes this lock; background passes skip a busy group instead of queueing.
-     */
-    private static final String GROUP_LOCK_PREFIX = "sync:group:lock:";
-    private static final long LOCK_WAIT_SECONDS = 10;
 
     private final SyncTaskGroupMapper groupMapper;
     private final SyncTaskGroupItemMapper itemMapper;
@@ -117,7 +100,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final SeaTunnelRestClient restClient;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
-    private final RedissonClient redissonClient;
+    private final SyncLocks locks;
 
     private final ConcurrentMap<Long, Integer> itemStatusFailureStreak = new ConcurrentHashMap<>();
 
@@ -248,7 +231,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Override
     @Transactional
     public SyncTaskGroupOperationResult start(Long groupId) {
-        return withGroupLock(groupId, () -> doStart(groupId));
+        return locks.withGroupLock(groupId, () -> doStart(groupId));
     }
 
     private SyncTaskGroupOperationResult doStart(Long groupId) {
@@ -275,13 +258,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         int isolatedFailures = 0;
         try {
             for (SyncTaskGroupItem item : items(groupId)) {
-                if (databaseScope && isIsolated(item.getStatus())) {
+                if (databaseScope && GroupStatuses.isIsolated(item.getStatus())) {
                     isolatedFailures++;
                     continue;
                 }
                 currentItem = item;
                 try {
-                    captureSchemaBaseline(item, source);
+                    TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
                     jobIds.add(submitItem(group, item, source, target));
                     submittedItems.add(item);
                 } catch (RuntimeException ex) {
@@ -295,7 +278,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             group.setStatus(databaseScope && isolatedFailures > 0 ? SyncStatus.DEGRADED : SyncStatus.RUNNING);
             group.setLastError(isolatedFailures == 0 ? "" : "已隔离 " + isolatedFailures + " 张失败表，其他表继续运行");
             groupMapper.updateById(group);
-            return operation(group, databaseScope
+            return SyncTaskGroupOperationResult.of(group, databaseScope
                 ? "整库任务已提交 " + jobIds.size() + " 个作业，隔离失败 " + isolatedFailures + " 张"
                 : "任务组已提交 " + jobIds.size() + " 个作业");
         } catch (RuntimeException ex) {
@@ -319,14 +302,14 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             group.setStatus(SyncStatus.FAILED);
             group.setLastError(SyncText.truncateForColumn(error));
             groupMapper.updateById(group);
-            return operation(group, "任务组启动失败，已补偿停止已提交作业：" + error);
+            return SyncTaskGroupOperationResult.of(group, "任务组启动失败，已补偿停止已提交作业：" + error);
         }
     }
 
     @Override
     @Transactional
     public SyncTaskGroupOperationResult discover(Long groupId) {
-        return withGroupLock(groupId, () -> doDiscover(groupId));
+        return locks.withGroupLock(groupId, () -> doDiscover(groupId));
     }
 
     private SyncTaskGroupOperationResult doDiscover(Long groupId) {
@@ -367,7 +350,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 item.setLastError(SyncText.truncateForColumn(validationError));
                 failed++;
             } else {
-                captureSchemaBaseline(item, source);
+                TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
             }
             itemMapper.insert(item);
             discovered++;
@@ -387,14 +370,14 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             group.setLastError(failed == 0 ? "" : "新增表发现完成，其中 " + failed + " 张表校验或提交失败，请查看表项错误");
             groupMapper.updateById(group);
         }
-        return operation(group, discovered == 0 ? "未发现新增表"
+        return SyncTaskGroupOperationResult.of(group, discovered == 0 ? "未发现新增表"
             : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张");
     }
 
     @Override
     @Transactional
     public SyncTaskGroupOperationResult pause(Long groupId) {
-        return withGroupLock(groupId, () -> doPause(groupId));
+        return locks.withGroupLock(groupId, () -> doPause(groupId));
     }
 
     private SyncTaskGroupOperationResult doPause(Long groupId) {
@@ -406,13 +389,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
         group.setStatus(SyncStatus.PAUSING);
         groupMapper.updateById(group);
-        return operation(group, "暂停请求已提交，请刷新状态确认 savepoint");
+        return SyncTaskGroupOperationResult.of(group, "暂停请求已提交，请刷新状态确认 savepoint");
     }
 
     @Override
     @Transactional
     public SyncTaskGroupOperationResult resume(Long groupId) {
-        return withGroupLock(groupId, () -> doResume(groupId));
+        return locks.withGroupLock(groupId, () -> doResume(groupId));
     }
 
     private SyncTaskGroupOperationResult doResume(Long groupId) {
@@ -437,13 +420,41 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
         group.setStatus(SyncStatus.RUNNING);
         groupMapper.updateById(group);
-        return operation(group, "任务组已从 savepoint 恢复");
+        return SyncTaskGroupOperationResult.of(group, "任务组已从 savepoint 恢复");
+    }
+
+    @Override
+    @Transactional
+    public SyncTaskGroupOperationResult resumeItem(Long groupId, Long itemId) {
+        return locks.withGroupLock(groupId, () -> doResumeItem(groupId, itemId));
+    }
+
+    private SyncTaskGroupOperationResult doResumeItem(Long groupId, Long itemId) {
+        SyncTaskGroup group = requireGroup(groupId);
+        SyncTaskGroupItem item = itemMapper.selectOneOfGroup(groupId, itemId);
+        if (item == null) throw new ServiceException("表项不存在或不属于当前任务组");
+        if (StringUtils.isBlank(item.getEngineJobId())) throw new ServiceException("表项没有可恢复的引擎作业");
+        DataSource source = requireSource(group);
+        DataSource target = requireTarget(group);
+        var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties);
+        if (configChanged(item, generated.config())) {
+            throw new ServiceException("表 " + item.getSourceTable() + " 的引擎配置已变化，不能直接从原 savepoint 恢复，请创建新配置版本并重新初始化该表");
+        }
+        submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
+        TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
+        item.setStatus(SyncStatus.RUNNING);
+        item.setLastError("");
+        itemMapper.updateById(item);
+        group.setStatus(GroupStatuses.aggregate(itemStatuses(groupId)));
+        group.setLastError("");
+        groupMapper.updateById(group);
+        return SyncTaskGroupOperationResult.of(group, "表 " + item.getSourceTable() + " 已从 savepoint 恢复");
     }
 
     @Override
     @Transactional
     public SyncTaskGroupOperationResult stop(Long groupId) {
-        return withGroupLock(groupId, () -> doStop(groupId));
+        return locks.withGroupLock(groupId, () -> doStop(groupId));
     }
 
     private SyncTaskGroupOperationResult doStop(Long groupId) {
@@ -454,13 +465,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
         group.setStatus(SyncStatus.STOPPED);
         groupMapper.updateById(group);
-        return operation(group, "任务组已停止");
+        return SyncTaskGroupOperationResult.of(group, "任务组已停止");
     }
 
     @Override
     @Transactional
     public SyncTaskGroupStatus refreshStatus(Long groupId) {
-        return withGroupLock(groupId, () -> doRefreshStatus(groupId));
+        return locks.withGroupLock(groupId, () -> doRefreshStatus(groupId));
     }
 
     private SyncTaskGroupStatus doRefreshStatus(Long groupId) {
@@ -520,7 +531,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             }
             result.getItems().add(itemStatus);
         }
-        String aggregate = aggregateStatus(statuses);
+        String aggregate = GroupStatuses.aggregate(statuses);
         group.setStatus(aggregate);
         groupMapper.updateById(group);
         result.setStatus(aggregate);
@@ -557,7 +568,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}")
     public void refreshRunningGroupStatus() {
         groupMapper.selectActive().forEach(group -> {
-            if (isGroupBusy(group)) return;
+            if (locks.isGroupBusy(group.getGroupId())) return;
             try {
                 refreshStatus(group.getGroupId());
             } catch (RuntimeException ex) {
@@ -570,149 +581,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     @Scheduled(fixedDelayString = "${sync.discovery.interval-ms:60000}", initialDelayString = "${sync.discovery.initial-delay-ms:30000}")
     public void discoverDatabaseGroups() {
         groupMapper.selectLiveAutoDiscoverDatabaseGroups().forEach(group -> {
-            if (isGroupBusy(group)) return;
+            if (locks.isGroupBusy(group.getGroupId())) return;
             try {
                 discover(group.getGroupId());
             } catch (RuntimeException ignored) {
                 // An individual discovery pass must not prevent later scans or affect other groups.
             }
         });
-    }
-
-    /** Periodic DDL checks isolate only the changed table and leave healthy tables running. */
-    @Scheduled(fixedDelayString = "${sync.ddl-check.interval-ms:60000}", initialDelayString = "${sync.ddl-check.initial-delay-ms:45000}")
-    public void checkRunningGroupDdl() {
-        groupMapper.selectLive().forEach(group -> {
-            if (isGroupBusy(group)) return;
-            try {
-                checkDdl(group.getGroupId());
-            } catch (RuntimeException ignored) {
-                // A metadata failure for one group cannot block checks for other groups.
-            }
-        });
-    }
-
-    // ------------------------------------------------------------------ DDL drift
-
-    /**
-     * Compare each table with the source schema captured at its last successful start.
-     * The MVP intentionally never changes the target schema automatically.
-     */
-    @Override
-    @Transactional
-    public SyncTaskGroupDdlCheckResult checkDdl(Long groupId) {
-        return withGroupLock(groupId, () -> doCheckDdl(groupId));
-    }
-
-    private SyncTaskGroupDdlCheckResult doCheckDdl(Long groupId) {
-        SyncTaskGroup group = requireGroup(groupId);
-        DataSource source = requireSource(group);
-        DataSource target = requireTarget(group);
-        SyncTaskGroupDdlCheckResult result = new SyncTaskGroupDdlCheckResult();
-        result.setGroupId(groupId);
-
-        int newlyDetected = 0;
-        int readyToResume = 0;
-        for (SyncTaskGroupItem item : items(groupId)) {
-            DataSourceMetadataVo current;
-            try {
-                current = readSourceMetadata(item, source);
-            } catch (RuntimeException ex) {
-                SyncTaskGroupDdlEvent event = upsertDdlEvent(group, item, null, "TABLE_UNAVAILABLE", "HIGH",
-                    "无法读取源表结构：" + StringUtils.defaultIfBlank(ex.getMessage(), "元数据读取失败"),
-                    "确认源表仍存在且同步账号具有读取元数据权限后重新执行结构检查。", DDL_EVENT_PENDING_FIX);
-                isolateDdlItem(item, event);
-                result.getEvents().add(toDdlEventVo(event, item, target));
-                newlyDetected++;
-                continue;
-            }
-
-            TableSchemaSnapshot.Snapshot snapshot = TableSchemaSnapshot.of(current);
-            String currentJson = TableSchemaSnapshot.toJson(snapshot);
-            String currentHash = SyncText.sha256Hex(currentJson);
-            if (StringUtils.isBlank(item.getSchemaSnapshot())) {
-                // Existing tasks created before migration 008 receive a baseline on their
-                // first successful check; subsequent checks are real runtime DDL checks.
-                TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-                    item.getSourceTable(), item.getTargetSchema(), item.getTargetTable());
-                if (compatibility.isPassed()) {
-                    item.setSchemaSnapshot(currentJson);
-                    item.setSchemaHash(currentHash);
-                    itemMapper.updateById(item);
-                }
-                continue;
-            }
-
-            TableSchemaSnapshot.Diff diff = TableSchemaSnapshot.diff(TableSchemaSnapshot.fromJson(item.getSchemaSnapshot()), snapshot);
-            SyncTaskGroupDdlEvent existing = ddlEventMapper.selectLatestOpen(item.getItemId());
-            if (!diff.changed()) {
-                if (existing != null) {
-                    existing.setStatus(DDL_EVENT_READY_TO_RESUME);
-                    existing.setDetails("源表结构已恢复为启动快照。请确认目标端结构后恢复该表。");
-                    existing.setRemediation("确认目标端仍与源端兼容后，使用“恢复该表”继续从 savepoint 同步。");
-                    ddlEventMapper.updateById(existing);
-                    result.getEvents().add(toDdlEventVo(existing, item, target));
-                    readyToResume++;
-                }
-                continue;
-            }
-
-            TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-                item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
-            String eventStatus = compatibility.isPassed() ? DDL_EVENT_READY_TO_RESUME : DDL_EVENT_PENDING_FIX;
-            SyncTaskGroupDdlEvent event = upsertDdlEvent(group, item, currentHash, diff.changeType(), diff.riskLevel(),
-                diff.details(), TableSchemaSnapshot.remediation(diff, compatibility), eventStatus);
-            isolateDdlItem(item, event);
-            result.getEvents().add(toDdlEventVo(event, item, target));
-            if (DDL_EVENT_READY_TO_RESUME.equals(eventStatus)) readyToResume++; else newlyDetected++;
-        }
-
-        group.setStatus(aggregateStatus(itemStatuses(groupId)));
-        group.setLastError(newlyDetected == 0 ? "" : "检测到 " + newlyDetected + " 张表存在待修复的结构变更");
-        groupMapper.updateById(group);
-        result.setStatus(group.getStatus());
-        result.setMessage(result.getEvents().isEmpty() ? "未发现运行中表结构变更"
-            : "检测到 " + result.getEvents().size() + " 条结构变更事件，其中 " + readyToResume + " 条已可恢复");
-        return result;
-    }
-
-    @Override
-    @Transactional
-    public SyncTaskGroupOperationResult resumeDdlItem(Long groupId, Long itemId) {
-        return withGroupLock(groupId, () -> doResumeDdlItem(groupId, itemId));
-    }
-
-    private SyncTaskGroupOperationResult doResumeDdlItem(Long groupId, Long itemId) {
-        SyncTaskGroup group = requireGroup(groupId);
-        SyncTaskGroupItem item = itemMapper.selectById(itemId);
-        if (item == null || !groupId.equals(item.getGroupId())) throw new ServiceException("表项不存在或不属于当前任务组");
-        checkDdl(groupId);
-        SyncTaskGroupDdlEvent event = ddlEventMapper.selectLatestOpen(itemId);
-        if (event == null || !DDL_EVENT_READY_TO_RESUME.equals(event.getStatus())) {
-            throw new ServiceException("表结构尚未修复或未通过兼容性检查，请先执行结构检查并按修复建议处理");
-        }
-        if (StringUtils.isBlank(item.getEngineJobId())) throw new ServiceException("表项没有可恢复的引擎作业");
-        DataSource source = requireSource(group);
-        DataSource target = requireTarget(group);
-        var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties);
-        if (configChanged(item, generated.config())) {
-            throw new ServiceException("表结构变更导致引擎配置版本变化，不能直接从原 savepoint 恢复，请创建新配置版本并重新初始化该表");
-        }
-        // The DDL isolation paused the engine job but left the bridge alone; after a platform
-        // restart the bridge is gone, so (re)starting it here is what makes the resumed table
-        // actually publish again. Bridge start is idempotent for a live worker.
-        submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
-        captureSchemaBaseline(item, source);
-        item.setStatus(SyncStatus.RUNNING);
-        item.setLastError("");
-        itemMapper.updateById(item);
-        event.setStatus(DDL_EVENT_RESOLVED);
-        event.setResolvedAt(LocalDateTime.now());
-        ddlEventMapper.updateById(event);
-        group.setStatus(aggregateStatus(itemStatuses(groupId)));
-        group.setLastError("");
-        groupMapper.updateById(group);
-        return operation(group, "表 " + item.getSourceTable() + " 已通过结构校验并恢复");
     }
 
     // ------------------------------------------------------------------ data check
@@ -939,7 +814,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             try {
                 kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
                 if (SyncStatus.FAILED.equals(item.getStatus()) && validateDiscoveredItem(source, target, item) == null) {
-                    captureSchemaBaseline(item, source);
+                    TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
                     item.setStatus(SyncStatus.PENDING);
                     item.setLastError("");
                     itemMapper.updateById(item);
@@ -965,90 +840,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
     }
 
-    // ------------------------------------------------------------------ DDL helpers
-
-    private void captureSchemaBaseline(SyncTaskGroupItem item, DataSource source) {
-        String snapshot = TableSchemaSnapshot.toJson(TableSchemaSnapshot.of(readSourceMetadata(item, source)));
-        item.setSchemaSnapshot(snapshot);
-        item.setSchemaHash(SyncText.sha256Hex(snapshot));
-    }
-
-    private SyncTaskGroupDdlEvent upsertDdlEvent(SyncTaskGroup group, SyncTaskGroupItem item, String schemaHash,
-                                                  String changeType, String riskLevel, String details,
-                                                  String remediation, String status) {
-        SyncTaskGroupDdlEvent event = ddlEventMapper.selectLatestOpen(item.getItemId());
-        boolean created = event == null;
-        if (created) {
-            event = new SyncTaskGroupDdlEvent();
-            event.setGroupId(group.getGroupId());
-            event.setItemId(item.getItemId());
-            event.setDetectedAt(LocalDateTime.now());
-        }
-        event.setChangeType(changeType);
-        event.setRiskLevel(riskLevel);
-        event.setStatus(status);
-        event.setDetails(SyncText.truncateForColumn(details));
-        event.setRemediation(SyncText.truncateForColumn(remediation));
-        event.setSourceSchemaHash(schemaHash);
-        if (created) ddlEventMapper.insert(event); else ddlEventMapper.updateById(event);
-        return event;
-    }
-
-    /** Pause the table's job with a savepoint and park the item until an operator resolves the event. */
-    private void isolateDdlItem(SyncTaskGroupItem item, SyncTaskGroupDdlEvent event) {
-        if (SyncStatus.DDL_BLOCKED.equals(item.getStatus())) return;
-        try {
-            if (StringUtils.isNotBlank(item.getEngineJobId())) restClient.stop(item.getEngineJobId(), true, false);
-            item.setStatus(SyncStatus.DDL_BLOCKED);
-            item.setLastError(SyncText.truncateForColumn("检测到表结构变更：" + event.getChangeType() + "。请按结构检查结果修复后逐表恢复。"));
-        } catch (RuntimeException ex) {
-            item.setStatus(SyncStatus.FAILED);
-            item.setLastError(SyncText.truncateForColumn("检测到表结构变更，但 savepoint 暂停请求失败："
-                + StringUtils.defaultIfBlank(ex.getMessage(), "元数据读取失败")));
-            event.setStatus(DDL_EVENT_PENDING_FIX);
-            event.setRemediation(event.getRemediation() + " 暂停请求失败，请先确认引擎状态后手动停止该表。");
-            ddlEventMapper.updateById(event);
-        }
-        itemMapper.updateById(item);
-    }
-
-    private static SyncTaskGroupDdlEventVo toDdlEventVo(SyncTaskGroupDdlEvent event, SyncTaskGroupItem item, DataSource target) {
-        SyncTaskGroupDdlEventVo vo = new SyncTaskGroupDdlEventVo();
-        vo.setEventId(event.getEventId());
-        vo.setItemId(event.getItemId());
-        vo.setSourceTable(item.getSourceTable());
-        vo.setTargetTable(TableNames.display(target, item.getTargetSchema(), item.getTargetTable()));
-        vo.setChangeType(event.getChangeType());
-        vo.setRiskLevel(event.getRiskLevel());
-        vo.setStatus(event.getStatus());
-        vo.setDetails(event.getDetails());
-        vo.setRemediation(event.getRemediation());
-        vo.setDetectedAt(event.getDetectedAt());
-        return vo;
-    }
-
     // ------------------------------------------------------------------ lookups & small helpers
 
-    /** Runs {@code action} under the per-group lock; the lease is watchdog-renewed for as long as the thread works. */
-    private <T> T withGroupLock(Long groupId, Supplier<T> action) {
-        RLock lock = redissonClient.getLock(GROUP_LOCK_PREFIX + groupId);
-        boolean acquired = false;
-        try {
-            acquired = lock.tryLock(LOCK_WAIT_SECONDS, -1, TimeUnit.SECONDS);
-            if (!acquired) throw new ServiceException("任务组正在执行其他操作，请稍后重试");
-            return action.get();
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new ServiceException("等待任务组锁被中断");
-        } finally {
-            if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
-        }
-    }
-
-    /** Background passes must not pile up behind a user action or another pass on the same group. */
-    private boolean isGroupBusy(SyncTaskGroup group) {
-        return redissonClient.getLock(GROUP_LOCK_PREFIX + group.getGroupId()).isLocked();
-    }
 
     private List<SyncTaskGroupItem> items(Long groupId) {
         return itemMapper.selectByGroupId(groupId);
@@ -1084,10 +877,6 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return SCOPE_DATABASE.equals(group.getSyncScope());
     }
 
-    private static boolean isIsolated(String itemStatus) {
-        return itemStatus != null && ISOLATED_ITEM_STATUSES.contains(itemStatus);
-    }
-
     private static boolean isLive(SyncTaskGroup group) {
         return group.getStatus() != null && LIVE_STATUSES.contains(group.getStatus());
     }
@@ -1096,37 +885,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return (group.getConfigVersion() == null ? 1 : group.getConfigVersion()) + 1;
     }
 
-    /**
-     * Item states -> group state. Any isolated table alongside a running one is DEGRADED;
-     * only isolated tables is FAILED; otherwise the most "active" item state wins.
-     */
-    private static String aggregateStatus(List<String> statuses) {
-        boolean hasFailure = statuses.stream().anyMatch(SyncTaskGroupServiceImpl::isIsolated);
-        boolean hasRunning = statuses.stream().anyMatch(SyncStatus.RUNNING::equals);
-        if (hasFailure && hasRunning) return SyncStatus.DEGRADED;
-        if (hasFailure) return SyncStatus.FAILED;
-        if (hasRunning) return SyncStatus.RUNNING;
-        if (statuses.stream().anyMatch(SyncStatus.PAUSING::equals)) return SyncStatus.PAUSING;
-        if (!statuses.isEmpty() && statuses.stream().allMatch(SyncStatus.PAUSED::equals)) return SyncStatus.PAUSED;
-        if (!statuses.isEmpty() && statuses.stream().allMatch(status -> SyncStatus.STOPPED.equals(status) || SyncStatus.FINISHED.equals(status))) {
-            return SyncStatus.STOPPED;
-        }
-        return SyncStatus.DRAFT;
-    }
-
     private static String appendJobIds(String current, List<String> appended) {
         LinkedHashSet<String> values = new LinkedHashSet<>();
         if (StringUtils.isNotBlank(current)) values.addAll(List.of(current.split(",")));
         values.addAll(appended);
         return String.join(",", values);
-    }
-
-    private static SyncTaskGroupOperationResult operation(SyncTaskGroup group, String message) {
-        SyncTaskGroupOperationResult result = new SyncTaskGroupOperationResult();
-        result.setGroupId(group.getGroupId());
-        result.setStatus(group.getStatus());
-        result.setEngineJobIds(group.getEngineJobId());
-        result.setMessage(message);
-        return result;
     }
 }
