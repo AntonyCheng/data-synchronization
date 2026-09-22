@@ -14,7 +14,6 @@ import { dictOptions } from '@/utils/dict';
 import { hasPermi } from '@/utils/permission';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
 
-
 export default function MonitorOnlinePage() {
   const actionRef = useRef<ActionType | undefined>(undefined);
   const { tableScroll } = useTableScroll(1320);

@@ -18,8 +18,8 @@ import DictTag from '@/components/common/DictTag';
 import EllipsisText from '@/components/common/EllipsisText';
 import RowActions from '@/components/common/RowActions';
 import { useDict } from '@/hooks/useDict';
-import { useTableSelection } from '@/hooks/useTableSelection';
 import { useTableScroll } from '@/hooks/useTableScroll';
+import { useTableSelection } from '@/hooks/useTableSelection';
 import { useUserStore } from '@/stores/userStore';
 import { dictOptions } from '@/utils/dict';
 import { hasPermi } from '@/utils/permission';
@@ -27,7 +27,6 @@ import { toPageQuery, toTableData } from '@/utils/ruoyi';
 
 const defaultSpelForm: SpelForm = { status: '0' };
 const spelPlaceholder = '例如：#{@组件名.方法名(#方法参数)} 或 ${方法参数}';
-
 
 function buildViewSpel(values: Pick<SpelForm, 'componentName' | 'methodName' | 'methodParams'>) {
   const comp = (values.componentName || '').trim();

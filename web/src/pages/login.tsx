@@ -35,8 +35,7 @@ function getRememberedLogin() {
 const authText = {
   zh_CN: {
     title: '一站式实时计算平台',
-    brandDesc:
-      '统一管理数据源、同步任务、实时链路与运行质量，覆盖 MySQL、PostgreSQL 与 Kafka 数据流转。',
+    brandDesc: '统一管理数据源、同步任务、实时链路与运行质量，覆盖 MySQL、PostgreSQL 与 Kafka 数据流转。',
     highlights: ['全量与 CDC', '多表与整库', '目标兼容性核对', '运行质量监控'],
     metrics: [
       { value: 'React+Ant', label: '前端技术栈' },
@@ -57,8 +56,7 @@ const authText = {
   },
   en_US: {
     title: 'One-stop Real-time Computing Platform',
-    brandDesc:
-      'Manage data sources, synchronization tasks, real-time pipelines and operational quality in one place.',
+    brandDesc: 'Manage data sources, synchronization tasks, real-time pipelines and operational quality in one place.',
     highlights: ['Full & CDC', 'Multi-table & database', 'Compatibility checks', 'Runtime monitoring'],
     metrics: [
       { value: 'React+Ant', label: 'Front-end Tech Stack' },

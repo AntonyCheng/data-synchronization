@@ -18,7 +18,6 @@ import { dictOptions } from '@/utils/dict';
 import { hasPermi } from '@/utils/permission';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
 
-
 function editableStatus(status?: string) {
   return status === 'draft' || status === 'cancel' || status === 'back';
 }

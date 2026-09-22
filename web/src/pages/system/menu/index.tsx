@@ -24,8 +24,8 @@ import { useDict } from '@/hooks/useDict';
 import { useLoading } from '@/hooks/useLoading';
 import { useTableScroll } from '@/hooks/useTableScroll';
 import { useUserStore } from '@/stores/userStore';
-import { routeIcon } from '@/utils/menu';
 import { dictOptions } from '@/utils/dict';
+import { routeIcon } from '@/utils/menu';
 import { hasPermi } from '@/utils/permission';
 import { handleTree } from '@/utils/ruoyi';
 
@@ -38,7 +38,6 @@ const defaultMenuForm: MenuForm = {
   visible: '0',
   status: '0'
 };
-
 
 function menuTypeMeta(row: MenuVO) {
   if (row.menuType === 'F') return { label: '按钮', color: 'orange' };

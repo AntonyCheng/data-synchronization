@@ -21,18 +21,17 @@ import EllipsisText from '@/components/common/EllipsisText';
 import RichTextEditor from '@/components/common/RichTextEditor';
 import RowActions from '@/components/common/RowActions';
 import { useDict } from '@/hooks/useDict';
-import { useTableSelection } from '@/hooks/useTableSelection';
 import { useTableScroll } from '@/hooks/useTableScroll';
+import { useTableSelection } from '@/hooks/useTableSelection';
 import { useUserStore } from '@/stores/userStore';
-import { resolveOssContent } from '@/utils/ossContent';
 import { dictOptions } from '@/utils/dict';
+import { resolveOssContent } from '@/utils/ossContent';
 import { hasPermi } from '@/utils/permission';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
 import { sanitizeHtml } from '@/utils/sanitize';
 
 const defaultNoticeForm: NoticeForm = { status: '0' };
 const emptyNoticeContent = '<p>暂无公告内容</p>';
-
 
 function SafeHtmlContent({ html }: { html: string }) {
   const ref = useRef<HTMLDivElement>(null);

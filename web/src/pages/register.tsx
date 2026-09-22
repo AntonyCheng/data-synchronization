@@ -14,8 +14,7 @@ import { appEnv } from '@/utils/env';
 const registerText = {
   zh_CN: {
     brandTitle: '一站式实时计算平台',
-    brandDesc:
-      '统一管理数据源、同步任务、实时链路与运行质量，快速搭建可靠的数据同步工作台。',
+    brandDesc: '统一管理数据源、同步任务、实时链路与运行质量，快速搭建可靠的数据同步工作台。',
     highlights: ['数据源统一管理', '任务全生命周期', '多表整库同步', '运行质量可视'],
     formSubTitle: '创建新的业务工作台账号',
     username: '账号',

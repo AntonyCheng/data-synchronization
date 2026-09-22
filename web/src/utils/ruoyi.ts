@@ -1,5 +1,5 @@
-import dayjs, { type ConfigType } from 'dayjs';
 import type { Key } from 'react';
+import dayjs, { type ConfigType } from 'dayjs';
 
 export function tansParams(params: Record<string, unknown>) {
   let result = '';
@@ -186,18 +186,12 @@ export function collectTreeKeys<T extends object>(
   });
 }
 
-export function filterTree<T extends object>(
-  nodes: T[],
-  predicate: (node: T) => boolean,
-  children = 'children'
-): T[] {
-  return nodes
-    .filter(predicate)
-    .map(node => {
-      const record = node as Record<string, unknown>;
-      return {
-        ...node,
-        [children]: filterTree((record[children] as T[] | undefined) || [], predicate, children)
-      } as T;
-    });
+export function filterTree<T extends object>(nodes: T[], predicate: (node: T) => boolean, children = 'children'): T[] {
+  return nodes.filter(predicate).map(node => {
+    const record = node as Record<string, unknown>;
+    return {
+      ...node,
+      [children]: filterTree((record[children] as T[] | undefined) || [], predicate, children)
+    } as T;
+  });
 }

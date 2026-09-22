@@ -1,5 +1,5 @@
-import { useCallback, useState } from 'react';
 import type { Key } from 'react';
+import { useCallback, useState } from 'react';
 import { collectTreeKeys } from '@/utils/ruoyi';
 
 interface UseTreeTableExpandOptions<T extends object> {
@@ -15,10 +15,7 @@ export function useTreeTableExpand<T extends object>(
   const [expandAll, setExpandAll] = useState(initialExpandAll);
   const [expandedRowKeys, setExpandedRowKeys] = useState<Key[]>([]);
 
-  const getAllKeys = useCallback(
-    (rows: T[]) => collectTreeKeys(rows, getKey, getChildren),
-    [getChildren, getKey]
-  );
+  const getAllKeys = useCallback((rows: T[]) => collectTreeKeys(rows, getKey, getChildren), [getChildren, getKey]);
 
   const syncExpandedRows = useCallback(
     (rows: T[], expanded = expandAll) => {

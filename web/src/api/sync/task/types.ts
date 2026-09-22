@@ -1,5 +1,5 @@
-import type { PageQuery } from '@/api/types';
 import type { SyncMetricsSample } from '@/api/sync/metrics/types';
+import type { PageQuery } from '@/api/types';
 
 export interface SyncTaskForm {
   taskId?: string | number;
@@ -77,7 +77,15 @@ export interface TaskValidationResult {
     serverId?: string;
     gtidMode?: string;
     binlogRetention?: string;
-    checks?: Array<{ code: string; label: string; required: boolean; passed: boolean; actual?: string; message: string; suggestion?: string }>;
+    checks?: Array<{
+      code: string;
+      label: string;
+      required: boolean;
+      passed: boolean;
+      actual?: string;
+      message: string;
+      suggestion?: string;
+    }>;
   };
   targetCompatibility?: TargetCompatibilityVO;
 }

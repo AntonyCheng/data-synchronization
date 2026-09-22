@@ -56,13 +56,19 @@ export function checkDataSourceCdc(id: string | number) {
 }
 
 export function migrateDataSourceCredentials() {
-  return request<R<DataSourceCredentialMigrationResult>>({ url: '/sync/data-source/credential-migrate', method: 'post' });
+  return request<R<DataSourceCredentialMigrationResult>>({
+    url: '/sync/data-source/credential-migrate',
+    method: 'post'
+  });
 }
 
 export function listKafkaTopics(id: string | number) {
   return request<R<KafkaTopicVO[]>>({ url: `/sync/data-source/${id}/kafka/topics`, method: 'get' });
 }
 
-export function createKafkaTopic(id: string | number, data: { topic: string; partitions?: number; replicationFactor?: number }) {
+export function createKafkaTopic(
+  id: string | number,
+  data: { topic: string; partitions?: number; replicationFactor?: number }
+) {
   return request<R<KafkaTopicVO>>({ url: `/sync/data-source/${id}/kafka/topics`, method: 'post', data });
 }

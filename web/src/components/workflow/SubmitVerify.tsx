@@ -50,7 +50,13 @@ function buttonVisible(task?: FlowTaskVO, code?: string) {
   return !!task?.buttonList?.find(item => item.code === code && item.show);
 }
 
-export default function SubmitVerify({ open, taskId, variables = emptyVariables, onOpenChange, onSubmitted }: SubmitVerifyProps) {
+export default function SubmitVerify({
+  open,
+  taskId,
+  variables = emptyVariables,
+  onOpenChange,
+  onSubmitted
+}: SubmitVerifyProps) {
   const [approveForm] = Form.useForm<{
     message?: string;
     messageType?: string[];

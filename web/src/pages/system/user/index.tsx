@@ -35,8 +35,8 @@ import TreePanel from '@/components/common/TreePanel';
 import { useDateRangeQuery } from '@/hooks/useDateRangeQuery';
 import { useDict } from '@/hooks/useDict';
 import { useTableExport } from '@/hooks/useTableExport';
-import { useTableSelection } from '@/hooks/useTableSelection';
 import { useTableScroll } from '@/hooks/useTableScroll';
+import { useTableSelection } from '@/hooks/useTableSelection';
 import { useUserStore } from '@/stores/userStore';
 import { dictOptions } from '@/utils/dict';
 import { confirmAction } from '@/utils/modal';
@@ -67,7 +67,6 @@ function toTreeSelectData(depts: DeptTreeVO[]): TreeSelectNode[] {
     children: dept.children ? toTreeSelectData(dept.children) : undefined
   }));
 }
-
 
 export default function SystemUserPage() {
   const actionRef = useRef<ActionType | undefined>(undefined);

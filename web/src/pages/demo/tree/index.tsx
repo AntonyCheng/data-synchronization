@@ -14,8 +14,8 @@ import { useMemo, useRef, useState } from 'react';
 import type { TreeForm, TreeQuery, TreeVO } from '@/api/demo/tree/types';
 import { addTree, delTree, getTree, listTree, updateTree } from '@/api/demo/tree';
 import RowActions from '@/components/common/RowActions';
-import { useTreeTableExpand } from '@/hooks/useTreeTableExpand';
 import { useTableScroll } from '@/hooks/useTableScroll';
+import { useTreeTableExpand } from '@/hooks/useTreeTableExpand';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
 import { handleTree } from '@/utils/ruoyi';
@@ -148,11 +148,7 @@ export default function DemoTreePage() {
               新增
             </Button>
           ),
-          <Button
-            key="expand"
-            icon={<SortAscendingOutlined />}
-            onClick={() => toggleExpandAll(tableRows)}
-          >
+          <Button key="expand" icon={<SortAscendingOutlined />} onClick={() => toggleExpandAll(tableRows)}>
             展开/折叠
           </Button>
         ]}

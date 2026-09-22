@@ -45,9 +45,7 @@ export function useTableScroll(options: TableScrollX | TableScrollOptions) {
 
     frameRef.current = window.requestAnimationFrame(() => {
       const wrapper =
-        tableWrapperRef.current ||
-        document.querySelector<HTMLElement>('.ant-pro-page-container') ||
-        document.body;
+        tableWrapperRef.current || document.querySelector<HTMLElement>('.ant-pro-page-container') || document.body;
 
       const tableBody =
         wrapper.querySelector<HTMLElement>('.ant-table-body') ||

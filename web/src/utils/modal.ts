@@ -1,5 +1,5 @@
-import { Modal, type ModalFuncProps } from 'antd';
 import type { ReactNode } from 'react';
+import { Modal, type ModalFuncProps } from 'antd';
 
 const CANCELLED = new Error('cancelled');
 

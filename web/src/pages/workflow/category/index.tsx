@@ -15,8 +15,8 @@ import { useMemo, useRef, useState } from 'react';
 import type { CategoryForm, CategoryQuery, CategoryVO } from '@/api/workflow/category/types';
 import { addCategory, delCategory, getCategory, listCategory, updateCategory } from '@/api/workflow/category';
 import RowActions from '@/components/common/RowActions';
-import { useTreeTableExpand } from '@/hooks/useTreeTableExpand';
 import { useTableScroll } from '@/hooks/useTableScroll';
+import { useTreeTableExpand } from '@/hooks/useTreeTableExpand';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
 import { handleTree } from '@/utils/ruoyi';
@@ -145,11 +145,7 @@ export default function WorkflowCategoryPage() {
               新增
             </Button>
           ),
-          <Button
-            key="expand"
-            icon={<SortAscendingOutlined />}
-            onClick={() => toggleExpandAll(tableRows)}
-          >
+          <Button key="expand" icon={<SortAscendingOutlined />} onClick={() => toggleExpandAll(tableRows)}>
             展开/折叠
           </Button>
         ]}

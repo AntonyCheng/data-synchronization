@@ -1,5 +1,5 @@
-import type { PageQuery } from '@/api/types';
 import type { SyncMetricsSample } from '@/api/sync/metrics/types';
+import type { PageQuery } from '@/api/types';
 
 export interface SyncTaskGroupItemForm {
   itemId?: string | number;

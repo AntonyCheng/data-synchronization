@@ -21,8 +21,8 @@ import { listUserByDeptId } from '@/api/system/user';
 import EllipsisText from '@/components/common/EllipsisText';
 import RowActions from '@/components/common/RowActions';
 import { useDict } from '@/hooks/useDict';
-import { useTreeTableExpand } from '@/hooks/useTreeTableExpand';
 import { useTableScroll } from '@/hooks/useTableScroll';
+import { useTreeTableExpand } from '@/hooks/useTreeTableExpand';
 import { useUserStore } from '@/stores/userStore';
 import { dictOptions } from '@/utils/dict';
 import { hasPermi } from '@/utils/permission';
@@ -38,7 +38,6 @@ interface TreeSelectNode {
   value: string | number;
   children?: TreeSelectNode[];
 }
-
 
 function toTreeSelectData(depts: DeptVO[]): TreeSelectNode[] {
   return depts.map(dept => ({
@@ -214,10 +213,7 @@ export default function SystemDeptPage() {
               新增
             </Button>
           ),
-          <Button
-            key="expand"
-            onClick={() => toggleExpandAll(lastDeptList)}
-          >
+          <Button key="expand" onClick={() => toggleExpandAll(lastDeptList)}>
             展开/折叠
           </Button>
         ]}

@@ -80,9 +80,7 @@ export default function SyncDataSourcePage() {
     const { success, message: detail, latencyMs } = result.data;
     const name = row.sourceName || `数据源 ${row.sourceId}`;
     const summary = success ? `数据源“${name}”连接测试成功` : `数据源“${name}”连接测试失败`;
-    message[success ? 'success' : 'error'](
-      `${summary}${success ? `（耗时 ${latencyMs}ms）` : ''}：${detail}`
-    );
+    message[success ? 'success' : 'error'](`${summary}${success ? `（耗时 ${latencyMs}ms）` : ''}：${detail}`);
   };
 
   const migrateCredentials = () => {
@@ -100,7 +98,12 @@ export default function SyncDataSourcePage() {
 
   const columns: ProColumns<DataSourceVO>[] = [
     { title: '名称', dataIndex: 'sourceName', width: 180 },
-    { title: '类型', dataIndex: 'sourceType', width: 120, valueEnum: { MYSQL: 'MySQL', POSTGRESQL: 'PostgreSQL', KAFKA: 'Kafka' } },
+    {
+      title: '类型',
+      dataIndex: 'sourceType',
+      width: 120,
+      valueEnum: { MYSQL: 'MySQL', POSTGRESQL: 'PostgreSQL', KAFKA: 'Kafka' }
+    },
     { title: '地址', dataIndex: 'host' },
     { title: '端口', dataIndex: 'port', width: 90, search: false },
     { title: '数据库', dataIndex: 'databaseName' },
@@ -110,7 +113,9 @@ export default function SyncDataSourcePage() {
       dataIndex: 'status',
       width: 90,
       valueEnum: { '0': '正常', '1': '停用' },
-      render: (_, row) => <Tag color={row.status === '0' ? 'success' : 'default'}>{row.status === '0' ? '正常' : '停用'}</Tag>
+      render: (_, row) => (
+        <Tag color={row.status === '0' ? 'success' : 'default'}>{row.status === '0' ? '正常' : '停用'}</Tag>
+      )
     },
     {
       title: '操作',
@@ -120,7 +125,12 @@ export default function SyncDataSourcePage() {
       render: (_, row) => (
         <RowActions
           actions={[
-            canTest && { key: 'test', label: '测试连接', icon: <SafetyCertificateOutlined />, onClick: () => test(row) },
+            canTest && {
+              key: 'test',
+              label: '测试连接',
+              icon: <SafetyCertificateOutlined />,
+              onClick: () => test(row)
+            },
             canEdit && { key: 'edit', label: '修改', icon: <EditOutlined />, onClick: () => openEdit(row) },
             canRemove && {
               key: 'delete',
@@ -156,7 +166,11 @@ export default function SyncDataSourcePage() {
               新增数据源
             </Button>
           ),
-          canMigrateCredentials && <Button key="migrate-credentials" icon={<KeyOutlined />} onClick={migrateCredentials}>迁移凭证</Button>
+          canMigrateCredentials && (
+            <Button key="migrate-credentials" icon={<KeyOutlined />} onClick={migrateCredentials}>
+              迁移凭证
+            </Button>
+          )
         ]}
       />
       <ModalForm<DataSourceForm>
@@ -174,11 +188,21 @@ export default function SyncDataSourcePage() {
         <ProFormSelect
           name="sourceType"
           label="类型"
-          options={[{ label: 'MySQL', value: 'MYSQL' }, { label: 'PostgreSQL', value: 'POSTGRESQL' }, { label: 'Kafka', value: 'KAFKA' }]}
+          options={[
+            { label: 'MySQL', value: 'MYSQL' },
+            { label: 'PostgreSQL', value: 'POSTGRESQL' },
+            { label: 'Kafka', value: 'KAFKA' }
+          ]}
           rules={[{ required: true, message: '请选择数据源类型' }]}
         />
         <ProFormText name="host" label="主机地址" rules={[{ required: true, message: '请输入主机地址' }]} />
-        <ProFormDigit name="port" label="端口" min={1} max={65535} rules={[{ required: true, message: '请输入端口' }]} />
+        <ProFormDigit
+          name="port"
+          label="端口"
+          min={1}
+          max={65535}
+          rules={[{ required: true, message: '请输入端口' }]}
+        />
         <ProFormDependency name={['sourceType']}>
           {({ sourceType }) => (
             <ProFormText
@@ -202,12 +226,18 @@ export default function SyncDataSourcePage() {
         <ProFormSelect
           name="sslEnabled"
           label="SSL"
-          options={[{ label: '关闭', value: '0' }, { label: '开启', value: '1' }]}
+          options={[
+            { label: '关闭', value: '0' },
+            { label: '开启', value: '1' }
+          ]}
         />
         <ProFormSelect
           name="status"
           label="状态"
-          options={[{ label: '正常', value: '0' }, { label: '停用', value: '1' }]}
+          options={[
+            { label: '正常', value: '0' },
+            { label: '停用', value: '1' }
+          ]}
         />
         <ProFormText name="remark" label="备注" />
       </ModalForm>

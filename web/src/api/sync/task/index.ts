@@ -1,5 +1,5 @@
-import type { PageResult, R } from '@/api/types';
 import type { SyncMetricsSeries } from '@/api/sync/metrics/types';
+import type { PageResult, R } from '@/api/types';
 import request from '@/api/request';
 import type {
   SeaTunnelJobConfigPreview,

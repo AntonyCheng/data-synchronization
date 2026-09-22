@@ -22,14 +22,28 @@ const windowOptions = [
   { label: '15 分钟', value: 15 },
   { label: '1 小时', value: 60 },
   { label: '6 小时', value: 360 },
-  { label: '24 小时', value: 1440 },
+  { label: '24 小时', value: 1440 }
 ];
 
 // Categorical slots 1 (source) and 2 (sink) of the validated default palette, in fixed
 // order, with their dark-surface steps. Lag is a single series and takes slot 1.
 const palette = {
-  light: { source: '#2a78d6', sink: '#eb6834', text: '#52514e', muted: '#8a8984', grid: '#e8e7e3', surface: 'transparent' },
-  dark: { source: '#3987e5', sink: '#d95926', text: '#c3c2b7', muted: '#8a8984', grid: '#383835', surface: 'transparent' },
+  light: {
+    source: '#2a78d6',
+    sink: '#eb6834',
+    text: '#52514e',
+    muted: '#8a8984',
+    grid: '#e8e7e3',
+    surface: 'transparent'
+  },
+  dark: {
+    source: '#3987e5',
+    sink: '#d95926',
+    text: '#c3c2b7',
+    muted: '#8a8984',
+    grid: '#383835',
+    surface: 'transparent'
+  }
 };
 
 const numberFormat = new Intl.NumberFormat('zh-CN');
@@ -83,81 +97,151 @@ export default function MetricsHistoryPanel({ load, defaultMinutes = 60 }: Metri
   const samples: SyncMetricsSample[] = series?.samples ?? [];
   const latest = series?.latest;
 
-  const baseOption = useMemo<EChartsOption>(() => ({
-    backgroundColor: colors.surface,
-    textStyle: { color: colors.text },
-    grid: { left: 56, right: 16, top: 32, bottom: 28 },
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross', lineStyle: { color: colors.muted } },
-      backgroundColor: darkMode ? '#1a1a19' : '#fcfcfb',
-      borderColor: colors.grid,
+  const baseOption = useMemo<EChartsOption>(
+    () => ({
+      backgroundColor: colors.surface,
       textStyle: { color: colors.text },
-    },
-    xAxis: {
-      type: 'category',
-      boundaryGap: false,
-      data: samples.map(sample => timeLabel(sample.sampledAt)),
-      axisLine: { lineStyle: { color: colors.grid } },
-      axisLabel: { color: colors.muted, hideOverlap: true },
-      axisTick: { show: false },
-    },
-    yAxis: {
-      type: 'value',
-      min: 0,
-      splitLine: { lineStyle: { color: colors.grid } },
-      axisLabel: { color: colors.muted },
-    },
-  }), [colors, darkMode, samples]);
+      grid: { left: 56, right: 16, top: 32, bottom: 28 },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross', lineStyle: { color: colors.muted } },
+        backgroundColor: darkMode ? '#1a1a19' : '#fcfcfb',
+        borderColor: colors.grid,
+        textStyle: { color: colors.text }
+      },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: samples.map(sample => timeLabel(sample.sampledAt)),
+        axisLine: { lineStyle: { color: colors.grid } },
+        axisLabel: { color: colors.muted, hideOverlap: true },
+        axisTick: { show: false }
+      },
+      yAxis: {
+        type: 'value',
+        min: 0,
+        splitLine: { lineStyle: { color: colors.grid } },
+        axisLabel: { color: colors.muted }
+      }
+    }),
+    [colors, darkMode, samples]
+  );
 
-  const throughputOption = useMemo<EChartsOption>(() => ({
-    ...baseOption,
-    legend: { top: 0, right: 0, textStyle: { color: colors.text }, icon: 'roundRect', itemWidth: 14, itemHeight: 3 },
-    yAxis: { ...(baseOption.yAxis as object), name: '行/秒', nameTextStyle: { color: colors.muted, align: 'right' } },
-    series: [
-      // Sink first (solid), source on top (dashed): when the pipeline is caught up the two
-      // rates coincide, and the dash pattern keeps both identities visible.
-      { name: '目标提交', type: 'line', showSymbol: false, symbolSize: 8, lineStyle: { width: 2 }, itemStyle: { color: colors.sink }, data: samples.map(sample => sample.sinkQps ?? null), connectNulls: false },
-      { name: '源端读取', type: 'line', showSymbol: false, symbolSize: 8, lineStyle: { width: 2, type: 'dashed' }, itemStyle: { color: colors.source }, data: samples.map(sample => sample.sourceQps ?? null), connectNulls: false },
-    ],
-  }), [baseOption, colors, samples]);
+  const throughputOption = useMemo<EChartsOption>(
+    () => ({
+      ...baseOption,
+      legend: { top: 0, right: 0, textStyle: { color: colors.text }, icon: 'roundRect', itemWidth: 14, itemHeight: 3 },
+      yAxis: { ...(baseOption.yAxis as object), name: '行/秒', nameTextStyle: { color: colors.muted, align: 'right' } },
+      series: [
+        // Sink first (solid), source on top (dashed): when the pipeline is caught up the two
+        // rates coincide, and the dash pattern keeps both identities visible.
+        {
+          name: '目标提交',
+          type: 'line',
+          showSymbol: false,
+          symbolSize: 8,
+          lineStyle: { width: 2 },
+          itemStyle: { color: colors.sink },
+          data: samples.map(sample => sample.sinkQps ?? null),
+          connectNulls: false
+        },
+        {
+          name: '源端读取',
+          type: 'line',
+          showSymbol: false,
+          symbolSize: 8,
+          lineStyle: { width: 2, type: 'dashed' },
+          itemStyle: { color: colors.source },
+          data: samples.map(sample => sample.sourceQps ?? null),
+          connectNulls: false
+        }
+      ]
+    }),
+    [baseOption, colors, samples]
+  );
 
-  const backlogOption = useMemo<EChartsOption>(() => ({
-    ...baseOption,
-    yAxis: { ...(baseOption.yAxis as object), name: '行', minInterval: 1, nameTextStyle: { color: colors.muted, align: 'right' } },
-    series: [
-      { name: '待提交行数', type: 'line', showSymbol: false, symbolSize: 8, lineStyle: { width: 2 }, itemStyle: { color: colors.source }, areaStyle: { opacity: 0.08 }, data: samples.map(sample => sample.backlogRows ?? null), connectNulls: false },
-    ],
-  }), [baseOption, colors, samples]);
+  const backlogOption = useMemo<EChartsOption>(
+    () => ({
+      ...baseOption,
+      yAxis: {
+        ...(baseOption.yAxis as object),
+        name: '行',
+        minInterval: 1,
+        nameTextStyle: { color: colors.muted, align: 'right' }
+      },
+      series: [
+        {
+          name: '待提交行数',
+          type: 'line',
+          showSymbol: false,
+          symbolSize: 8,
+          lineStyle: { width: 2 },
+          itemStyle: { color: colors.source },
+          areaStyle: { opacity: 0.08 },
+          data: samples.map(sample => sample.backlogRows ?? null),
+          connectNulls: false
+        }
+      ]
+    }),
+    [baseOption, colors, samples]
+  );
 
-  const lagOption = useMemo<EChartsOption>(() => ({
-    ...baseOption,
-    yAxis: { ...(baseOption.yAxis as object), name: '秒', nameTextStyle: { color: colors.muted, align: 'right' } },
-    series: [
-      { name: '端到端延迟', type: 'line', showSymbol: false, symbolSize: 8, lineStyle: { width: 2 }, itemStyle: { color: colors.source }, areaStyle: { opacity: 0.08 }, data: samples.map(sample => sample.cdcLagSeconds ?? null), connectNulls: false },
-    ],
-  }), [baseOption, colors, samples]);
+  const lagOption = useMemo<EChartsOption>(
+    () => ({
+      ...baseOption,
+      yAxis: { ...(baseOption.yAxis as object), name: '秒', nameTextStyle: { color: colors.muted, align: 'right' } },
+      series: [
+        {
+          name: '端到端延迟',
+          type: 'line',
+          showSymbol: false,
+          symbolSize: 8,
+          lineStyle: { width: 2 },
+          itemStyle: { color: colors.source },
+          areaStyle: { opacity: 0.08 },
+          data: samples.map(sample => sample.cdcLagSeconds ?? null),
+          connectNulls: false
+        }
+      ]
+    }),
+    [baseOption, colors, samples]
+  );
 
   const hasLag = samples.some(sample => sample.cdcLagSeconds != null);
 
   return (
     <Space orientation="vertical" size={12} style={{ width: '100%' }}>
       <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
-        <Radio.Group optionType="button" size="small" options={windowOptions} value={minutes} onChange={event => setMinutes(event.target.value)} />
+        <Radio.Group
+          optionType="button"
+          size="small"
+          options={windowOptions}
+          value={minutes}
+          onChange={event => setMinutes(event.target.value)}
+        />
         <Space size={8}>
           <Typography.Text type="secondary">{latest ? `最近采样 ${latest.sampledAt}` : '尚无采样'}</Typography.Text>
-          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh()}>刷新</Button>
+          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh()}>
+            刷新
+          </Button>
         </Space>
       </Space>
       {latest && (
         <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }}>
-          <Descriptions.Item label="阶段"><Tag>{latest.phase === 'SNAPSHOT' ? '全量快照' : latest.phase === 'CDC' ? 'CDC 增量' : latest.phase || '-'}</Tag>{latest.engineStatus}</Descriptions.Item>
+          <Descriptions.Item label="阶段">
+            <Tag>
+              {latest.phase === 'SNAPSHOT' ? '全量快照' : latest.phase === 'CDC' ? 'CDC 增量' : latest.phase || '-'}
+            </Tag>
+            {latest.engineStatus}
+          </Descriptions.Item>
           <Descriptions.Item label="源端已读取">{formatCount(latest.sourceReceivedCount)} 行</Descriptions.Item>
           <Descriptions.Item label="目标已提交">{formatCount(latest.sinkCommittedCount)} 行</Descriptions.Item>
           <Descriptions.Item label="源端吞吐">{formatRate(latest.sourceQps)}</Descriptions.Item>
           <Descriptions.Item label="目标吞吐">{formatRate(latest.sinkQps)}</Descriptions.Item>
           <Descriptions.Item label="积压">{formatCount(latest.backlogRows)} 行</Descriptions.Item>
-          {latest.cdcLagSeconds != null && <Descriptions.Item label="端到端延迟">{formatLag(latest.cdcLagSeconds)}</Descriptions.Item>}
+          {latest.cdcLagSeconds != null && (
+            <Descriptions.Item label="端到端延迟">{formatLag(latest.cdcLagSeconds)}</Descriptions.Item>
+          )}
         </Descriptions>
       )}
       <Spin spinning={loading && !series}>
@@ -169,10 +253,12 @@ export default function MetricsHistoryPanel({ load, defaultMinutes = 60 }: Metri
             <ReactECharts option={throughputOption} notMerge style={{ height: 220 }} />
             <Typography.Text strong>积压（源端已读取 − 目标已提交，行）</Typography.Text>
             <ReactECharts option={backlogOption} notMerge style={{ height: 180 }} />
-            {hasLag && <>
-              <Typography.Text strong>端到端延迟（秒）</Typography.Text>
-              <ReactECharts option={lagOption} notMerge style={{ height: 180 }} />
-            </>}
+            {hasLag && (
+              <>
+                <Typography.Text strong>端到端延迟（秒）</Typography.Text>
+                <ReactECharts option={lagOption} notMerge style={{ height: 180 }} />
+              </>
+            )}
           </Space>
         )}
       </Spin>
