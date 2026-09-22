@@ -38,4 +38,6 @@ public class SyncTaskGroupItem {
     private LocalDateTime lastCheckTime;
     private String lastCheckMessage;
     private String lastError;
+    /** Status the alert notifier last raised a notice for ("" when none is open). */
+    private String alertedStatus;
 }

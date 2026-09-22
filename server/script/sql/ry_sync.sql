@@ -67,6 +67,7 @@ create table if not exists ds_sync_task
     kafka_last_broker_ack_time datetime default null comment 'Kafka 最近 broker 确认时间',
     kafka_lag_seconds bigint default null comment 'Kafka 源事件到 broker 确认延迟秒数',
     last_error    varchar(2000)  default null comment '最近错误',
+    alerted_status varchar(32)   default '' comment '告警通知器最近通知过的状态（空为无未处理告警）',
     create_dept   bigint         default null comment '创建部门',
     create_by     bigint         default null comment '创建者',
     create_time   datetime       default null comment '创建时间',

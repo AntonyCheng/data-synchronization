@@ -36,4 +36,6 @@ public class SyncTaskGroup extends BaseEntity {
     private String lastCheckpointTime;
     private String lastCheckpointStatus;
     private String lastError;
+    /** Status the alert notifier last raised a notice for ("" when none is open). */
+    private String alertedStatus;
 }

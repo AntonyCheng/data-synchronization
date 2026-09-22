@@ -3,6 +3,7 @@ package org.dromara.sync.mapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
+import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemVo;
 
@@ -21,6 +22,19 @@ public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupIte
     default SyncTaskGroupItem selectOneOfGroup(Long groupId, Long itemId) {
         SyncTaskGroupItem item = selectById(itemId);
         return item != null && groupId.equals(item.getGroupId()) ? item : null;
+    }
+
+    /** Items the alert notifier must look at: isolated / DDL-blocked, or still carrying an open alert marker. */
+    default List<SyncTaskGroupItem> selectAlertCandidates() {
+        return selectList(new LambdaQueryWrapper<SyncTaskGroupItem>()
+            .in(SyncTaskGroupItem::getStatus, SyncStatus.FAILED, SyncStatus.DDL_BLOCKED)
+            .or(w -> w.isNotNull(SyncTaskGroupItem::getAlertedStatus).ne(SyncTaskGroupItem::getAlertedStatus, "")));
+    }
+
+    default int updateAlertedStatus(Long itemId, String alertedStatus) {
+        return update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
+            .eq(SyncTaskGroupItem::getItemId, itemId)
+            .set(SyncTaskGroupItem::getAlertedStatus, alertedStatus));
     }
 
     /** Nulls the checkpoint columns of one item (see SyncTaskMapper#clearCheckpoint). */

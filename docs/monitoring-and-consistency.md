@@ -26,6 +26,12 @@ Kafka 目标的桥接 worker 运行在后端进程内。`KafkaBridgeReconciler` 
 
 raw topic 只有一个分区，所以多个实例的 worker 加入同一 consumer group 时只有一个实际消费，其余待命；某实例崩溃后 Kafka 在下一次 rebalance 把分区交给幸存实例，平台不需要额外协调。启动失败（典型是输出 topic 不存在）每个 owner 只告警一次，恢复时再记一条。
 
+## 状态告警（消息中心）
+
+`SyncAlertNotifier` 每 `sync.alerts.interval-ms`（30 秒）扫描一次：单表任务进入 `FAILED` / `REINITIALIZE_REQUIRED`、任务组进入 `FAILED` / `REINITIALIZE_REQUIRED` / `DEGRADED`、存活任务组（`RUNNING` / `DEGRADED`）内的表项进入 `FAILED` / `DDL_BLOCKED` 时，通过 RuoYi 消息中心（`MessageService.publishAll`：写入 `sys_message` 系统分组 + SSE/WebSocket 推送给所有在线用户）发一条通知，正文为「对象 + 状态 + `last_error`」，`path` 指向任务 / 任务组页面，`data.title = 数据同步告警`，`data.level` 为 `error`（失败、需重新初始化）或 `warning`（降级、结构阻塞），前端据此弹红 / 黄色提示。
+
+状态机不调用通知器。每行有 `alerted_status` 列记录"最近通知过的状态"：状态与之相同不再通知，离开告警集合时清空，再次进入才会再通知——所以一次失败无论经由引擎轮询、调度器、DDL 检查还是人工操作到达，都只通知一次；标记落库，重启和多实例都不会重复。任务组本身失败时不再为组内每张表单独通知。`sync.alerts.enabled=false` 关闭。
+
 ## 数据核对
 
 `POST /sync/task/{id}/check` 默认执行源表和目标表 `COUNT(*)`，也支持通过请求体选择同步键范围分块核对：
@@ -44,4 +50,4 @@ raw topic 只有一个分区，所以多个实例的 worker 加入同一 consume
 
 ## MVP 边界
 
-本阶段不引入主动告警、自动 DDL 修复；指标历史只保留原始采样，不做聚合归档。
+本阶段不引入自动 DDL 修复和邮件 / 短信等外部告警通道（告警只进消息中心）；指标历史只保留原始采样，不做聚合归档。

@@ -7,7 +7,14 @@ import { useUserStore } from '@/stores/userStore';
 import { getToken } from '@/utils/auth';
 import { appEnv } from '@/utils/env';
 import { getReadMessageIds } from '@/utils/messageRead';
-import { parsePushMessage, resolveNoticeGroup, resolveNoticeTitle, shouldAppendNotice } from '@/utils/pushMessage';
+import {
+  noticeLevelOf,
+  noticeTitleOf,
+  parsePushMessage,
+  resolveNoticeGroup,
+  resolveNoticeTitle,
+  shouldAppendNotice
+} from '@/utils/pushMessage';
 
 let eventSource: EventSource | undefined;
 let webSocket: WebSocket | undefined;
@@ -51,7 +58,7 @@ function appendNotice(raw: string) {
   const payload = parsePushMessage(raw);
   if (!shouldAppendNotice(payload)) return;
 
-  const title = resolveNoticeTitle(payload);
+  const title = noticeTitleOf(payload.data) ?? resolveNoticeTitle(payload);
   const notice: NoticeItem = {
     messageId: payload.messageId || `${payload.type || 'message'}:${payload.timestamp || Date.now()}`,
     category: resolveNoticeGroup(payload),
@@ -67,7 +74,8 @@ function appendNotice(raw: string) {
     time: formatNoticeTime(payload.timestamp)
   };
   useNoticeStore.getState().addNotice(notice);
-  notification.success({ message: title, description: notice.message, duration: 3 });
+  const level = noticeLevelOf(payload.data);
+  notification[level]({ message: title, description: notice.message, duration: level === 'success' ? 3 : 8 });
 }
 
 function handlePushMessage(raw: string) {

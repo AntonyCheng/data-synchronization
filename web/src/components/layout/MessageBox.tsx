@@ -7,6 +7,7 @@ import type { MessageVO } from '@/api/system/message/types';
 import { getMessageBox } from '@/api/system/message';
 import { useNoticeStore, type NoticeItem } from '@/stores/noticeStore';
 import { getReadMessageIds, markMessageRead, markMessageReadBatch } from '@/utils/messageRead';
+import { noticeTitleOf } from '@/utils/pushMessage';
 import { isHttp } from '@/utils/ruoyi';
 
 type MessageCategory = 'system' | 'notice' | 'workflow';
@@ -134,7 +135,7 @@ export default function MessageBox({ userId }: MessageBoxProps) {
               renderItem={item => (
                 <List.Item className="message-box-item" onClick={() => readMessage(item)}>
                   <div className="message-box-item-main">
-                    <div className="message-box-item-title">{item.title || '消息'}</div>
+                    <div className="message-box-item-title">{noticeTitleOf(item.data) ?? item.title ?? '消息'}</div>
                     <div className="message-box-item-message">{item.message}</div>
                     {item.content && <div className="message-box-item-content">{item.content}</div>}
                     <div className="message-box-item-time">{item.time || formatTime(item.createTime)}</div>

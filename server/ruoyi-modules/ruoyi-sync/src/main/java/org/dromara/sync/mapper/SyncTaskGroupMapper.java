@@ -1,6 +1,7 @@
 package org.dromara.sync.mapper;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTaskGroup;
@@ -27,6 +28,19 @@ public interface SyncTaskGroupMapper extends BaseMapperPlus<SyncTaskGroup, SyncT
         return selectCount(new LambdaQueryWrapper<SyncTaskGroup>()
             .in(SyncTaskGroup::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING, SyncStatus.DEGRADED)
             .and(w -> w.eq(SyncTaskGroup::getSourceId, sourceId).or().eq(SyncTaskGroup::getTargetId, sourceId)));
+    }
+
+    /** Groups the alert notifier must look at: in an alertable state, or still carrying an open alert marker. */
+    default List<SyncTaskGroup> selectAlertCandidates() {
+        return selectList(new LambdaQueryWrapper<SyncTaskGroup>()
+            .in(SyncTaskGroup::getStatus, SyncStatus.FAILED, SyncStatus.REINITIALIZE_REQUIRED, SyncStatus.DEGRADED)
+            .or(w -> w.isNotNull(SyncTaskGroup::getAlertedStatus).ne(SyncTaskGroup::getAlertedStatus, "")));
+    }
+
+    default int updateAlertedStatus(Long groupId, String alertedStatus) {
+        return update(null, new LambdaUpdateWrapper<SyncTaskGroup>()
+            .eq(SyncTaskGroup::getGroupId, groupId)
+            .set(SyncTaskGroup::getAlertedStatus, alertedStatus));
     }
 
     /** Groups that still have live table jobs (RUNNING / DEGRADED) and so need DDL checks. */

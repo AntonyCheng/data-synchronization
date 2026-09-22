@@ -74,3 +74,13 @@ export function resolveNoticeTitle(payload: PushMessagePayload) {
   if (group === NOTICE_GROUP.WORKFLOW) return '工作流消息';
   return '系统消息';
 }
+
+/** A producer may name its own title (e.g. 数据同步告警) in data.title; otherwise the category's. */
+export function noticeTitleOf(data?: Record<string, unknown> | null) {
+  return typeof data?.title === 'string' && data.title ? data.title : undefined;
+}
+
+/** data.level = error | warning turns the toast red / amber; anything else is the framework's green. */
+export function noticeLevelOf(data?: Record<string, unknown> | null): 'success' | 'warning' | 'error' {
+  return data?.level === 'error' ? 'error' : data?.level === 'warning' ? 'warning' : 'success';
+}
