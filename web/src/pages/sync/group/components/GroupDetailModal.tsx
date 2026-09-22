@@ -102,16 +102,24 @@ export default function GroupDetailModal({
       resume: resumeSyncTaskGroup,
       stop: stopSyncTaskGroup
     }[action];
-    const result = await request(detail.groupId);
-    message.success(result.data.message);
-    await reloadDetail(detail.groupId);
+    // A refused action still moves the group (a failed start isolates its tables), so the
+    // console reloads either way - otherwise it keeps offering buttons for a stale status.
+    try {
+      const result = await request(detail.groupId);
+      message.success(result.data.message);
+    } finally {
+      await reloadDetail(detail.groupId);
+    }
   };
 
   const discover = async () => {
     if (!detail) return;
-    const result = await discoverSyncTaskGroupTables(detail.groupId);
-    message.success(result.data.message);
-    await reloadDetail(detail.groupId);
+    try {
+      const result = await discoverSyncTaskGroupTables(detail.groupId);
+      message.success(result.data.message);
+    } finally {
+      await reloadDetail(detail.groupId);
+    }
   };
 
   const validate = async () => {
@@ -138,10 +146,13 @@ export default function GroupDetailModal({
 
   const checkData = async () => {
     if (!detail) return;
-    const result = await checkSyncTaskGroupData(detail.groupId);
-    setDataCheckResult(result.data);
-    await reloadDetail(detail.groupId);
-    message.success(result.data.message);
+    try {
+      const result = await checkSyncTaskGroupData(detail.groupId);
+      setDataCheckResult(result.data);
+      message.success(result.data.message);
+    } finally {
+      await reloadDetail(detail.groupId);
+    }
   };
 
   const remove = async () => {
@@ -162,10 +173,13 @@ export default function GroupDetailModal({
       cancelText: '取消',
       onOk: async () => {
         if (!detail) return;
-        const result = await reinitializeSyncTaskGroupItem(detail.groupId, itemId);
-        message.success(result.data.message);
-        await reloadDetail(detail.groupId);
-        if (ddlResult) await ddlCheck(detail.groupId);
+        try {
+          const result = await reinitializeSyncTaskGroupItem(detail.groupId, itemId);
+          message.success(result.data.message);
+          if (ddlResult) await ddlCheck(detail.groupId);
+        } finally {
+          await reloadDetail(detail.groupId);
+        }
       }
     });
 

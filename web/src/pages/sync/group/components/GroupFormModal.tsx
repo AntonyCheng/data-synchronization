@@ -295,10 +295,12 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
         <Form.List name="items">
           {(fields, { add, remove }) => (
             <Space direction="vertical" style={{ width: '100%' }} size={8}>
-              {fields.map(field => {
+              {/* key is destructured out: spreading it into each Form.Item gave every control
+                  in a row the same React key (antd's Form.List field carries it). */}
+              {fields.map(({ key, ...field }) => {
                 const metadata = itemMetadata[String(field.name)];
                 return (
-                  <div key={field.key} style={{ borderBottom: '1px solid #f0f0f0', paddingBottom: 12 }}>
+                  <div key={key} style={{ borderBottom: '1px solid #f0f0f0', paddingBottom: 12 }}>
                     <Space align="start" wrap>
                       <Form.Item {...field} name={[field.name, 'sourceDatabase']} hidden>
                         <Input />
