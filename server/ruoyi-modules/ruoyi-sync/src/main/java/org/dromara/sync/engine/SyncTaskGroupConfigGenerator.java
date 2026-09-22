@@ -1,4 +1,4 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.engine;
 
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
@@ -8,13 +8,17 @@ import org.dromara.sync.domain.SyncTaskGroupItem;
 
 import java.util.List;
 
-/** Generates one safe single-table engine document per selected table. */
-final class SyncTaskGroupConfigGenerator {
+/**
+ * Task groups run one SeaTunnel job per table item. Each item is projected onto a
+ * {@link SyncTask} view so the single-table generator produces its document; the group
+ * preview simply concatenates them.
+ */
+public final class SyncTaskGroupConfigGenerator {
 
     private SyncTaskGroupConfigGenerator() {
     }
 
-    static GeneratedConfig generate(SyncTaskGroup group, List<SyncTaskGroupItem> items,
+    public static GeneratedConfig generate(SyncTaskGroup group, List<SyncTaskGroupItem> items,
                                     DataSource source, DataSource target, SeaTunnelProperties properties) {
         StringBuilder config = new StringBuilder();
         StringBuilder redacted = new StringBuilder();
@@ -29,13 +33,14 @@ final class SyncTaskGroupConfigGenerator {
         return new GeneratedConfig("ds-group-" + group.getGroupId() + "-v" + group.getConfigVersion(), config.toString(), redacted.toString());
     }
 
-    static SeaTunnelJobConfigGenerator.GeneratedConfig generateItem(SyncTaskGroup group, SyncTaskGroupItem item,
+    public static SeaTunnelJobConfigGenerator.GeneratedConfig generateItem(SyncTaskGroup group, SyncTaskGroupItem item,
                                                                       DataSource source, DataSource target,
                                                                       SeaTunnelProperties properties) {
         return SeaTunnelJobConfigGenerator.generate(toTask(group, item), source, target, properties);
     }
 
-    static SyncTask toTask(SyncTaskGroup group, SyncTaskGroupItem item) {
+    /** Projects a group + item onto the single-table task shape the generator and Kafka bridge consume. */
+    public static SyncTask toTask(SyncTaskGroup group, SyncTaskGroupItem item) {
         SyncTask task = new SyncTask();
         task.setTaskId(item.getItemId());
         task.setTaskName(group.getGroupName() + " / " + item.getSourceTable());
@@ -57,6 +62,6 @@ final class SyncTaskGroupConfigGenerator {
         return task;
     }
 
-    record GeneratedConfig(String jobName, String config, String redactedConfig) {
+    public record GeneratedConfig(String jobName, String config, String redactedConfig) {
     }
 }

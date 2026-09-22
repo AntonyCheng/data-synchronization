@@ -1,23 +1,26 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.kafka;
 
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
-import org.springframework.stereotype.Service;
+import org.dromara.sync.support.SyncColumnSelectionValidator;
+import org.dromara.sync.support.SyncText;
+import org.dromara.sync.support.TableNames;
+import org.springframework.stereotype.Component;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -39,8 +42,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Slf4j
 @RequiredArgsConstructor
-@Service
-class KafkaTaskBridgeService {
+@Component
+public class KafkaTaskBridgeService {
 
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     private final KafkaEventNormalizer normalizer;
@@ -53,26 +56,19 @@ class KafkaTaskBridgeService {
         return thread;
     });
 
-    void start(SyncTask task, DataSource target) {
-        start(task, target, null, true);
-    }
-
-    void start(SyncTask task, DataSource target, String sourceDatabase) {
+    /** Bridge for a platform task; publish metrics are persisted onto its ds_sync_task row. */
+    public void start(SyncTask task, DataSource target, String sourceDatabase) {
         start(task, target, sourceDatabase, true);
     }
 
     /** Task-group items publish the same event contract but do not map to ds_sync_task metrics. */
-    void startGroupItem(SyncTask task, DataSource target) {
-        start(task, target, null, false);
-    }
-
-    void startGroupItem(SyncTask task, DataSource target, String sourceDatabase) {
+    public void startGroupItem(SyncTask task, DataSource target, String sourceDatabase) {
         start(task, target, sourceDatabase, false);
     }
 
     private void start(SyncTask task, DataSource target, String sourceDatabase, boolean persistTaskMetrics) {
         if (task == null || task.getTaskId() == null) throw new ServiceException("Kafka 桥接任务不能为空");
-        if (target == null || !"KAFKA".equalsIgnoreCase(target.getSourceType())) {
+        if (!DataSourceType.isKafka(target)) {
             throw new ServiceException("Kafka 桥接目标数据源无效");
         }
         if (StringUtils.isBlank(task.getTargetTable())) throw new ServiceException("Kafka topic 不能为空");
@@ -86,19 +82,19 @@ class KafkaTaskBridgeService {
         workers.compute(task.getTaskId(), (taskId, existing) -> {
             if (existing != null && existing.isRunning()) return existing;
             if (existing != null) existing.close();
-            Worker worker = new Worker(taskId, bootstrapServers(target), rawTopic(task), task.getTargetTable(),
+            Worker worker = new Worker(taskId, KafkaAdminClients.bootstrapServers(target), rawTopic(task), task.getTargetTable(),
                 task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
             worker.future = executor.submit(worker);
             return worker;
         });
     }
 
-    void stop(Long taskId) {
+    public void stop(Long taskId) {
         Worker worker = workers.remove(taskId);
         if (worker != null) worker.close();
     }
 
-    boolean isRunning(Long taskId) {
+    public boolean isRunning(Long taskId) {
         Worker worker = workers.get(taskId);
         return worker != null && worker.isRunning();
     }
@@ -109,22 +105,22 @@ class KafkaTaskBridgeService {
      * target auto-creates its tables. Single/multi-table groups keep the explicit wizard
      * step so the operator controls partitioning, so this is only called for DATABASE scope.
      */
-    void ensureTopicExists(DataSource target, String topic) {
+    public void ensureTopicExists(DataSource target, String topic) {
         if (StringUtils.isBlank(topic)) throw new ServiceException("Kafka topic 不能为空");
-        try (AdminClient admin = AdminClient.create(adminProperties(bootstrapServers(target)))) {
+        try (AdminClient admin = KafkaAdminClients.open(target)) {
             if (admin.listTopics().names().get(10, TimeUnit.SECONDS).contains(topic)) return;
             admin.createTopics(List.of(new NewTopic(topic, 1, (short) 1))).all().get(10, TimeUnit.SECONDS);
         } catch (Exception ex) {
             if (ex.getCause() instanceof TopicExistsException) return;
-            throw new ServiceException("自动创建 Kafka topic 失败：" + safeMessage(ex));
+            throw new ServiceException("自动创建 Kafka topic 失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
         }
     }
 
     /** The output topic is user-owned and must exist; only the private raw topic is created here. */
-    void ensureTopics(SyncTask task, DataSource target) {
-        String bootstrapServers = bootstrapServers(target);
+    private void ensureTopics(SyncTask task, DataSource target) {
+        String bootstrapServers = KafkaAdminClients.bootstrapServers(target);
         String rawTopic = rawTopic(task);
-        try (AdminClient admin = AdminClient.create(adminProperties(bootstrapServers))) {
+        try (AdminClient admin = AdminClient.create(KafkaAdminClients.adminProperties(bootstrapServers))) {
             Set<String> knownTopics = admin.listTopics().names().get(10, TimeUnit.SECONDS);
             if (!knownTopics.contains(task.getTargetTable())) {
                 throw new ServiceException("Kafka 目标 topic 不存在或当前凭证无查看权限：" + task.getTargetTable());
@@ -159,34 +155,15 @@ class KafkaTaskBridgeService {
         } catch (ServiceException ex) {
             throw ex;
         } catch (Exception ex) {
-            throw new ServiceException("Kafka topic 预检查失败：" + safeMessage(ex));
+            throw new ServiceException("Kafka topic 预检查失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
         }
     }
 
-    static String rawTopic(SyncTask task) {
+    /** Private, versioned raw Debezium topic the engine writes and this bridge consumes. */
+    public static String rawTopic(SyncTask task) {
         long taskId = task == null || task.getTaskId() == null ? 0L : task.getTaskId();
         int version = task == null || task.getConfigVersion() == null ? 1 : task.getConfigVersion();
         return "__ds_raw_" + taskId + "_v" + version;
-    }
-
-    static String bootstrapServers(DataSource target) {
-        if (target == null || StringUtils.isBlank(target.getHost()) || target.getPort() == null) {
-            throw new ServiceException("Kafka broker 地址不能为空");
-        }
-        return target.getHost() + ':' + target.getPort();
-    }
-
-    private static Properties adminProperties(String bootstrapServers) {
-        Properties properties = new Properties();
-        properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
-        properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 10000);
-        return properties;
-    }
-
-    private static String safeMessage(Exception ex) {
-        String message = ex.getMessage();
-        return StringUtils.isBlank(message) ? ex.getClass().getSimpleName() : message;
     }
 
     @PreDestroy
@@ -223,8 +200,7 @@ class KafkaTaskBridgeService {
             this.rawTopic = rawTopic;
             this.targetTopic = targetTopic;
             this.sourceDatabase = sourceDatabase;
-            int separator = sourceTable == null ? -1 : sourceTable.lastIndexOf('.');
-            this.sourceTable = separator < 0 ? sourceTable : sourceTable.substring(separator + 1);
+            this.sourceTable = TableNames.unqualified(sourceTable);
             this.keyFields = List.copyOf(keyFields);
             this.sourceColumns = List.copyOf(sourceColumns);
             this.persistTaskMetrics = persistTaskMetrics;

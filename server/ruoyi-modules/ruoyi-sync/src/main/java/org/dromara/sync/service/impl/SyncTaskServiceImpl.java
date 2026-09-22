@@ -10,6 +10,9 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.config.ResourceProtectionPolicy;
+import org.dromara.sync.constant.DataSourceType;
+import org.dromara.sync.constant.SyncMode;
+import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
@@ -19,20 +22,23 @@ import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskVo;
-import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.mapper.DataSourceMapper;
-import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.mapper.SyncTaskConfigVersionMapper;
-import org.dromara.sync.service.IDataSourceService;
+import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
+import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncTaskService;
-import org.springframework.stereotype.Service;
+import org.dromara.sync.support.SyncColumnSelectionValidator;
+import org.dromara.sync.support.TableNames;
 import org.springframework.scheduling.support.CronExpression;
+import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Synchronization task service implementation.
@@ -41,7 +47,13 @@ import java.util.Map;
 @Service
 public class SyncTaskServiceImpl implements ISyncTaskService {
 
-    private static final String DRAFT = "DRAFT";
+    private static final Set<String> EDITABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED, SyncStatus.REINITIALIZE_REQUIRED);
+    private static final Set<String> DELETABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED, SyncStatus.FAILED,
+        SyncStatus.FINISHED, SyncStatus.REINITIALIZE_REQUIRED);
+    private static final Set<String> FULL_DATA_MODES = Set.of("UPSERT", "OVERWRITE");
+    private static final Set<String> INCREMENTAL_STARTUP_MODES = Set.of("LATEST", "TIMESTAMP", "SPECIFIC");
+    private static final Set<String> SCHEDULE_MODES = Set.of("MANUAL", "ONCE", "CRON", "REALTIME");
+
     private final SyncTaskMapper syncTaskMapper;
     private final SyncTaskConfigVersionMapper configVersionMapper;
     private final DataSourceMapper dataSourceMapper;
@@ -71,7 +83,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     public Boolean insertByBo(SyncTaskBo bo) {
         SyncTask entity = MapstructUtils.convert(bo, SyncTask.class);
         normalizeAndValidate(entity);
-        entity.setStatus(DRAFT);
+        entity.setStatus(SyncStatus.DRAFT);
         entity.setConfigVersion(1);
         initializeSchedule(entity);
         boolean inserted = syncTaskMapper.insert(entity) > 0;
@@ -84,8 +96,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     public Boolean updateByBo(SyncTaskBo bo) {
         SyncTask current = syncTaskMapper.selectById(bo.getTaskId());
         if (current == null) throw new ServiceException("同步任务不存在");
-        if (!DRAFT.equals(current.getStatus()) && !"STOPPED".equals(current.getStatus())
-            && !"REINITIALIZE_REQUIRED".equals(current.getStatus())) {
+        if (current.getStatus() == null || !EDITABLE_STATUSES.contains(current.getStatus())) {
             throw new ServiceException("只有草稿或已停止任务允许修改");
         }
         SyncTask entity = MapstructUtils.convert(bo, SyncTask.class);
@@ -103,17 +114,12 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     public Boolean deleteById(Long taskId) {
         SyncTask current = syncTaskMapper.selectById(taskId);
         if (current == null) return false;
-        String status = StringUtils.defaultIfBlank(current.getStatus(), "").trim().toUpperCase(java.util.Locale.ROOT);
-        if (!DRAFT.equals(status) && !"STOPPED".equals(status)
-            && !"FAILED".equals(status) && !"FINISHED".equals(status)
-            && !"REINITIALIZE_REQUIRED".equals(status)) {
+        String status = StringUtils.defaultIfBlank(current.getStatus(), "").trim().toUpperCase(Locale.ROOT);
+        if (!DELETABLE_STATUSES.contains(status)) {
             throw new ServiceException("运行中的任务不能删除");
         }
         boolean deleted = syncTaskMapper.deleteById(taskId) > 0;
-        if (deleted) {
-            configVersionMapper.delete(new LambdaQueryWrapper<SyncTaskConfigVersion>()
-                .eq(SyncTaskConfigVersion::getTaskId, taskId));
-        }
+        if (deleted) configVersionMapper.deleteByTaskId(taskId);
         return deleted;
     }
 
@@ -127,7 +133,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         result.setSource(source == null ? ConnectionTestResult.failure("源数据源不存在") : dataSourceService.testConnection(source.getSourceId(), null));
         result.setTarget(target == null ? ConnectionTestResult.failure("目标数据源不存在") : dataSourceService.testConnection(target.getSourceId(), null));
         if (source != null && target != null && result.getSource().isSuccess() && result.getTarget().isSuccess()) {
-            if (!"FULL".equalsIgnoreCase(task.getSyncMode())) {
+            if (!SyncMode.isFull(task.getSyncMode())) {
                 result.setCdcPrecheck(metadataService.checkMysqlCdc(source.getSourceId()));
             }
             result.setTargetCompatibility(metadataService.checkTargetCompatibility(taskId));
@@ -153,45 +159,51 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         DataSource source = dataSourceMapper.selectById(entity.getSourceId());
         DataSource target = dataSourceMapper.selectById(entity.getTargetId());
         if (source == null || target == null) throw new ServiceException("源端或目标端数据源不存在");
-        if (!"MYSQL".equalsIgnoreCase(source.getSourceType())) throw new ServiceException("MVP 源端必须是 MySQL");
-        if (!java.util.Set.of("POSTGRESQL", "MYSQL", "KAFKA").contains(StringUtils.defaultIfBlank(target.getSourceType(), "").toUpperCase())) {
+        if (!DataSourceType.isMysql(source)) throw new ServiceException("MVP 源端必须是 MySQL");
+        if (!DataSourceType.isSupportedTarget(target.getSourceType())) {
             throw new ServiceException("当前任务目标端必须是 PostgreSQL、MySQL 或 Kafka");
         }
-        if ("POSTGRESQL".equalsIgnoreCase(target.getSourceType()) && StringUtils.isBlank(entity.getTargetSchema())) entity.setTargetSchema("public");
-        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) entity.setTargetSchema(null);
-        if (StringUtils.isBlank(entity.getSyncMode())) entity.setSyncMode("FULL_CDC");
-        if (!java.util.Set.of("FULL", "INCREMENTAL", "FULL_CDC").contains(entity.getSyncMode().toUpperCase())) {
-            throw new ServiceException("不支持的同步模式：" + entity.getSyncMode());
+        boolean kafkaTarget = DataSourceType.isKafka(target);
+        if (DataSourceType.isPostgres(target) && StringUtils.isBlank(entity.getTargetSchema())) {
+            entity.setTargetSchema(TableNames.DEFAULT_POSTGRES_SCHEMA);
         }
-        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
+        if (kafkaTarget) entity.setTargetSchema(null);
+        entity.setSyncMode(SyncMode.normalize(entity.getSyncMode()));
+        if (kafkaTarget) {
             entity.setFullDataMode(null);
             entity.setKafkaOutputFormat(KafkaOutputFormat.parse(entity.getKafkaOutputFormat()).name());
         } else {
             entity.setKafkaOutputFormat(null);
-            if (StringUtils.isBlank(entity.getFullDataMode())) entity.setFullDataMode("UPSERT");
-            if (!java.util.Set.of("UPSERT", "OVERWRITE").contains(entity.getFullDataMode().toUpperCase())) {
-                throw new ServiceException("不支持的全量目标数据模式：" + entity.getFullDataMode());
-            }
-            if ("INCREMENTAL".equalsIgnoreCase(entity.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) {
-                throw new ServiceException("纯增量任务不能使用覆盖刷新模式");
-            }
-            if ("FULL_CDC".equalsIgnoreCase(entity.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) {
-                throw new ServiceException("全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 仅支持全量任务使用原子覆盖；请改用合并（upsert）或创建纯全量任务");
-            }
+            normalizeFullDataMode(entity);
         }
         normalizeIncrementalStartup(entity);
         if (StringUtils.isBlank(entity.getDdlPolicy())) entity.setDdlPolicy("FAIL");
         DataSourceMetadataVo metadata = metadataService.queryTableMetadata(source.getSourceId(), source.getDatabaseName(),
-            unqualifiedTable(entity.getSourceTable()));
+            TableNames.unqualified(entity.getSourceTable()));
         SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(metadata,
             entity.getSelectedColumns(), entity.getSyncKeyColumns());
         entity.setSelectedColumns(SyncColumnSelectionValidator.serialize(selection.selectedColumns()));
         entity.setSyncKeyColumns(SyncColumnSelectionValidator.serialize(selection.syncKeyColumns()));
-        if (("KAFKA".equalsIgnoreCase(target.getSourceType()) || !"FULL".equalsIgnoreCase(entity.getSyncMode())) && selection.syncKeyColumns().isEmpty()) {
+        if ((kafkaTarget || !SyncMode.isFull(entity.getSyncMode())) && selection.syncKeyColumns().isEmpty()) {
             throw new ServiceException("源表没有可靠同步键，只能创建全量任务");
         }
         resourceProtectionPolicy.applyDefaultsAndValidate(entity);
         normalizeSchedule(entity);
+    }
+
+    /** Relational targets only: UPSERT (default) or the FULL-only atomic OVERWRITE. */
+    private static void normalizeFullDataMode(SyncTask entity) {
+        if (StringUtils.isBlank(entity.getFullDataMode())) entity.setFullDataMode("UPSERT");
+        if (!FULL_DATA_MODES.contains(entity.getFullDataMode().toUpperCase(Locale.ROOT))) {
+            throw new ServiceException("不支持的全量目标数据模式：" + entity.getFullDataMode());
+        }
+        if (!"OVERWRITE".equalsIgnoreCase(entity.getFullDataMode())) return;
+        if (SyncMode.INCREMENTAL.equalsIgnoreCase(entity.getSyncMode())) {
+            throw new ServiceException("纯增量任务不能使用覆盖刷新模式");
+        }
+        if (SyncMode.FULL_CDC.equalsIgnoreCase(entity.getSyncMode())) {
+            throw new ServiceException("全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 仅支持全量任务使用原子覆盖；请改用合并（upsert）或创建纯全量任务");
+        }
     }
 
     private void initializeSchedule(SyncTask entity) {
@@ -203,7 +215,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     }
 
     private void normalizeIncrementalStartup(SyncTask entity) {
-        if (!"INCREMENTAL".equalsIgnoreCase(entity.getSyncMode())) {
+        if (!SyncMode.INCREMENTAL.equalsIgnoreCase(entity.getSyncMode())) {
             entity.setIncrementalStartupMode("LATEST");
             entity.setIncrementalStartupTimestamp(null);
             entity.setIncrementalStartupBinlogFile(null);
@@ -211,8 +223,8 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
             return;
         }
 
-        String mode = StringUtils.defaultIfBlank(entity.getIncrementalStartupMode(), "LATEST").toUpperCase();
-        if (!java.util.Set.of("LATEST", "TIMESTAMP", "SPECIFIC").contains(mode)) {
+        String mode = StringUtils.defaultIfBlank(entity.getIncrementalStartupMode(), "LATEST").toUpperCase(Locale.ROOT);
+        if (!INCREMENTAL_STARTUP_MODES.contains(mode)) {
             throw new ServiceException("不支持的纯增量启动位点策略：" + mode);
         }
         entity.setIncrementalStartupMode(mode);
@@ -245,30 +257,30 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     }
 
     private void normalizeSchedule(SyncTask entity) {
-        String mode = StringUtils.defaultIfBlank(entity.getScheduleMode(), "ONCE").toUpperCase();
-        if (!java.util.Set.of("MANUAL", "ONCE", "CRON", "REALTIME").contains(mode)) {
+        String mode = StringUtils.defaultIfBlank(entity.getScheduleMode(), "ONCE").toUpperCase(Locale.ROOT);
+        if (!SCHEDULE_MODES.contains(mode)) {
             throw new ServiceException("不支持的调度模式：" + mode);
         }
         entity.setScheduleMode(mode);
         if ("CRON".equals(mode)) {
             if (StringUtils.isBlank(entity.getCronExpression())) throw new ServiceException("Cron 调度必须填写表达式");
+            CronExpression cron;
             try {
-                CronExpression.parse(entity.getCronExpression());
+                cron = CronExpression.parse(entity.getCronExpression());
             } catch (IllegalArgumentException ex) {
                 throw new ServiceException("Cron 表达式无效：" + ex.getMessage());
             }
-            entity.setNextRunTime(CronExpression.parse(entity.getCronExpression()).next(LocalDateTime.now()));
+            entity.setNextRunTime(cron.next(LocalDateTime.now()));
         } else if (!"ONCE".equals(mode)) {
             entity.setCronExpression(null);
             entity.setNextRunTime(null);
         }
     }
 
-    private static String unqualifiedTable(String tableReference) {
-        int separator = tableReference == null ? -1 : tableReference.lastIndexOf('.');
-        return separator < 0 ? tableReference : tableReference.substring(separator + 1);
-    }
-
+    /**
+     * Snapshot of the semantic (checkpoint-relevant) configuration, deliberately excluding
+     * status, engine ids and credentials. A checkpoint is bound to the version that produced it.
+     */
     private void persistConfigVersion(SyncTask task) {
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("taskName", task.getTaskName());

@@ -1,14 +1,13 @@
 package org.dromara.sync.service;
 
-import org.dromara.sync.domain.vo.SyncTaskDataCheckResult;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.bo.SyncTaskDataCheckRequest;
+import org.dromara.sync.domain.vo.SyncTaskDataCheckResult;
 
-/** Compares source and target row counts for a synchronization task. */
+/** Read-only source/target row-count reconciliation. */
 public interface IDataConsistencyService {
 
-    SyncTaskDataCheckResult check(Long taskId);
-
+    /** Checks one task and persists the outcome into its {@code last_check_*} columns. */
     SyncTaskDataCheckResult check(Long taskId, SyncTaskDataCheckRequest request);
 
     /**

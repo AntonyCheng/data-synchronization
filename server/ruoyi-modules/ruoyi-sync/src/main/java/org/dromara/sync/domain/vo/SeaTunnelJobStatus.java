@@ -1,14 +1,15 @@
 package org.dromara.sync.domain.vo;
 
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 
 import java.io.Serial;
-import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /** Platform-safe projection of a SeaTunnel job and its latest checkpoint. */
 @Data
-public class SeaTunnelJobStatus implements Serializable {
+@EqualsAndHashCode(callSuper = true)
+public class SeaTunnelJobStatus extends EngineJobMetrics {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -27,13 +28,4 @@ public class SeaTunnelJobStatus implements Serializable {
     private LocalDateTime kafkaLastSourceEventTime;
     private LocalDateTime kafkaLastBrokerAckTime;
     private Long kafkaLagSeconds;
-    private String phase;
-    private Long sourceReceivedCount;
-    private Long sinkCommittedCount;
-    private Long sourceReceivedBytes;
-    private Long sinkCommittedBytes;
-    private Double sourceQps;
-    private Double sinkQps;
-    private Long cdcLagSeconds;
-    private String metricsMessage;
 }

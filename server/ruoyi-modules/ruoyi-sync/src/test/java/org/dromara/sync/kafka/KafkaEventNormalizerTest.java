@@ -1,4 +1,4 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.kafka;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
@@ -66,9 +66,8 @@ class KafkaEventNormalizerTest {
     void producerEnvelopeContainsPrdFields() {
         JsonNode raw = event("d", "{\"id\":7,\"name\":\"gone\"}", null, 1000);
         KafkaEventNormalizer.NormalizedEvent normalized = normalizer.normalize(List.of(raw), 0, List.of("id")).getFirst();
-        KafkaEventProducer producer = new KafkaEventProducer(mapper);
 
-        JsonNode envelope = producer.toEnvelope(normalized);
+        JsonNode envelope = new KafkaEventSerializer(mapper).envelope(normalized);
 
         assertEquals("DELETE", envelope.path("op").asText());
         assertEquals("7", envelope.path("key").path("id").asText());

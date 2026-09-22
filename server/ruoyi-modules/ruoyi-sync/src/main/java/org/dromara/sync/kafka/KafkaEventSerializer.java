@@ -1,7 +1,8 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.kafka;
 
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.sync.domain.KafkaOutputFormat;
+import org.springframework.stereotype.Component;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -20,7 +21,8 @@ import java.util.Locale;
  * The Kafka record key is format-independent: the producer always attaches the
  * sync-key JSON, so partitioning and per-key ordering stay identical across formats.
  */
-class KafkaEventSerializer {
+@Component
+public class KafkaEventSerializer {
 
     /** OGG op_ts is a UTC datetime string with fixed microsecond digits (ms padded to 6). */
     private static final DateTimeFormatter OGG_OP_TS =
@@ -28,11 +30,11 @@ class KafkaEventSerializer {
 
     private final JsonMapper jsonMapper;
 
-    KafkaEventSerializer(JsonMapper jsonMapper) {
+    public KafkaEventSerializer(JsonMapper jsonMapper) {
         this.jsonMapper = jsonMapper;
     }
 
-    String serialize(KafkaOutputFormat format, KafkaEventNormalizer.NormalizedEvent event) {
+    public String serialize(KafkaOutputFormat format, KafkaEventNormalizer.NormalizedEvent event) {
         return switch (format) {
             case ENVELOPE -> envelope(event).toString();
             case CANAL_JSON -> canalJson(event).toString();
@@ -43,7 +45,7 @@ class KafkaEventSerializer {
     }
 
     /** The platform PRD event envelope. */
-    ObjectNode envelope(KafkaEventNormalizer.NormalizedEvent event) {
+    public ObjectNode envelope(KafkaEventNormalizer.NormalizedEvent event) {
         ObjectNode envelope = jsonMapper.createObjectNode();
         envelope.put("op", event.op());
         envelope.set("key", event.key());

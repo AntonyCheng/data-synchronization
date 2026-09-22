@@ -36,6 +36,9 @@ public class SyncTaskGroupBo implements Serializable {
     private Integer snapshotParallelism;
     private Integer sourceConnectionLimit;
 
+    /** Query-only: list filter. Ignored on create / edit. */
+    private String status;
+
     @Valid
     private List<SyncTaskGroupItemBo> items = new ArrayList<>();
 }

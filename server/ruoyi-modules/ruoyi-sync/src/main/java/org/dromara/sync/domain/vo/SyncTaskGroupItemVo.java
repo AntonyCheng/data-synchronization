@@ -1,11 +1,21 @@
 package org.dromara.sync.domain.vo;
 
+import io.github.linpeilie.annotations.AutoMapper;
 import lombok.Data;
+import org.dromara.sync.domain.SyncTaskGroupItem;
 
+import java.io.Serial;
+import java.io.Serializable;
 import java.time.LocalDateTime;
 
+/** Table item of a task group. The persisted schema snapshot body is intentionally not exposed. */
 @Data
-public class SyncTaskGroupItemVo {
+@AutoMapper(target = SyncTaskGroupItem.class)
+public class SyncTaskGroupItemVo implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
     private Long itemId;
     private Long groupId;
     private String sourceDatabase;

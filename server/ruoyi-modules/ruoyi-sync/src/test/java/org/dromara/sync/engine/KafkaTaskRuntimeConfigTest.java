@@ -1,8 +1,10 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.engine;
 
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.kafka.KafkaAdminClients;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -39,7 +41,7 @@ class KafkaTaskRuntimeConfigTest {
 
     @Test
     void createsBrokerAddressFromKafkaDataSource() {
-        assertEquals("broker.example:9092", KafkaTaskBridgeService.bootstrapServers(kafka()));
+        assertEquals("broker.example:9092", KafkaAdminClients.bootstrapServers(kafka()));
     }
 
     @Test

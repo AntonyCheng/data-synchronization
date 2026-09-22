@@ -1,8 +1,12 @@
 package org.dromara.sync.service.impl;
 
-import com.baomidou.mybatisplus.core.toolkit.StringUtils;
 import lombok.RequiredArgsConstructor;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.errors.TopicExistsException;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
@@ -10,21 +14,21 @@ import org.dromara.sync.domain.vo.DataSourceCheckItemVo;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceIndexVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
-import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.domain.bo.KafkaTopicCreateBo;
 import org.dromara.sync.domain.vo.KafkaTopicVo;
+import org.dromara.sync.domain.vo.TargetCompatibilityVo;
+import org.dromara.sync.kafka.KafkaAdminClients;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
+import org.dromara.sync.support.JdbcUrls;
+import org.dromara.sync.support.SyncColumnSelectionValidator;
+import org.dromara.sync.support.SyncText;
+import org.dromara.sync.support.TableNames;
 import org.springframework.stereotype.Service;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.common.errors.TopicExistsException;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -38,7 +42,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -47,7 +50,6 @@ import java.util.stream.Collectors;
 @Service
 public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService {
 
-    private static final Set<String> SUPPORTED_TYPES = Set.of("MYSQL", "POSTGRESQL", "KAFKA");
     private static final Set<String> MYSQL_CDC_VARIABLES = Set.of(
         "log_bin", "binlog_format", "binlog_row_image", "gtid_mode", "binlog_expire_logs_seconds",
         "binlog_expire_logs_days", "time_zone", "system_time_zone"
@@ -59,9 +61,9 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     @Override
     public List<String> queryDatabases(Long sourceId) {
         DataSource source = requireSource(sourceId);
-        if ("KAFKA".equals(source.getSourceType())) throw new ServiceException("Kafka 数据源没有关系型数据库元数据");
+        if (DataSourceType.isKafka(source)) throw new ServiceException("Kafka 数据源没有关系型数据库元数据");
         try (Connection connection = openConnection(source, null)) {
-            if ("MYSQL".equals(source.getSourceType())) {
+            if (DataSourceType.isMysql(source)) {
                 List<String> databases = new ArrayList<>();
                 try (PreparedStatement statement = connection.prepareStatement(
                     "select schema_name from information_schema.schemata "
@@ -86,13 +88,13 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     @Override
     public List<String> queryTables(Long sourceId, String databaseName) {
         DataSource source = requireSource(sourceId);
-        if ("KAFKA".equals(source.getSourceType())) throw new ServiceException("Kafka 数据源没有关系型表元数据");
+        if (DataSourceType.isKafka(source)) throw new ServiceException("Kafka 数据源没有关系型表元数据");
         String database = StringUtils.isBlank(databaseName) ? source.getDatabaseName() : databaseName.trim();
         try (Connection connection = openConnection(source, database)) {
             DatabaseMetaData metadata = connection.getMetaData();
             List<String> tables = new ArrayList<>();
-            String catalog = "MYSQL".equals(source.getSourceType()) ? database : null;
-            String schema = "POSTGRESQL".equals(source.getSourceType()) ? defaultSchema(source) : null;
+            String catalog = DataSourceType.isMysql(source) ? database : null;
+            String schema = DataSourceType.isPostgres(source) ? defaultSchema(source) : null;
             try (ResultSet resultSet = metadata.getTables(catalog, schema, "%", new String[]{"TABLE"})) {
                 while (resultSet.next()) {
                     String table = resultSet.getString("TABLE_NAME");
@@ -114,13 +116,13 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     public DataSourceMetadataVo queryTableMetadata(Long sourceId, String databaseName, String schemaName, String tableName) {
         if (StringUtils.isBlank(tableName)) throw new ServiceException("表名不能为空");
         DataSource source = requireSource(sourceId);
-        if ("KAFKA".equals(source.getSourceType())) throw new ServiceException("Kafka 数据源没有关系型表元数据");
+        if (DataSourceType.isKafka(source)) throw new ServiceException("Kafka 数据源没有关系型表元数据");
         String database = StringUtils.isBlank(databaseName) ? source.getDatabaseName() : databaseName.trim();
         String table = tableName.trim();
         try (Connection connection = openConnection(source, database)) {
             DatabaseMetaData metadata = connection.getMetaData();
-            String catalog = "MYSQL".equals(source.getSourceType()) ? database : null;
-            String schema = "POSTGRESQL".equals(source.getSourceType())
+            String catalog = DataSourceType.isMysql(source) ? database : null;
+            String schema = DataSourceType.isPostgres(source)
                 ? (StringUtils.isBlank(schemaName) ? defaultSchema(source) : schemaName.trim()) : null;
             DataSourceMetadataVo result = new DataSourceMetadataVo();
             result.setSourceId(sourceId);
@@ -170,19 +172,17 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     private TargetCompatibilityVo checkTargetCompatibility(SyncTask task) {
         DataSource source = requireSource(task.getSourceId());
         DataSource target = requireSource(task.getTargetId());
-        if ("MYSQL".equals(source.getSourceType()) && "KAFKA".equals(target.getSourceType())) {
+        if (DataSourceType.isMysql(source) && DataSourceType.isKafka(target)) {
             return kafkaTargetCompatibility(task, source, target);
         }
-        if (!"MYSQL".equals(source.getSourceType())
-            || (!"POSTGRESQL".equals(target.getSourceType()) && !"MYSQL".equals(target.getSourceType()))) {
+        if (!DataSourceType.isMysql(source)
+            || (!DataSourceType.isPostgres(target) && !DataSourceType.isMysql(target))) {
             throw new ServiceException("MVP 目标兼容性检查仅支持 MySQL 到 PostgreSQL 或 MySQL");
         }
         TargetCompatibilityVo result = new TargetCompatibilityVo();
         result.setTaskId(task.getTaskId());
         result.setSourceTable(task.getSourceTable());
-        String targetTable = "MYSQL".equalsIgnoreCase(target.getSourceType())
-            ? task.getTargetTable() : qualifiedTargetName(task.getTargetSchema(), task.getTargetTable());
-        result.setTargetTable(targetTable);
+        result.setTargetTable(TableNames.display(target, task.getTargetSchema(), task.getTargetTable()));
         DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), source.getDatabaseName(), null, task.getSourceTable());
         SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(sourceMetadata,
             task.getSelectedColumns(), task.getSyncKeyColumns());
@@ -251,7 +251,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         int partitionCount = 0;
         String topicDetail = topicPresent ? task.getTargetTable() : "未填写";
         if (topicPresent) {
-            try (AdminClient admin = AdminClient.create(kafkaAdminProperties(target))) {
+            try (AdminClient admin = KafkaAdminClients.open(target)) {
                 var descriptions = admin.describeTopics(List.of(task.getTargetTable())).allTopicNames()
                     .get(10, TimeUnit.SECONDS);
                 var description = descriptions.get(task.getTargetTable());
@@ -282,7 +282,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     public List<KafkaTopicVo> listKafkaTopics(Long sourceId) {
         DataSource source = requireSource(sourceId);
         requireKafka(source);
-        try (AdminClient admin = AdminClient.create(kafkaAdminProperties(source))) {
+        try (AdminClient admin = KafkaAdminClients.open(source)) {
             List<String> names = new ArrayList<>(admin.listTopics().names().get(10, TimeUnit.SECONDS).stream()
                 .filter(name -> !name.startsWith("__ds_raw_"))
                 .toList());
@@ -301,7 +301,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
             }
             return result;
         } catch (Exception ex) {
-            throw new ServiceException("读取 Kafka topic 列表失败：" + metadataMessage(ex));
+            throw new ServiceException("读取 Kafka topic 列表失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
         }
     }
 
@@ -317,7 +317,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         short replicationFactor = bo.getReplicationFactor() == null ? 1 : bo.getReplicationFactor();
         if (partitions < 1 || partitions > 1000) throw new ServiceException("分区数必须在 1 到 1000 之间");
         if (replicationFactor < 1 || replicationFactor > 100) throw new ServiceException("副本数必须在 1 到 100 之间");
-        try (AdminClient admin = AdminClient.create(kafkaAdminProperties(source))) {
+        try (AdminClient admin = KafkaAdminClients.open(source)) {
             if (admin.listTopics().names().get(10, TimeUnit.SECONDS).contains(topicName)) {
                 throw new ServiceException("Kafka topic 已存在，请选择已有 topic 或更换名称");
             }
@@ -337,34 +337,21 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
             if (ex.getCause() instanceof TopicExistsException) {
                 throw new ServiceException("Kafka topic 已存在，请选择已有 topic 或更换名称");
             }
-            throw new ServiceException("创建 Kafka topic 失败：" + metadataMessage(ex));
+            throw new ServiceException("创建 Kafka topic 失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
         }
     }
 
     private static void requireKafka(DataSource source) {
-        if (!"KAFKA".equalsIgnoreCase(source.getSourceType())) {
+        if (!DataSourceType.isKafka(source)) {
             throw new ServiceException("该数据源不是 Kafka");
         }
-    }
-
-    private static String metadataMessage(Exception ex) {
-        String message = ex.getMessage();
-        return message == null || message.isBlank() ? ex.getClass().getSimpleName() : message;
-    }
-
-    private static Properties kafkaAdminProperties(DataSource source) {
-        Properties properties = new Properties();
-        properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, source.getHost() + ':' + source.getPort());
-        properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
-        properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 10000);
-        return properties;
     }
 
     private boolean tableExists(DataSource source, String schema, String table) {
         try (Connection connection = openConnection(source, source.getDatabaseName());
              ResultSet resultSet = connection.getMetaData().getTables(
-                 "MYSQL".equalsIgnoreCase(source.getSourceType()) ? source.getDatabaseName() : null,
-                 "MYSQL".equalsIgnoreCase(source.getSourceType()) ? null : schema,
+                 DataSourceType.isMysql(source) ? source.getDatabaseName() : null,
+                 DataSourceType.isMysql(source) ? null : schema,
                  table, new String[]{"TABLE"})) {
             return resultSet.next();
         } catch (SQLException ex) {
@@ -394,7 +381,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         // SeaTunnel JDBC binds MySQL JSON as a string. PostgreSQL json/jsonb columns
         // require an explicit cast, which the MVP generator does not emit; text
         // columns preserve the JSON payload without relying on an implicit cast.
-        if ("POSTGRESQL".equalsIgnoreCase(targetSourceType)
+        if (DataSourceType.POSTGRESQL.equalsIgnoreCase(targetSourceType)
             && "json".equals(sourceTypeName)
             && Set.of("json", "jsonb").contains(targetTypeName)) return false;
         boolean sourceBoolean = (Integer.valueOf(java.sql.Types.BIT).equals(source.getJdbcType())
@@ -429,17 +416,13 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         return String.valueOf(jdbcType);
     }
 
-    private String qualifiedTargetName(String schema, String table) {
-        return (StringUtils.isBlank(schema) ? "public" : schema.trim()) + "." + table;
-    }
-
     @Override
     public DataSourceCdcPrecheckVo checkMysqlCdc(Long sourceId) {
         DataSource source = requireSource(sourceId);
         DataSourceCdcPrecheckVo result = new DataSourceCdcPrecheckVo();
         result.setSourceId(sourceId);
         result.setSourceType(source.getSourceType());
-        if (!"MYSQL".equals(source.getSourceType())) {
+        if (!DataSourceType.isMysql(source)) {
             result.setPassed(false);
             result.setMessage("只有 MySQL 数据源支持 binlog CDC 前置检查");
             result.setChecks(List.of(new DataSourceCheckItemVo("source_type", "源端类型", true, false,
@@ -539,7 +522,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     }
 
     private void readDatabaseEncoding(Connection connection, DataSource source, String database, DataSourceMetadataVo result) throws SQLException {
-        if ("MYSQL".equals(source.getSourceType())) {
+        if (DataSourceType.isMysql(source)) {
             try (PreparedStatement statement = connection.prepareStatement(
                 "select default_character_set_name, default_collation_name from information_schema.schemata where schema_name = ?")) {
                 statement.setString(1, database);
@@ -615,23 +598,13 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         if (sourceId == null) throw new ServiceException("数据源ID不能为空");
         DataSource source = dataSourceMapper.selectById(sourceId);
         if (source == null) throw new ServiceException("数据源不存在");
-        source.setSourceType(source.getSourceType() == null ? null : source.getSourceType().trim().toUpperCase(Locale.ROOT));
-        if (!SUPPORTED_TYPES.contains(source.getSourceType())) throw new ServiceException("暂不支持该数据源类型");
+        source.setSourceType(DataSourceType.normalize(source.getSourceType()));
+        if (source.getSourceType() == null || !DataSourceType.ALL.contains(source.getSourceType())) throw new ServiceException("暂不支持该数据源类型");
         return source;
     }
 
     private Connection openConnection(DataSource source, String database) throws SQLException {
-        String db = StringUtils.isBlank(database) ? source.getDatabaseName() : database;
-        String url;
-        if ("MYSQL".equals(source.getSourceType())) {
-            url = "jdbc:mysql://" + source.getHost() + ":" + source.getPort() + "/" + db
-                + "?connectTimeout=5000&socketTimeout=10000&useSSL=" + "1".equals(source.getSslEnabled())
-                + "&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai";
-        } else {
-            url = "jdbc:postgresql://" + source.getHost() + ":" + source.getPort() + "/" + db
-                + "?connectTimeout=5&socketTimeout=10&ssl=" + "1".equals(source.getSslEnabled());
-        }
-        return DriverManager.getConnection(url, source.getUsername(), source.getPassword());
+        return JdbcUrls.open(source, database, JdbcUrls.METADATA_SOCKET_TIMEOUT_SECONDS);
     }
 
     private String defaultSchema(DataSource source) {
@@ -643,7 +616,6 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     }
 
     private String safeMessage(Exception ex) {
-        String message = ex.getMessage();
-        return StringUtils.isBlank(message) ? "数据库连接或元数据读取失败" : message.replaceAll("(?i)(password|pwd)=[^&\\s]+", "$1=******");
+        return SyncText.safeMessage(ex, "数据库连接或元数据读取失败");
     }
 }

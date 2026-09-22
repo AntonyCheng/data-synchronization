@@ -3,31 +3,30 @@ package org.dromara.sync.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import org.apache.kafka.clients.admin.AdminClient;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.MapstructUtils;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.encrypt.properties.EncryptorProperties;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.bo.DataSourceBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceCredentialMigrationResult;
 import org.dromara.sync.domain.vo.DataSourceVo;
-import org.dromara.common.encrypt.properties.EncryptorProperties;
+import org.dromara.sync.kafka.KafkaAdminClients;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.service.IDataSourceService;
-import org.springframework.stereotype.Service;
+import org.dromara.sync.support.JdbcUrls;
 import org.springframework.beans.factory.ObjectProvider;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.springframework.stereotype.Service;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Locale;
-import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Data source service implementation.
@@ -36,7 +35,6 @@ import java.util.Set;
 @Service
 public class DataSourceServiceImpl implements IDataSourceService {
 
-    private static final Set<String> SUPPORTED_TYPES = Set.of("MYSQL", "POSTGRESQL", "KAFKA");
     private final DataSourceMapper dataSourceMapper;
     private final ObjectProvider<EncryptorProperties> encryptorProperties;
 
@@ -44,7 +42,7 @@ public class DataSourceServiceImpl implements IDataSourceService {
     public PageResult<DataSourceVo> queryPageList(DataSourceBo bo, PageQuery pageQuery) {
         LambdaQueryWrapper<DataSource> wrapper = new LambdaQueryWrapper<>();
         wrapper.like(StringUtils.isNotBlank(bo.getSourceName()), DataSource::getSourceName, bo.getSourceName())
-            .eq(StringUtils.isNotBlank(bo.getSourceType()), DataSource::getSourceType, normalizeType(bo.getSourceType()))
+            .eq(StringUtils.isNotBlank(bo.getSourceType()), DataSource::getSourceType, DataSourceType.normalize(bo.getSourceType()))
             .eq(StringUtils.isNotBlank(bo.getStatus()), DataSource::getStatus, bo.getStatus())
             .orderByDesc(DataSource::getSourceId);
         Page<DataSourceVo> page = dataSourceMapper.selectVoPage(pageQuery.build(), wrapper);
@@ -70,6 +68,7 @@ public class DataSourceServiceImpl implements IDataSourceService {
             throw new ServiceException("数据源不存在");
         }
         DataSource entity = MapstructUtils.convert(bo, DataSource.class);
+        // A blank password on edit keeps the stored (possibly encrypted) credential.
         if (StringUtils.isBlank(entity.getPassword())) {
             entity.setPassword(current.getPassword());
         }
@@ -91,8 +90,7 @@ public class DataSourceServiceImpl implements IDataSourceService {
                 return ConnectionTestResult.failure("数据源不存在");
             }
             if (request != null) {
-                DataSource requested = MapstructUtils.convert(request, DataSource.class);
-                mergeConnectionFields(entity, requested);
+                mergeConnectionFields(entity, MapstructUtils.convert(request, DataSource.class));
             }
         } else {
             entity = MapstructUtils.convert(request, DataSource.class);
@@ -100,18 +98,17 @@ public class DataSourceServiceImpl implements IDataSourceService {
         try {
             normalizeAndValidate(entity, true);
             Instant started = Instant.now();
-            if ("KAFKA".equals(entity.getSourceType())) {
-                try (AdminClient admin = AdminClient.create(kafkaProperties(entity))) {
-                    admin.describeCluster().nodes().get(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (DataSourceType.isKafka(entity)) {
+                try (AdminClient admin = KafkaAdminClients.open(entity)) {
+                    admin.describeCluster().nodes().get(5, TimeUnit.SECONDS);
                     return ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
                 }
             }
-            try (Connection ignored = DriverManager.getConnection(buildJdbcUrl(entity), entity.getUsername(), entity.getPassword())) {
+            try (Connection ignored = JdbcUrls.open(entity)) {
                 return ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
             }
         } catch (Exception ex) {
-            String message = StringUtils.isBlank(ex.getMessage()) ? "连接失败" : ex.getMessage();
-            return ConnectionTestResult.failure(message);
+            return ConnectionTestResult.failure(StringUtils.isBlank(ex.getMessage()) ? "连接失败" : ex.getMessage());
         }
     }
 
@@ -138,6 +135,23 @@ public class DataSourceServiceImpl implements IDataSourceService {
         return result;
     }
 
+    @Override
+    public DataSource requireById(Long sourceId, String side) {
+        if (sourceId == null) throw new ServiceException(side + "数据源不能为空");
+        DataSource source = dataSourceMapper.selectById(sourceId);
+        if (source == null) throw new ServiceException(side + "数据源不存在");
+        return source;
+    }
+
+    @Override
+    public DataSource requireUsable(Long sourceId, String side) {
+        DataSource source = requireById(sourceId, side);
+        if (!DataSourceType.isKafka(source) && StringUtils.isBlank(source.getPassword())) {
+            throw new ServiceException(side + "数据源密码未配置");
+        }
+        return source;
+    }
+
     private void mergeConnectionFields(DataSource target, DataSource request) {
         if (request == null) {
             return;
@@ -156,39 +170,16 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (entity == null) {
             throw new ServiceException("数据源参数不能为空");
         }
-        entity.setSourceType(normalizeType(entity.getSourceType()));
-        if (!SUPPORTED_TYPES.contains(entity.getSourceType())) {
+        entity.setSourceType(DataSourceType.normalize(entity.getSourceType()));
+        if (entity.getSourceType() == null || !DataSourceType.ALL.contains(entity.getSourceType())) {
             throw new ServiceException("仅支持 MySQL、PostgreSQL 和 Kafka 数据源");
         }
-        boolean kafka = "KAFKA".equals(entity.getSourceType());
+        boolean kafka = DataSourceType.isKafka(entity);
         if (StringUtils.isBlank(entity.getHost()) || entity.getPort() == null || (!kafka && (StringUtils.isBlank(entity.getDatabaseName())
             || StringUtils.isBlank(entity.getUsername()) || (passwordRequired && StringUtils.isBlank(entity.getPassword()))))) {
             throw new ServiceException("数据源连接参数不完整");
         }
         if (StringUtils.isBlank(entity.getSslEnabled())) entity.setSslEnabled("0");
         if (StringUtils.isBlank(entity.getStatus())) entity.setStatus("0");
-    }
-
-    private String normalizeType(String type) {
-        return StringUtils.isBlank(type) ? type : type.trim().toUpperCase(Locale.ROOT);
-    }
-
-    private String buildJdbcUrl(DataSource entity) {
-        String type = entity.getSourceType();
-        if ("MYSQL".equals(type)) {
-            return "jdbc:mysql://" + entity.getHost() + ":" + entity.getPort() + "/" + entity.getDatabaseName()
-                + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + "1".equals(entity.getSslEnabled())
-                + "&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai";
-        }
-        return "jdbc:postgresql://" + entity.getHost() + ":" + entity.getPort() + "/" + entity.getDatabaseName()
-            + "?connectTimeout=5&socketTimeout=5&ssl=" + "1".equals(entity.getSslEnabled());
-    }
-
-    private static java.util.Properties kafkaProperties(DataSource entity) {
-        java.util.Properties properties = new java.util.Properties();
-        properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, entity.getHost() + ':' + entity.getPort());
-        properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
-        properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 5000);
-        return properties;
     }
 }

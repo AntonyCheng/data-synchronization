@@ -1,4 +1,4 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.kafka;
 
 import org.dromara.common.core.exception.ServiceException;
 import org.springframework.stereotype.Component;

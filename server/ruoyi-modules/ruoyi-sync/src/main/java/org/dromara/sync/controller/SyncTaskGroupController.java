@@ -28,6 +28,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * Multi-table / whole-database task group API.
+ */
 @Validated
 @RequiredArgsConstructor
 @RestController
@@ -38,8 +41,8 @@ public class SyncTaskGroupController extends BaseController {
 
     @SaCheckPermission("sync:group:list")
     @GetMapping("/list")
-    public R<PageResult<SyncTaskGroupVo>> list(String groupName, String status, PageQuery pageQuery) {
-        return R.ok(groupService.queryPageList(groupName, status, pageQuery));
+    public R<PageResult<SyncTaskGroupVo>> list(SyncTaskGroupBo bo, PageQuery pageQuery) {
+        return R.ok(groupService.queryPageList(bo, pageQuery));
     }
 
     @SaCheckPermission("sync:group:query")
@@ -89,22 +92,30 @@ public class SyncTaskGroupController extends BaseController {
     @Log(title = "启动同步任务组", businessType = BusinessType.UPDATE)
     @RepeatSubmit()
     @PostMapping("/{groupId}/start")
-    public R<SyncTaskGroupOperationResult> start(@PathVariable Long groupId) { return R.ok(groupService.start(groupId)); }
+    public R<SyncTaskGroupOperationResult> start(@PathVariable Long groupId) {
+        return R.ok(groupService.start(groupId));
+    }
 
     @SaCheckPermission("sync:group:validate")
     @Log(title = "扫描同步任务组新表", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/discover")
-    public R<SyncTaskGroupOperationResult> discover(@PathVariable Long groupId) { return R.ok(groupService.discover(groupId)); }
+    public R<SyncTaskGroupOperationResult> discover(@PathVariable Long groupId) {
+        return R.ok(groupService.discover(groupId));
+    }
 
     @SaCheckPermission("sync:group:ddl-check")
     @Log(title = "同步任务组结构检查", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/ddl-check")
-    public R<SyncTaskGroupDdlCheckResult> checkDdl(@PathVariable Long groupId) { return R.ok(groupService.checkDdl(groupId)); }
+    public R<SyncTaskGroupDdlCheckResult> checkDdl(@PathVariable Long groupId) {
+        return R.ok(groupService.checkDdl(groupId));
+    }
 
     @SaCheckPermission("sync:group:check")
     @Log(title = "同步任务组数据核对", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/check")
-    public R<SyncTaskGroupDataCheckResult> checkData(@PathVariable Long groupId) { return R.ok(groupService.checkData(groupId)); }
+    public R<SyncTaskGroupDataCheckResult> checkData(@PathVariable Long groupId) {
+        return R.ok(groupService.checkData(groupId));
+    }
 
     @SaCheckPermission("sync:group:resume")
     @Log(title = "恢复同步任务组表项", businessType = BusinessType.UPDATE)
@@ -117,23 +128,31 @@ public class SyncTaskGroupController extends BaseController {
     @SaCheckPermission("sync:group:status")
     @Log(title = "刷新同步任务组状态", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/status")
-    public R<SyncTaskGroupStatus> status(@PathVariable Long groupId) { return R.ok(groupService.refreshStatus(groupId)); }
+    public R<SyncTaskGroupStatus> status(@PathVariable Long groupId) {
+        return R.ok(groupService.refreshStatus(groupId));
+    }
 
     @SaCheckPermission("sync:group:pause")
     @Log(title = "暂停同步任务组", businessType = BusinessType.UPDATE)
     @RepeatSubmit()
     @PostMapping("/{groupId}/pause")
-    public R<SyncTaskGroupOperationResult> pause(@PathVariable Long groupId) { return R.ok(groupService.pause(groupId)); }
+    public R<SyncTaskGroupOperationResult> pause(@PathVariable Long groupId) {
+        return R.ok(groupService.pause(groupId));
+    }
 
     @SaCheckPermission("sync:group:resume")
     @Log(title = "恢复同步任务组", businessType = BusinessType.UPDATE)
     @RepeatSubmit()
     @PostMapping("/{groupId}/resume")
-    public R<SyncTaskGroupOperationResult> resume(@PathVariable Long groupId) { return R.ok(groupService.resume(groupId)); }
+    public R<SyncTaskGroupOperationResult> resume(@PathVariable Long groupId) {
+        return R.ok(groupService.resume(groupId));
+    }
 
     @SaCheckPermission("sync:group:stop")
     @Log(title = "停止同步任务组", businessType = BusinessType.UPDATE)
     @RepeatSubmit()
     @PostMapping("/{groupId}/stop")
-    public R<SyncTaskGroupOperationResult> stop(@PathVariable Long groupId) { return R.ok(groupService.stop(groupId)); }
+    public R<SyncTaskGroupOperationResult> stop(@PathVariable Long groupId) {
+        return R.ok(groupService.stop(groupId));
+    }
 }

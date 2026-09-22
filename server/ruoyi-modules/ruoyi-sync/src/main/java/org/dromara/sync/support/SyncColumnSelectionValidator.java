@@ -1,4 +1,4 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.support;
 
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
@@ -14,12 +14,12 @@ import java.util.Locale;
 import java.util.Map;
 
 /** Validates the MVP's one-to-one column projection and reliable sync-key choice. */
-final class SyncColumnSelectionValidator {
+public final class SyncColumnSelectionValidator {
 
     private SyncColumnSelectionValidator() {
     }
 
-    static Selection validate(DataSourceMetadataVo metadata, String configuredColumns, String configuredKeyColumns) {
+    public static Selection validate(DataSourceMetadataVo metadata, String configuredColumns, String configuredKeyColumns) {
         if (metadata == null || metadata.getColumns() == null || metadata.getColumns().isEmpty()) {
             throw new ServiceException("源表没有可同步字段");
         }
@@ -44,7 +44,7 @@ final class SyncColumnSelectionValidator {
         return new Selection(List.copyOf(selected), List.copyOf(syncKeys));
     }
 
-    static List<String> parseColumns(String configuredColumns) {
+    public static List<String> parseColumns(String configuredColumns) {
         if (StringUtils.isBlank(configuredColumns)) return List.of();
         List<String> result = new ArrayList<>();
         for (String value : configuredColumns.split(",")) {
@@ -54,7 +54,7 @@ final class SyncColumnSelectionValidator {
         return result;
     }
 
-    static String serialize(Collection<String> columns) {
+    public static String serialize(Collection<String> columns) {
         return columns == null || columns.isEmpty() ? null : String.join(",", columns);
     }
 
@@ -107,6 +107,6 @@ final class SyncColumnSelectionValidator {
         return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
-    record Selection(List<String> selectedColumns, List<String> syncKeyColumns) {
+    public record Selection(List<String> selectedColumns, List<String> syncKeyColumns) {
     }
 }

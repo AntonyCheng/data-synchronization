@@ -134,9 +134,22 @@ keeps working unmodified. Data, checkpoints and logs live under the gitignored
 
 Table/column metadata is read on demand from source JDBC and **not persisted**.
 
+### Package layout
+
+| Package | Contents |
+|---|---|
+| `controller` / `service` / `service.impl` / `mapper` / `domain{,.bo,.vo}` | Standard RuoYi layering. `service.impl` holds only the six `*ServiceImpl` beans plus `SyncTaskScheduler`. |
+| `engine` | SeaTunnel adapter: `SeaTunnelRestClient`, `SeaTunnelJobConfigGenerator`, `SyncTaskGroupConfigGenerator`, `EngineJobStates` (engine→platform status mapping, recovery-boundary detection, metrics projection). |
+| `kafka` | Kafka-target runtime: `KafkaTaskBridgeService`, `KafkaEventNormalizer`, `KafkaEventSerializer`, `KafkaEventProducer`, `KafkaAdminClients`. |
+| `support` | Pure helpers shared by the services: `JdbcUrls` (platform-side JDBC), `SyncText` (SHA-256 / column-safe truncation / secret redaction), `TableNames`, `SyncColumnSelectionValidator`, `TableSchemaSnapshot` (DDL-drift snapshot + diff), `PostgresTableSwap` (FULL/OVERWRITE stage swap). |
+| `constant` | `SyncStatus`, `SyncMode`, `DataSourceType` — the persisted string vocabularies; use these instead of literals. |
+| `config` | `SeaTunnelProperties` (`sync.engine.*`), `ResourceProtectionPolicy`, `CredentialEncryptionValidator`. |
+
+Short wrapper queries live as `default` methods on the mappers (`selectActive()`, `selectByGroupId()`, `selectLatestOpen()`, …), not inline in services. Data-source lookups for in-process use go through `IDataSourceService.requireById` / `requireUsable` (the latter also rejects a relational source with no password configured).
+
 ### Key services (`service/impl/`)
 
-- `SeaTunnelJobServiceImpl` / `SyncTaskGroupServiceImpl` — lifecycle: preview → validate → start/status/pause/resume/stop, via `SeaTunnelRestClient`. Pause = `stop-job` with `isStopWithSavePoint=true`; resume = `submit-job` with `isStartWithSavePoint=true` reusing the original `jobId`.
+- `SeaTunnelJobServiceImpl` / `SyncTaskGroupServiceImpl` — lifecycle: preview → validate → start/status/pause/resume/stop, via `engine.SeaTunnelRestClient`. Pause = `stop-job` with `isStopWithSavePoint=true`; resume = `submit-job` with `isStartWithSavePoint=true` reusing the original `jobId`.
 - `SeaTunnelJobConfigGenerator` / `SyncTaskGroupConfigGenerator` — build the HOCON job config. The API-facing copy always has `password` replaced with `******`; the platform persists only a **SHA-256 fingerprint** of the real config, never its body. `server-id` is derived deterministically from task id. FULL mode's Jdbc source is a raw `SELECT`, so SeaTunnel infers target DDL from `ResultSetMetaData` — for MySQL→MySQL that can widen a bounded `VARCHAR` key to `TEXT` (rejected in a key), so the generator pre-creates the target by cloning the source's `SHOW CREATE TABLE` (FKs stripped) for a full-column selection, and sets `useInformationSchema=true` on the engine JDBC URL. MySQL→PostgreSQL is unaffected.
 - `DataSourceMetadataServiceImpl` — JDBC introspection: databases/tables/columns/keys/charset, CDC precheck, target compatibility.
 - `DataConsistencyServiceImpl` — read-only reconciliation: `COUNT(*)` mode, or `KEY_RANGE` block comparison for a single numeric sync key. Persists last result into `last_check_*` columns.

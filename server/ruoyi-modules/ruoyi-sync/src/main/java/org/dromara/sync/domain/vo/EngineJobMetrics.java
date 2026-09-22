@@ -1,0 +1,29 @@
+package org.dromara.sync.domain.vo;
+
+import lombok.Data;
+
+import java.io.Serial;
+import java.io.Serializable;
+
+/**
+ * Throughput counters SeaTunnel reports for a running job, plus the CDC lag derived from
+ * them. Shared shape of the single-task and task-group-item status projections.
+ */
+@Data
+public class EngineJobMetrics implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    /** SNAPSHOT while the engine is still in its initial load states, CDC afterwards. */
+    private String phase;
+    private Long sourceReceivedCount;
+    private Long sinkCommittedCount;
+    private Long sourceReceivedBytes;
+    private Long sinkCommittedBytes;
+    private Double sourceQps;
+    private Double sinkQps;
+    private Long cdcLagSeconds;
+    /** Set when the lag cannot be computed from what the engine returned. */
+    private String metricsMessage;
+}

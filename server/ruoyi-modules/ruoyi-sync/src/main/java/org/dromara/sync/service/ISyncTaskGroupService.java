@@ -11,9 +11,10 @@ import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 
+/** Multi-table / whole-database task group service. */
 public interface ISyncTaskGroupService {
 
-    PageResult<SyncTaskGroupVo> queryPageList(String groupName, String status, PageQuery pageQuery);
+    PageResult<SyncTaskGroupVo> queryPageList(SyncTaskGroupBo bo, PageQuery pageQuery);
 
     SyncTaskGroupVo queryById(Long groupId);
 

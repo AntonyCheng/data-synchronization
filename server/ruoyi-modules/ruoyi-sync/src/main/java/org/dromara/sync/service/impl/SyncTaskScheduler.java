@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.ISeaTunnelJobService;
@@ -31,7 +32,7 @@ public class SyncTaskScheduler {
         List<SyncTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<SyncTask>()
             .in(SyncTask::getScheduleMode, "ONCE", "CRON")
             .le(SyncTask::getNextRunTime, now)
-            .in(SyncTask::getStatus, "DRAFT", "STOPPED", "FINISHED", "RUNNING", "PAUSING"));
+            .in(SyncTask::getStatus, SyncStatus.DRAFT, SyncStatus.STOPPED, SyncStatus.FINISHED, SyncStatus.RUNNING, SyncStatus.PAUSING));
         for (SyncTask task : tasks) trigger(task, now);
     }
 
@@ -43,7 +44,7 @@ public class SyncTaskScheduler {
             if (!acquired) return;
             SyncTask current = taskMapper.selectById(task.getTaskId());
             if (current == null || current.getNextRunTime() == null || current.getNextRunTime().isAfter(now)) return;
-            if (List.of("RUNNING", "PAUSING").contains(current.getStatus())) {
+            if (SyncStatus.isActive(current.getStatus())) {
                 current.setLastSkipReason("上一次运行实例仍未结束，本次调度已跳过");
                 advance(current, now);
                 taskMapper.updateById(current);

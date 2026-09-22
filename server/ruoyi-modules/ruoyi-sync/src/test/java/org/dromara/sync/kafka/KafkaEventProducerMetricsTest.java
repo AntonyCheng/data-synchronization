@@ -1,5 +1,6 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.kafka;
 
+import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.junit.jupiter.api.Test;
@@ -23,7 +24,7 @@ class KafkaEventProducerMetricsTest {
     void persistsMetricsOnlyAfterTaskExists() {
         SyncTaskMapper mapper = mock(SyncTaskMapper.class);
         when(mapper.selectById(9L)).thenReturn(new SyncTask());
-        KafkaEventProducer producer = new KafkaEventProducer(JsonMapper.builder().build(), mapper);
+        KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()));
         KafkaEventNormalizer.NormalizedEvent event = new KafkaEventNormalizer.NormalizedEvent(
             "INSERT", JsonMapper.builder().build().createObjectNode().put("id", 1), null, null,
             "CDC", "source_db", "customers", "2026-08-31T00:00:00Z");
@@ -35,7 +36,7 @@ class KafkaEventProducerMetricsTest {
     void rejectsUnknownTaskBeforePublishing() {
         SyncTaskMapper mapper = mock(SyncTaskMapper.class);
         when(mapper.selectById(99L)).thenReturn(null);
-        KafkaEventProducer producer = new KafkaEventProducer(JsonMapper.builder().build(), mapper);
-        assertThrows(ServiceException.class, () -> producer.publishForTask(99L, "localhost:9092", "topic", List.of()));
+        KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()));
+        assertThrows(ServiceException.class, () -> producer.publishForTask(99L, "localhost:9092", "topic", List.of(), KafkaOutputFormat.ENVELOPE));
     }
 }

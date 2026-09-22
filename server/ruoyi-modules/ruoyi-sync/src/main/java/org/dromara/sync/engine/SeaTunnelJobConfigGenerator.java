@@ -1,68 +1,97 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.engine;
 
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.constant.DataSourceType;
+import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
+import org.dromara.sync.support.JdbcUrls;
+import org.dromara.sync.support.SyncColumnSelectionValidator;
+import org.dromara.sync.support.SyncText;
+import org.dromara.sync.support.TableNames;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
-/** Generates the MVP HOCON shape for MySQL -> PostgreSQL/MySQL/Kafka tasks. */
-final class SeaTunnelJobConfigGenerator {
+/**
+ * Generates the HOCON job document for a MySQL -> PostgreSQL/MySQL/Kafka task.
+ *
+ * <p>The generated text is fingerprinted (SHA-256) and persisted as {@code engine_config_hash};
+ * a task can only resume from its checkpoint while the regenerated config still hashes the
+ * same. Any change to the emitted bytes therefore invalidates every running task's resume
+ * path - keep output byte-stable unless that is intended.
+ */
+public final class SeaTunnelJobConfigGenerator {
+
+    private static final String SOURCE_TIME_ZONE = "Asia/Shanghai";
+
+    /**
+     * Each CDC config claims a {@code server-id} range of {@link #SERVER_ID_RANGE_WIDTH}
+     * consecutive values (see the {@code server-id = "X-(X+3)"} field). Bucketing by
+     * multiplying the modulo result by the range width - instead of adding it directly -
+     * guarantees two different buckets never produce overlapping ranges; the previous
+     * "5400 + taskId % 100000" scheme let adjacent task IDs (the common case for
+     * Snowflake IDs assigned to task-group items created in the same batch) claim
+     * overlapping ranges, which MySQL's replication protocol rejects as duplicate
+     * server IDs when both jobs connect concurrently.
+     */
+    private static final int SERVER_ID_RANGE_WIDTH = 4;
+    private static final long SERVER_ID_BUCKET_COUNT = 900_000L;
+    private static final int SERVER_ID_BASE = 10_000;
 
     private SeaTunnelJobConfigGenerator() {
     }
 
-    static GeneratedConfig generate(SyncTask task, DataSource source, DataSource target,
-                                    SeaTunnelProperties properties) {
-        requireType(source, "MYSQL", "源");
-        if (!Set.of("POSTGRESQL", "MYSQL", "KAFKA").contains(defaultValue(target.getSourceType(), "").toUpperCase())) {
+    public static GeneratedConfig generate(SyncTask task, DataSource source, DataSource target,
+                                           SeaTunnelProperties properties) {
+        if (!DataSourceType.isMysql(source)) throw new ServiceException("源数据源必须是 MYSQL");
+        if (!DataSourceType.isSupportedTarget(target.getSourceType())) {
             throw new ServiceException("目标数据源必须是 PostgreSQL、MySQL 或 Kafka");
         }
-        String syncMode = defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase();
-        if (!List.of("FULL", "INCREMENTAL", "FULL_CDC").contains(syncMode)) {
-            throw new ServiceException("不支持的同步模式：" + syncMode);
-        }
+        String syncMode = SyncMode.normalize(task.getSyncMode());
         if (StringUtils.isBlank(task.getSourceTable()) || StringUtils.isBlank(task.getTargetTable())) {
             throw new ServiceException("源表和目标表不能为空");
         }
 
         List<String> primaryKeys = resolveSyncKeys(source, task);
         List<String> selectedColumns = resolveSelectedColumns(source, task);
-        if (primaryKeys.isEmpty() && !"FULL".equals(syncMode)) {
+        boolean full = SyncMode.FULL.equals(syncMode);
+        if (primaryKeys.isEmpty() && !full) {
             throw new ServiceException("源表没有主键，无法生成可恢复的 CDC 任务");
         }
 
-        String sourceTable = qualifiedSourceTable(source.getDatabaseName(), task.getSourceTable());
+        String sourceTable = TableNames.qualified(source.getDatabaseName(), task.getSourceTable());
         String configuredTargetTable = overwriteTargetTable(task, syncMode);
-        String targetTable = "KAFKA".equalsIgnoreCase(target.getSourceType()) || "MYSQL".equalsIgnoreCase(target.getSourceType())
-            ? configuredTargetTable : qualifiedTargetTable(defaultValue(task.getTargetSchema(), "public"), configuredTargetTable);
+        boolean kafkaTarget = DataSourceType.isKafka(target);
+        String targetTable = kafkaTarget || DataSourceType.isMysql(target)
+            ? configuredTargetTable
+            : TableNames.qualified(defaultValue(task.getTargetSchema(), TableNames.DEFAULT_POSTGRES_SCHEMA), configuredTargetTable);
         String jobName = "ds-task-" + task.getTaskId();
-        int serverId = stableServerId(task.getTaskId());
         String config;
-        if ("KAFKA".equalsIgnoreCase(target.getSourceType())) {
-            config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, properties);
+        if (kafkaTarget) {
+            config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, syncMode, properties);
+        } else if (full) {
+            ensureMysqlFullModeTargetTable(task, source, target, targetTable, selectedColumns);
+            config = buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties);
         } else {
-            if ("FULL".equals(syncMode)) {
-                ensureMysqlFullModeTargetTable(task, source, target, targetTable, selectedColumns);
-            }
-            config = "FULL".equals(syncMode)
-                ? buildFullConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, properties)
-                : buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, serverId, syncMode, properties);
+            config = buildCdcConfig(task, source, target, sourceTable, targetTable, primaryKeys, selectedColumns, syncMode, properties);
         }
         return new GeneratedConfig(jobName, sourceTable, targetTable, primaryKeys, config, redact(config));
     }
@@ -73,7 +102,7 @@ final class SeaTunnelJobConfigGenerator {
      * must still expose the eventual target without mutating the draft.
      */
     private static String overwriteTargetTable(SyncTask task, String syncMode) {
-        if (!"FULL".equals(syncMode) || !"OVERWRITE".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT"))) {
+        if (!SyncMode.FULL.equals(syncMode) || !"OVERWRITE".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT"))) {
             return task.getTargetTable();
         }
         if (StringUtils.isNotBlank(task.getOverwriteStageTable())) {
@@ -84,16 +113,11 @@ final class SeaTunnelJobConfigGenerator {
         return "__ds_stage_" + taskId + "_v" + version;
     }
 
+    // ------------------------------------------------------------------ document builders
+
     private static String buildCdcConfig(SyncTask task, DataSource source, DataSource target,
-                                      String sourceTable, String targetTable, List<String> primaryKeys,
-                                      List<String> selectedColumns,
-                                      int serverId, String syncMode, SeaTunnelProperties properties) {
-        String sourceDatabase = quote(source.getDatabaseName());
-        String sourceJdbc = quote(engineMysqlJdbcUrl(source, properties));
-        String targetJdbc = quote(engineTargetJdbcUrl(target, properties));
-        int snapshotParallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
-        int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
-        long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
+                                         String sourceTable, String targetTable, List<String> primaryKeys,
+                                         List<String> selectedColumns, String syncMode, SeaTunnelProperties properties) {
         int sourceConnectionLimit = positive(task.getSourceConnectionLimit(), properties.getSourceConnectionLimit());
         String sourceOutput = "ds_source_" + task.getTaskId();
         String projectedOutput = "ds_projected_" + task.getTaskId();
@@ -106,37 +130,16 @@ final class SeaTunnelJobConfigGenerator {
         boolean needsProjection = !isFullColumnSelection(source, task.getSourceTable(), selectedColumns);
         String sinkInput = needsProjection ? projectedOutput : sourceOutput;
         StringBuilder builder = new StringBuilder(1800);
-        builder.append("env {\n")
-            .append("  job.mode = \"STREAMING\"\n")
-            .append("  parallelism = ").append(snapshotParallelism).append("\n")
-            .append("  checkpoint.interval = ").append(Math.max(1000, properties.getCheckpointIntervalMs())).append("\n")
-            .append("  checkpoint.timeout = 60000\n")
-            .append("  read_limit.rows_per_second = ").append(rowsPerSecond).append("\n")
-            .append("  read_limit.bytes_per_second = ").append(bytesPerSecond).append("\n")
-            .append("}\n\nsource {\n  MySQL-CDC {\n")
-            .append("    url = ").append(sourceJdbc).append('\n')
-            .append("    username = ").append(quote(source.getUsername())).append('\n')
-            .append("    password = ").append(quote(source.getPassword())).append('\n')
-            .append("    database-names = [").append(sourceDatabase).append("]\n")
-            .append("    table-names = [").append(quote(sourceTable)).append("]\n")
-            .append("    server-id = \"").append(serverId).append('-').append(serverId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
-            .append("    server-time-zone = \"Asia/Shanghai\"\n")
-            .append("    connection.pool.size = ").append(sourceConnectionLimit).append("\n")
+        appendStreamingEnv(builder, task, properties);
+        appendMysqlCdcSourceHead(builder, task, source, sourceTable, properties);
+        builder.append("    connection.pool.size = ").append(sourceConnectionLimit).append("\n")
             .append(startupOptions(task, syncMode))
             .append("    exactly_once = false\n")
             .append("    schema-changes.enabled = false\n")
             .append("    plugin_output = ").append(quote(sourceOutput)).append("\n")
-            .append("  }\n}\n\nsink {\n  Jdbc {\n")
-            .append("    url = ").append(targetJdbc).append('\n')
-            .append("    driver = \"").append(targetDriver(target)).append("\"\n")
-            .append("    username = ").append(quote(target.getUsername())).append('\n')
-            .append("    password = ").append(quote(target.getPassword())).append('\n')
-            .append("    database = ").append(quote(target.getDatabaseName())).append('\n')
-            .append("    table = ").append(quote(targetTable)).append('\n')
-            .append("    primary_keys = ").append(stringList(primaryKeys)).append('\n')
-            .append("    generate_sink_sql = true\n")
-            .append("    schema_save_mode = \"CREATE_SCHEMA_WHEN_NOT_EXIST\"\n")
-            .append("    data_save_mode = \"APPEND_DATA\"\n")
+            .append("  }\n}\n\nsink {\n  Jdbc {\n");
+        appendJdbcSinkHead(builder, target, targetTable, primaryKeys, properties);
+        builder.append("    data_save_mode = \"APPEND_DATA\"\n")
             .append("    enable_upsert = true\n")
             .append("    batch_size = 100\n")
             .append("    max_retries = 5\n")
@@ -146,38 +149,18 @@ final class SeaTunnelJobConfigGenerator {
     }
 
     private static String buildKafkaConfig(SyncTask task, DataSource source, DataSource target,
-                                           String sourceTable, List<String> primaryKeys,
+                                           String sourceTable, List<String> primaryKeys, String syncMode,
                                            SeaTunnelProperties properties) {
-        String mode = defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase();
         if (primaryKeys.isEmpty()) throw new ServiceException("Kafka 任务必须配置可靠同步键");
-        if ("FULL".equals(mode)) return buildKafkaFullConfig(task, source, target, sourceTable, primaryKeys, properties);
-        if (!List.of("FULL_CDC", "INCREMENTAL").contains(mode)) throw new ServiceException("不支持的 Kafka 同步模式：" + mode);
-        String rawTopic = KafkaTaskBridgeService.rawTopic(task);
-        int parallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
-        int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
-        long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
-        int kafkaServerId = stableServerId(task.getTaskId());
+        if (SyncMode.FULL.equals(syncMode)) return buildKafkaFullConfig(task, source, target, sourceTable, properties);
         StringBuilder builder = new StringBuilder(1600);
-        builder.append("env {\n")
-            .append("  job.mode = \"STREAMING\"\n")
-            .append("  parallelism = ").append(parallelism).append("\n")
-            .append("  checkpoint.interval = ").append(Math.max(1000, properties.getCheckpointIntervalMs())).append("\n")
-            .append("  checkpoint.timeout = 60000\n")
-            .append("  read_limit.rows_per_second = ").append(rowsPerSecond).append("\n")
-            .append("  read_limit.bytes_per_second = ").append(bytesPerSecond).append("\n")
-            .append("}\n\nsource {\n  MySQL-CDC {\n")
-            .append("    url = ").append(quote(engineMysqlJdbcUrl(source, properties))).append('\n')
-            .append("    username = ").append(quote(source.getUsername())).append('\n')
-            .append("    password = ").append(quote(source.getPassword())).append('\n')
-            .append("    database-names = [").append(quote(source.getDatabaseName())).append("]\n")
-            .append("    table-names = [").append(quote(sourceTable)).append("]\n")
-            .append("    server-id = \"").append(kafkaServerId).append('-').append(kafkaServerId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
-            .append("    server-time-zone = \"Asia/Shanghai\"\n")
-            .append(startupOptions(task, defaultValue(task.getSyncMode(), "FULL_CDC").toUpperCase()))
+        appendStreamingEnv(builder, task, properties);
+        appendMysqlCdcSourceHead(builder, task, source, sourceTable, properties);
+        builder.append(startupOptions(task, syncMode))
             .append("    exactly_once = false\n")
             .append("    schema-changes.enabled = false\n")
             .append("  }\n}\n\nsink {\n  Kafka {\n")
-            .append("    topic = ").append(quote(rawTopic)).append('\n')
+            .append("    topic = ").append(quote(KafkaTaskBridgeService.rawTopic(task))).append('\n')
             .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
             .append("    format = \"DEBEZIUM_JSON\"\n")
             .append("    partition_key_fields = ").append(stringList(primaryKeys)).append('\n')
@@ -188,43 +171,110 @@ final class SeaTunnelJobConfigGenerator {
     }
 
     private static String buildKafkaFullConfig(SyncTask task, DataSource source, DataSource target,
-                                               String sourceTable, List<String> primaryKeys,
-                                               SeaTunnelProperties properties) {
-        String rawTopic = KafkaTaskBridgeService.rawTopic(task);
-        int parallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
-        int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
-        long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
+                                               String sourceTable, SeaTunnelProperties properties) {
         List<String> selected = resolveSelectedColumns(source, task);
-        return "env {\n"
-            + "  job.mode = \"BATCH\"\n"
-            + "  parallelism = " + parallelism + "\n"
-            + "  read_limit.rows_per_second = " + rowsPerSecond + "\n"
-            + "  read_limit.bytes_per_second = " + bytesPerSecond + "\n"
-            + "}\n\nsource {\n  Jdbc {\n"
-            + "    url = " + quote(fullJdbcSourceUrl(source, properties)) + "\n"
-            + "    driver = \"com.mysql.cj.jdbc.Driver\"\n"
-            + "    user = " + quote(source.getUsername()) + "\n"
-            + "    password = " + quote(source.getPassword()) + "\n"
-            + "    query = " + quote("SELECT " + selectColumns(selected) + " FROM " + quoteQualifiedIdentifier(sourceTable)) + "\n"
-            + "    result_table_name = \"source_table\"\n"
-            + "  }\n}\n\nsink {\n  Kafka {\n"
-            + "    topic = " + quote(rawTopic) + "\n"
-            + "    bootstrap.servers = " + quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort())) + "\n"
-            + "    format = \"JSON\"\n"
-            + "    semantics = \"AT_LEAST_ONCE\"\n"
-            + "    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n"
-            + "  }\n}\n";
+        StringBuilder builder = new StringBuilder(1200);
+        appendBatchEnv(builder, task, properties);
+        appendJdbcFullSource(builder, source, sourceTable, selected, properties);
+        builder.append("  }\n}\n\nsink {\n  Kafka {\n")
+            .append("    topic = ").append(quote(KafkaTaskBridgeService.rawTopic(task))).append('\n')
+            .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
+            .append("    format = \"JSON\"\n")
+            .append("    semantics = \"AT_LEAST_ONCE\"\n")
+            .append("    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n")
+            .append("  }\n}\n");
+        return builder.toString();
+    }
+
+    private static String buildFullConfig(SyncTask task, DataSource source, DataSource target,
+                                          String sourceTable, String targetTable, List<String> primaryKeys,
+                                          List<String> selectedColumns, SeaTunnelProperties properties) {
+        String targetMode = "OVERWRITE".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT"))
+            ? "DROP_DATA" : "APPEND_DATA";
+        StringBuilder builder = new StringBuilder(2000);
+        appendBatchEnv(builder, task, properties);
+        appendJdbcFullSource(builder, source, sourceTable, selectedColumns, properties);
+        builder.append("  }\n}\n\nsink {\n  Jdbc {\n");
+        appendJdbcSinkHead(builder, target, targetTable, primaryKeys, properties);
+        builder.append("    data_save_mode = \"").append(targetMode).append("\"\n")
+            .append("    enable_upsert = ").append(primaryKeys.isEmpty() ? "false" : "true").append('\n')
+            .append("    batch_size = 100\n")
+            .append("    max_retries = 5\n")
+            .append("  }\n}\n");
+        return builder.toString();
+    }
+
+    // ------------------------------------------------------------------ shared blocks
+
+    /** {@code env {}} for STREAMING (CDC) jobs: parallelism, checkpointing and source read limits. */
+    private static void appendStreamingEnv(StringBuilder builder, SyncTask task, SeaTunnelProperties properties) {
+        builder.append("env {\n")
+            .append("  job.mode = \"STREAMING\"\n")
+            .append("  parallelism = ").append(positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism())).append("\n")
+            .append("  checkpoint.interval = ").append(Math.max(1000, properties.getCheckpointIntervalMs())).append("\n")
+            .append("  checkpoint.timeout = 60000\n")
+            .append("  read_limit.rows_per_second = ").append(positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond())).append("\n")
+            .append("  read_limit.bytes_per_second = ").append(positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond())).append("\n")
+            .append("}\n\nsource {\n  MySQL-CDC {\n");
+    }
+
+    /** {@code env {}} for BATCH (FULL snapshot) jobs; no checkpointing. */
+    private static void appendBatchEnv(StringBuilder builder, SyncTask task, SeaTunnelProperties properties) {
+        builder.append("env {\n")
+            .append("  job.mode = \"BATCH\"\n")
+            .append("  parallelism = ").append(positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism())).append("\n")
+            .append("  read_limit.rows_per_second = ").append(positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond())).append("\n")
+            .append("  read_limit.bytes_per_second = ").append(positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond())).append("\n")
+            .append("}\n\nsource {\n  Jdbc {\n");
+    }
+
+    /** Connection, table selection and replication identity of the MySQL-CDC source. */
+    private static void appendMysqlCdcSourceHead(StringBuilder builder, SyncTask task, DataSource source, String sourceTable,
+                                                 SeaTunnelProperties properties) {
+        int serverId = stableServerId(task.getTaskId());
+        builder.append("    url = ").append(quote(engineMysqlJdbcUrl(source, properties))).append('\n')
+            .append("    username = ").append(quote(source.getUsername())).append('\n')
+            .append("    password = ").append(quote(source.getPassword())).append('\n')
+            .append("    database-names = [").append(quote(source.getDatabaseName())).append("]\n")
+            .append("    table-names = [").append(quote(sourceTable)).append("]\n")
+            .append("    server-id = \"").append(serverId).append('-').append(serverId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
+            .append("    server-time-zone = \"").append(SOURCE_TIME_ZONE).append("\"\n");
+    }
+
+    /** FULL-mode {@code Jdbc} source: a plain projected SELECT against the source table. */
+    private static void appendJdbcFullSource(StringBuilder builder, DataSource source, String sourceTable,
+                                             List<String> selectedColumns, SeaTunnelProperties properties) {
+        builder.append("    url = ").append(quote(fullJdbcSourceUrl(source, properties))).append('\n')
+            .append("    driver = \"com.mysql.cj.jdbc.Driver\"\n")
+            .append("    user = ").append(quote(source.getUsername())).append('\n')
+            .append("    password = ").append(quote(source.getPassword())).append('\n')
+            .append("    query = ").append(quote("SELECT " + selectColumns(selectedColumns) + " FROM " + quoteQualifiedIdentifier(sourceTable))).append('\n')
+            .append("    result_table_name = \"source_table\"\n");
+    }
+
+    /** Relational {@code Jdbc} sink: connection, target table, sync key and auto-DDL policy. */
+    private static void appendJdbcSinkHead(StringBuilder builder, DataSource target, String targetTable,
+                                           List<String> primaryKeys, SeaTunnelProperties properties) {
+        builder.append("    url = ").append(quote(engineTargetJdbcUrl(target, properties))).append('\n')
+            .append("    driver = \"").append(targetDriver(target)).append("\"\n")
+            .append("    username = ").append(quote(target.getUsername())).append('\n')
+            .append("    password = ").append(quote(target.getPassword())).append('\n')
+            .append("    database = ").append(quote(target.getDatabaseName())).append('\n')
+            .append("    table = ").append(quote(targetTable)).append('\n')
+            .append("    primary_keys = ").append(stringList(primaryKeys)).append('\n')
+            .append("    generate_sink_sql = true\n")
+            .append("    schema_save_mode = \"CREATE_SCHEMA_WHEN_NOT_EXIST\"\n");
     }
 
     private static String startupOptions(SyncTask task, String syncMode) {
-        if (!"INCREMENTAL".equals(syncMode)) return "    startup.mode = \"initial\"\n";
-        String mode = defaultValue(task.getIncrementalStartupMode(), "LATEST").toUpperCase();
+        if (!SyncMode.INCREMENTAL.equals(syncMode)) return "    startup.mode = \"initial\"\n";
+        String mode = defaultValue(task.getIncrementalStartupMode(), "LATEST").toUpperCase(Locale.ROOT);
         return switch (mode) {
             case "TIMESTAMP" -> {
                 if (task.getIncrementalStartupTimestamp() == null) {
                     throw new ServiceException("按时间启动纯增量任务必须填写启动时间");
                 }
-                long timestamp = task.getIncrementalStartupTimestamp().atZone(ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
+                long timestamp = task.getIncrementalStartupTimestamp().atZone(ZoneId.of(SOURCE_TIME_ZONE)).toInstant().toEpochMilli();
                 yield "    startup.mode = \"timestamp\"\n    startup.timestamp = " + timestamp + "\n";
             }
             case "SPECIFIC" -> {
@@ -240,47 +290,16 @@ final class SeaTunnelJobConfigGenerator {
         };
     }
 
-    private static String buildFullConfig(SyncTask task, DataSource source, DataSource target,
-                                           String sourceTable, String targetTable, List<String> primaryKeys,
-                                           List<String> selectedColumns,
-                                           SeaTunnelProperties properties) {
-        String sourceJdbc = quote(fullJdbcSourceUrl(source, properties));
-        String targetJdbc = quote(engineTargetJdbcUrl(target, properties));
-        String targetMode = "OVERWRITE".equalsIgnoreCase(defaultValue(task.getFullDataMode(), "UPSERT"))
-            ? "DROP_DATA" : "APPEND_DATA";
-        int snapshotParallelism = positive(task.getSnapshotParallelism(), properties.getSnapshotParallelism());
-        int rowsPerSecond = positive(task.getReadLimitRowsPerSecond(), properties.getReadLimitRowsPerSecond());
-        long bytesPerSecond = positive(task.getReadLimitBytesPerSecond(), properties.getReadLimitBytesPerSecond());
-        StringBuilder builder = new StringBuilder(2000);
-        builder.append("env {\n")
-            .append("  job.mode = \"BATCH\"\n")
-            .append("  parallelism = ").append(snapshotParallelism).append("\n")
-            .append("  read_limit.rows_per_second = ").append(rowsPerSecond).append("\n")
-            .append("  read_limit.bytes_per_second = ").append(bytesPerSecond).append("\n")
-            .append("}\n\nsource {\n  Jdbc {\n")
-            .append("    url = ").append(sourceJdbc).append('\n')
-            .append("    driver = \"com.mysql.cj.jdbc.Driver\"\n")
-            .append("    user = ").append(quote(source.getUsername())).append('\n')
-            .append("    password = ").append(quote(source.getPassword())).append('\n')
-            .append("    query = ").append(quote("SELECT " + selectColumns(selectedColumns) + " FROM " + quoteQualifiedIdentifier(sourceTable))).append('\n')
-            .append("    result_table_name = \"source_table\"\n")
-            .append("  }\n}\n\nsink {\n  Jdbc {\n")
-            .append("    url = ").append(targetJdbc).append('\n')
-            .append("    driver = \"").append(targetDriver(target)).append("\"\n")
-            .append("    username = ").append(quote(target.getUsername())).append('\n')
-            .append("    password = ").append(quote(target.getPassword())).append('\n')
-            .append("    database = ").append(quote(target.getDatabaseName())).append('\n')
-            .append("    table = ").append(quote(targetTable)).append('\n')
-            .append("    primary_keys = ").append(stringList(primaryKeys)).append('\n')
-            .append("    generate_sink_sql = true\n")
-            .append("    schema_save_mode = \"CREATE_SCHEMA_WHEN_NOT_EXIST\"\n")
-            .append("    data_save_mode = \"").append(targetMode).append("\"\n")
-            .append("    enable_upsert = ").append(primaryKeys.isEmpty() ? "false" : "true").append('\n')
-            .append("    batch_size = 100\n")
-            .append("    max_retries = 5\n")
-            .append("  }\n}\n");
-        return builder.toString();
+    private static String insertProjection(String config, String sourceOutput, String projectedOutput, List<String> columns) {
+        String transform = "transform {\n  Sql {\n"
+            + "    plugin_input = " + stringList(List.of(sourceOutput)) + "\n"
+            + "    plugin_output = " + quote(projectedOutput) + "\n"
+            + "    query = " + quote("SELECT " + selectColumns(columns) + " FROM " + sourceOutput) + "\n"
+            + "  }\n}\n\n";
+        return config.replace("sink {", transform + "sink {");
     }
+
+    // ------------------------------------------------------------------ source introspection (platform-side JDBC)
 
     /**
      * FULL mode's Jdbc source hands SeaTunnel a raw SELECT query rather than a real
@@ -302,18 +321,18 @@ final class SeaTunnelJobConfigGenerator {
      * mapping, not a DDL clone, and Postgres does not hit this specific failure anyway).
      */
     private static void ensureMysqlFullModeTargetTable(SyncTask task, DataSource source, DataSource target,
-                                                         String targetTable, List<String> selectedColumns) {
-        if (!"MYSQL".equalsIgnoreCase(target.getSourceType())) return;
+                                                        String targetTable, List<String> selectedColumns) {
+        if (!DataSourceType.isMysql(target)) return;
         if (!isFullColumnSelection(source, task.getSourceTable(), selectedColumns)) return;
-        String targetTableName = unqualifiedTable(targetTable);
-        try (Connection targetConnection = DriverManager.getConnection(mysqlJdbcUrl(target), target.getUsername(), target.getPassword())) {
+        String targetTableName = TableNames.unqualified(targetTable);
+        try (Connection targetConnection = JdbcUrls.open(target)) {
             try (ResultSet existing = targetConnection.getMetaData().getTables(target.getDatabaseName(), null, targetTableName, new String[]{"TABLE"})) {
                 if (existing.next()) return;
             }
             String createTableSql;
-            try (Connection sourceConnection = DriverManager.getConnection(mysqlJdbcUrl(source), source.getUsername(), source.getPassword());
-                 java.sql.Statement statement = sourceConnection.createStatement();
-                 ResultSet showCreate = statement.executeQuery("SHOW CREATE TABLE `" + unqualifiedTable(task.getSourceTable()) + "`")) {
+            try (Connection sourceConnection = JdbcUrls.open(source);
+                 Statement statement = sourceConnection.createStatement();
+                 ResultSet showCreate = statement.executeQuery("SHOW CREATE TABLE `" + TableNames.unqualified(task.getSourceTable()) + "`")) {
                 if (!showCreate.next()) return;
                 createTableSql = showCreate.getString(2);
             }
@@ -321,11 +340,11 @@ final class SeaTunnelJobConfigGenerator {
                 "(?i)CREATE TABLE `[^`]+`", "CREATE TABLE `" + targetTableName + "`");
             createTableSql = createTableSql.replaceAll(
                 ",\\s*CONSTRAINT `[^`]+` FOREIGN KEY[^,]*\\([^)]*\\)\\s*REFERENCES[^,]*\\([^)]*\\)[^,)]*", "");
-            try (java.sql.Statement statement = targetConnection.createStatement()) {
+            try (Statement statement = targetConnection.createStatement()) {
                 statement.execute(createTableSql);
             }
         } catch (SQLException ex) {
-            throw new ServiceException("预建目标表失败：" + safeMessage(ex));
+            throw new ServiceException("预建目标表失败：" + SyncText.safeMessage(ex, "连接失败"));
         }
     }
 
@@ -342,13 +361,13 @@ final class SeaTunnelJobConfigGenerator {
             if (columns.isEmpty()) throw new ServiceException("源表没有可同步字段");
             return columns;
         } catch (SQLException ex) {
-            throw new ServiceException("读取源表字段失败：" + safeMessage(ex));
+            throw new ServiceException("读取源表字段失败：" + SyncText.safeMessage(ex, "连接失败"));
         }
     }
 
     private static List<String> queryAllColumns(DataSource source, String tableReference) throws SQLException {
-        String table = unqualifiedTable(tableReference);
-        try (Connection connection = DriverManager.getConnection(mysqlJdbcUrl(source), source.getUsername(), source.getPassword());
+        String table = TableNames.unqualified(tableReference);
+        try (Connection connection = JdbcUrls.open(source);
              ResultSet resultSet = connection.getMetaData().getColumns(source.getDatabaseName(), null, table, "%")) {
             List<String> columns = new ArrayList<>();
             while (resultSet.next()) columns.add(resultSet.getString("COLUMN_NAME"));
@@ -366,7 +385,7 @@ final class SeaTunnelJobConfigGenerator {
         try {
             List<String> allColumns = queryAllColumns(source, tableReference);
             if (allColumns.isEmpty() || selectedColumns.size() != allColumns.size()) return false;
-            Set<String> selectedNormalized = new java.util.HashSet<>();
+            Set<String> selectedNormalized = new HashSet<>();
             for (String column : selectedColumns) selectedNormalized.add(column.toLowerCase(Locale.ROOT));
             for (String column : allColumns) {
                 if (!selectedNormalized.contains(column.toLowerCase(Locale.ROOT))) return false;
@@ -378,8 +397,8 @@ final class SeaTunnelJobConfigGenerator {
     }
 
     private static List<String> resolvePrimaryKeys(DataSource source, String tableReference) {
-        String table = unqualifiedTable(tableReference);
-        try (Connection connection = DriverManager.getConnection(mysqlJdbcUrl(source), source.getUsername(), source.getPassword());
+        String table = TableNames.unqualified(tableReference);
+        try (Connection connection = JdbcUrls.open(source);
              ResultSet resultSet = connection.getMetaData().getPrimaryKeys(source.getDatabaseName(), null, table)) {
             Map<Short, String> ordered = new LinkedHashMap<>();
             while (resultSet.next()) {
@@ -391,7 +410,7 @@ final class SeaTunnelJobConfigGenerator {
                 .toList();
             return primaryKeys.isEmpty() ? resolveNotNullUniqueKey(connection, source, table) : primaryKeys;
         } catch (SQLException ex) {
-            throw new ServiceException("读取源表主键失败：" + safeMessage(ex));
+            throw new ServiceException("读取源表主键失败：" + SyncText.safeMessage(ex, "连接失败"));
         }
     }
 
@@ -425,19 +444,10 @@ final class SeaTunnelJobConfigGenerator {
         }
     }
 
-    private static String mysqlJdbcUrl(DataSource source) {
-        return "jdbc:mysql://" + source.getHost() + ':' + source.getPort() + '/' + source.getDatabaseName()
-            + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
-            + "&allowPublicKeyRetrieval=true&serverTimezone=Asia%2FShanghai";
-    }
-
-    private static String postgresJdbcUrl(DataSource source) {
-        return "jdbc:postgresql://" + source.getHost() + ':' + source.getPort() + '/' + source.getDatabaseName()
-            + "?connectTimeout=5&socketTimeout=5&ssl=" + ("1".equals(source.getSslEnabled()));
-    }
+    // ------------------------------------------------------------------ engine-side JDBC URLs (part of the fingerprint)
 
     private static String engineTargetJdbcUrl(DataSource target, SeaTunnelProperties properties) {
-        return "MYSQL".equalsIgnoreCase(target.getSourceType())
+        return DataSourceType.isMysql(target)
             ? engineMysqlJdbcUrl(target, properties) : enginePostgresJdbcUrl(target, properties);
     }
 
@@ -484,30 +494,14 @@ final class SeaTunnelJobConfigGenerator {
     }
 
     private static String targetDriver(DataSource target) {
-        return "MYSQL".equalsIgnoreCase(target.getSourceType()) ? "com.mysql.cj.jdbc.Driver" : "org.postgresql.Driver";
+        return DataSourceType.isMysql(target) ? "com.mysql.cj.jdbc.Driver" : "org.postgresql.Driver";
     }
 
-    private static String qualifiedSourceTable(String database, String table) {
-        return table.indexOf('.') >= 0 ? table : database + '.' + table;
-    }
-
-    private static String unqualifiedTable(String tableReference) {
-        int separator = tableReference == null ? -1 : tableReference.lastIndexOf('.');
-        return separator < 0 ? tableReference : tableReference.substring(separator + 1);
-    }
-
-    private static String insertProjection(String config, String sourceOutput, String projectedOutput, List<String> columns) {
-        String transform = "transform {\n  Sql {\n"
-            + "    plugin_input = " + stringList(List.of(sourceOutput)) + "\n"
-            + "    plugin_output = " + quote(projectedOutput) + "\n"
-            + "    query = " + quote("SELECT " + selectColumns(columns) + " FROM " + sourceOutput) + "\n"
-            + "  }\n}\n\n";
-        return config.replace("sink {", transform + "sink {");
-    }
+    // ------------------------------------------------------------------ text helpers
 
     private static String selectColumns(List<String> columns) {
         if (columns == null || columns.isEmpty()) return "*";
-        return columns.stream().map(SeaTunnelJobConfigGenerator::quoteIdentifier).collect(java.util.stream.Collectors.joining(", "));
+        return columns.stream().map(SeaTunnelJobConfigGenerator::quoteIdentifier).collect(Collectors.joining(", "));
     }
 
     private static String quoteIdentifier(String identifier) {
@@ -521,34 +515,10 @@ final class SeaTunnelJobConfigGenerator {
             : quoteIdentifier(qualifiedName.substring(0, separator)) + '.' + quoteIdentifier(qualifiedName.substring(separator + 1));
     }
 
-    private static String qualifiedTargetTable(String schema, String table) {
-        return table.indexOf('.') >= 0 ? table : schema + '.' + table;
-    }
-
-    /**
-     * Each CDC config claims a {@code server-id} range of {@link #SERVER_ID_RANGE_WIDTH}
-     * consecutive values (see the {@code server-id = "X-(X+3)"} field below). Bucketing by
-     * multiplying the modulo result by the range width - instead of adding it directly -
-     * guarantees two different buckets never produce overlapping ranges; the previous
-     * "5400 + taskId % 100000" scheme let adjacent task IDs (the common case for
-     * Snowflake IDs assigned to task-group items created in the same batch) claim
-     * overlapping ranges, which MySQL's replication protocol rejects as duplicate
-     * server IDs when both jobs connect concurrently.
-     */
-    private static final int SERVER_ID_RANGE_WIDTH = 4;
-    private static final long SERVER_ID_BUCKET_COUNT = 900_000L;
-    private static final int SERVER_ID_BASE = 10_000;
-
     private static int stableServerId(Long taskId) {
         long value = taskId == null ? 1L : Math.abs(taskId);
         long bucket = value % SERVER_ID_BUCKET_COUNT;
         return SERVER_ID_BASE + (int) (bucket * SERVER_ID_RANGE_WIDTH);
-    }
-
-    private static void requireType(DataSource source, String expected, String side) {
-        if (!expected.equalsIgnoreCase(source.getSourceType())) {
-            throw new ServiceException(side + "数据源必须是 " + expected);
-        }
     }
 
     private static String defaultValue(String value, String fallback) {
@@ -578,15 +548,11 @@ final class SeaTunnelJobConfigGenerator {
         return config.replaceAll("(?m)(password\\s*=\\s*)\\\"[^\\\"]*\\\"", "$1\"******\"");
     }
 
-    private static String safeMessage(SQLException ex) {
-        String message = ex.getMessage();
-        return StringUtils.isBlank(message) ? "连接失败" : message.replaceAll("(?i)(password\\s*[=:]\\s*)[^; ,]+", "$1******");
-    }
-
     private record IndexedColumn(short position, String name) {
     }
 
-    record GeneratedConfig(String jobName, String sourceTable, String targetTable,
-                           List<String> primaryKeys, String config, String redactedConfig) {
+    /** {@code config} carries real credentials and is what gets submitted and fingerprinted; {@code redactedConfig} is API-safe. */
+    public record GeneratedConfig(String jobName, String sourceTable, String targetTable,
+                                  List<String> primaryKeys, String config, String redactedConfig) {
     }
 }

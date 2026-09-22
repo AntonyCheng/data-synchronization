@@ -1,12 +1,23 @@
 package org.dromara.sync.domain.vo;
 
+import io.github.linpeilie.annotations.AutoMapper;
 import lombok.Data;
+import org.dromara.sync.domain.SyncTaskGroup;
 
+import java.io.Serial;
+import java.io.Serializable;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+/** Task group response object with its table items attached. */
 @Data
-public class SyncTaskGroupVo {
+@AutoMapper(target = SyncTaskGroup.class)
+public class SyncTaskGroupVo implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
     private Long groupId;
     private String groupName;
     private Long sourceId;
@@ -29,7 +40,7 @@ public class SyncTaskGroupVo {
     private String lastCheckpointTime;
     private String lastCheckpointStatus;
     private String lastError;
-    private String createTime;
-    private String updateTime;
+    private LocalDateTime createTime;
+    private LocalDateTime updateTime;
     private List<SyncTaskGroupItemVo> items = new ArrayList<>();
 }

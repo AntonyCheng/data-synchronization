@@ -1,12 +1,15 @@
 package org.dromara.sync.domain.bo;
 
+import io.github.linpeilie.annotations.AutoMapper;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
+import org.dromara.sync.domain.SyncTaskGroupItem;
 
 import java.io.Serializable;
 
 @Data
+@AutoMapper(target = SyncTaskGroupItem.class, reverseConvertGenerate = false)
 public class SyncTaskGroupItemBo implements Serializable {
 
     private Long itemId;

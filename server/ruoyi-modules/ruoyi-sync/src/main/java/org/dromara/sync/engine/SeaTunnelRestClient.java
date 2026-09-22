@@ -1,9 +1,10 @@
-package org.dromara.sync.service.impl;
+package org.dromara.sync.engine;
 
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.support.SyncText;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
@@ -161,8 +162,7 @@ public class SeaTunnelRestClient {
     }
 
     private static String safeDetail(String detail) {
-        if (StringUtils.isBlank(detail)) return "无详细信息";
-        return detail.replaceAll("(?i)(password\\s*[=:]\\s*)[^,;\\s}]+", "$1******");
+        return StringUtils.isBlank(detail) ? "无详细信息" : SyncText.redactSecrets(detail);
     }
 
     private static String trimEndpoint(String endpoint) {
@@ -177,7 +177,7 @@ public class SeaTunnelRestClient {
     }
 
     public record CheckpointSnapshot(String id, LocalDateTime time, String status) {
-        static CheckpointSnapshot empty() {
+        public static CheckpointSnapshot empty() {
             return new CheckpointSnapshot(null, null, null);
         }
     }

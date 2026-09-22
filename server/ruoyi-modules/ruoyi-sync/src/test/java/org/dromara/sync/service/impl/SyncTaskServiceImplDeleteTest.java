@@ -36,7 +36,7 @@ class SyncTaskServiceImplDeleteTest {
 
         assertEquals(true, service.deleteById(task.getTaskId()));
         verify(taskMapper).deleteById(task.getTaskId());
-        verify(configVersionMapper).delete(any());
+        verify(configVersionMapper).deleteByTaskId(task.getTaskId());
     }
 
     @Test

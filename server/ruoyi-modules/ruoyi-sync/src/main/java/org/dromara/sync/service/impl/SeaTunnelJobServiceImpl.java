@@ -1,46 +1,64 @@
 package org.dromara.sync.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.constant.DataSourceType;
+import org.dromara.sync.constant.SyncMode;
+import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.vo.SeaTunnelJobConfigPreview;
 import org.dromara.sync.domain.vo.SeaTunnelJobOperationResult;
 import org.dromara.sync.domain.vo.SeaTunnelJobStatus;
+import org.dromara.sync.engine.EngineJobStates;
+import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
+import org.dromara.sync.engine.SeaTunnelRestClient;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
+import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISeaTunnelJobService;
 import org.dromara.sync.service.ISyncTaskService;
-import org.springframework.stereotype.Service;
+import org.dromara.sync.support.PostgresTableSwap;
+import org.dromara.sync.support.SyncText;
+import org.dromara.sync.support.TableNames;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import org.springframework.stereotype.Service;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 
-/** Builds engine configuration without exposing credentials to API callers. */
+/**
+ * Single-table task lifecycle against SeaTunnel: preview, start, status reconciliation,
+ * pause/resume with savepoint, stop and reinitialize. Credentials never reach API callers.
+ */
 @RequiredArgsConstructor
 @Service
 public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
 
+    /**
+     * Consecutive {@link SeaTunnelRestClient#status} failures tolerated per task. One failed
+     * poll used to flip a task straight to FAILED and tear down its Kafka bridge; a single
+     * REST timeout or engine GC pause is not proof the job died. The engine keeps running
+     * and Debezium keeps buffering into the raw topic, so give up only after this many.
+     */
+    private static final int STATUS_FAILURE_TOLERANCE = 3;
+    private static final Set<String> REINITIALIZABLE_STATUSES = Set.of(SyncStatus.REINITIALIZE_REQUIRED, SyncStatus.FAILED, SyncStatus.STOPPED);
+
     private final SyncTaskMapper syncTaskMapper;
     private final DataSourceMapper dataSourceMapper;
+    private final IDataSourceService dataSourceService;
     private final SeaTunnelProperties properties;
     private final SeaTunnelRestClient restClient;
     private final ISyncTaskService syncTaskService;
@@ -48,28 +66,13 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     private final RedissonClient redissonClient;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
 
-    /**
-     * Consecutive {@link SeaTunnelRestClient#status} failures per task. One failed poll
-     * used to flip a task straight to FAILED and tear down its Kafka bridge; a single
-     * REST timeout or engine GC pause is not proof the job died. Tolerate a few in a row
-     * (the engine keeps running and Debezium keeps buffering into the raw topic) and only
-     * give up after {@link #STATUS_FAILURE_TOLERANCE}. Reset on any successful poll.
-     */
-    private final java.util.concurrent.ConcurrentMap<Long, Integer> statusFailureStreak =
-        new java.util.concurrent.ConcurrentHashMap<>();
-    private static final int STATUS_FAILURE_TOLERANCE = 3;
+    /** Consecutive status-poll failures per task; reset on any successful poll. */
+    private final ConcurrentMap<Long, Integer> statusFailureStreak = new ConcurrentHashMap<>();
 
     @Override
     public SeaTunnelJobConfigPreview previewConfig(Long taskId) {
-        SyncTask task = syncTaskMapper.selectById(taskId);
-        if (task == null) {
-            throw new ServiceException("同步任务不存在");
-        }
-        DataSource source = requireSource(task.getSourceId(), "源");
-        DataSource target = requireSource(task.getTargetId(), "目标");
-
-        SeaTunnelJobConfigGenerator.GeneratedConfig generated =
-            SeaTunnelJobConfigGenerator.generate(task, source, target, properties);
+        SyncTask task = requireTask(taskId);
+        SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
         SeaTunnelJobConfigPreview preview = new SeaTunnelJobConfigPreview();
         preview.setTaskId(taskId);
         preview.setJobName(generated.jobName());
@@ -97,17 +100,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (!validation.isValid()) throw new ServiceException("启动前校验未通过：" + validation.getMessage());
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
             if (isKafkaTask(task)) {
-                kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
-                    requireSource(task.getSourceId(), "源").getDatabaseName());
+                startBridge(task);
                 kafkaBridgeStarted = true;
             }
             submissionStarted = true;
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
-            task.setEngineJobId(submitted.jobId());
-            task.setEngineConfigHash(hash(generated.config()));
-            task.setStatus("RUNNING");
-            task.setLastError("");
-            syncTaskMapper.updateById(task);
+            markRunning(task, submitted.jobId(), generated.config());
             return operation(task, "作业已提交");
         } catch (ServiceException ex) {
             if (kafkaBridgeStarted) kafkaTaskBridgeService.stop(taskId);
@@ -118,7 +116,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (kafkaBridgeStarted) kafkaTaskBridgeService.stop(taskId);
             SyncTask task = syncTaskMapper.selectById(taskId);
             if (submissionStarted && task != null) markFailed(task, task.getEngineJobId(), ex.getMessage());
-            throw new ServiceException("启动同步任务失败：" + safeMessage(ex));
+            throw new ServiceException("启动同步任务失败：" + SyncText.safeMessage(ex, "未知错误"));
         } finally {
             if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
         }
@@ -128,15 +126,15 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     public SeaTunnelJobStatus refreshStatus(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
+        boolean kafka = isKafkaTask(task);
         SeaTunnelRestClient.JobSnapshot snapshot;
-        SeaTunnelRestClient.CheckpointSnapshot checkpoint = SeaTunnelRestClient.CheckpointSnapshot.empty();
         try {
             snapshot = restClient.status(jobId);
             statusFailureStreak.remove(taskId);
         } catch (ServiceException ex) {
-            if (isRecoveryBoundaryError(ex.getMessage())) {
+            if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) {
                 statusFailureStreak.remove(taskId);
-                if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
+                if (kafka) kafkaTaskBridgeService.stop(taskId);
                 return markReinitializeRequired(task, jobId, ex.getMessage());
             }
             int streak = statusFailureStreak.merge(taskId, 1, Integer::sum);
@@ -147,118 +145,70 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
                 return transientStatus(task, jobId, ex.getMessage(), streak);
             }
             statusFailureStreak.remove(taskId);
-            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
+            if (kafka) kafkaTaskBridgeService.stop(taskId);
             return markFailed(task, jobId, ex.getMessage());
         }
+        SeaTunnelRestClient.CheckpointSnapshot checkpoint = SeaTunnelRestClient.CheckpointSnapshot.empty();
         String checkpointError = null;
         try {
             checkpoint = restClient.checkpoints(jobId);
         } catch (ServiceException ex) {
-            if (isRecoveryBoundaryError(ex.getMessage())) {
+            if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) {
                 return markReinitializeRequired(task, jobId, ex.getMessage());
             }
             checkpointError = ex.getMessage();
         }
-        String platformStatus = mapStatus(snapshot.status());
-        if (isKafkaTask(task)) {
-            if (Set.of("STOPPED", "FAILED", "FINISHED").contains(platformStatus)) {
+        String platformStatus = EngineJobStates.toPlatformStatus(snapshot.status());
+        if (kafka) {
+            if (Set.of(SyncStatus.STOPPED, SyncStatus.FAILED, SyncStatus.FINISHED).contains(platformStatus)) {
                 kafkaTaskBridgeService.stop(taskId);
-            } else if (Set.of("RUNNING", "PAUSING").contains(platformStatus)
-                && !kafkaTaskBridgeService.isRunning(taskId)) {
+            } else if (SyncStatus.isActive(platformStatus) && !kafkaTaskBridgeService.isRunning(taskId)) {
                 // The engine job is alive but the bridge is not - it was torn down by an
                 // earlier status failure, or died on its own. Nothing else restarts it
                 // between user actions, so heal it here on the periodic reconcile.
-                kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
-                    requireSource(task.getSourceId(), "源").getDatabaseName());
+                startBridge(task);
             }
         }
-        if ("FAILED".equals(platformStatus) && isRecoveryBoundaryError(snapshot.errorMessage())) {
+        if (SyncStatus.FAILED.equals(platformStatus) && EngineJobStates.isRecoveryBoundaryError(snapshot.errorMessage())) {
             return markReinitializeRequired(task, jobId, snapshot.errorMessage());
         }
-        if ("FINISHED".equals(platformStatus) && StringUtils.isNotBlank(task.getOverwriteStageTable())) {
+        if (SyncStatus.FINISHED.equals(platformStatus) && StringUtils.isNotBlank(task.getOverwriteStageTable())) {
             try {
                 finalizeOverwrite(task);
             } catch (Exception ex) {
-                return markFailedAfterEngineCompletion(task, jobId, "覆盖刷新替换正式表失败：" + safeMessage(ex));
+                return markFailedAfterEngineCompletion(task, jobId, "覆盖刷新替换正式表失败：" + SyncText.safeMessage(ex, "未知错误"));
             }
         }
         task.setStatus(platformStatus);
-        String statusError = "FAILED".equals(platformStatus) && StringUtils.isBlank(snapshot.errorMessage())
+        String statusError = SyncStatus.FAILED.equals(platformStatus) && StringUtils.isBlank(snapshot.errorMessage())
             ? "SeaTunnel 作业状态为 FAILED" : "";
         String lastError = StringUtils.defaultIfBlank(snapshot.errorMessage(),
             StringUtils.defaultIfBlank(checkpointError, StringUtils.defaultIfBlank(statusError, "")));
-        task.setLastError(truncateForColumn(lastError));
+        task.setLastError(SyncText.truncateForColumn(lastError));
         if (checkpoint.id() != null) {
             task.setLastCheckpointId(checkpoint.id());
             task.setLastCheckpointTime(checkpoint.time());
             task.setLastCheckpointStatus(checkpoint.status());
         }
         syncTaskMapper.updateById(task);
-        SeaTunnelJobStatus result = new SeaTunnelJobStatus();
-        result.setTaskId(taskId);
-        result.setEngineJobId(jobId);
-        result.setEngineStatus(snapshot.status());
-        result.setStatus(platformStatus);
-        result.setErrorMessage(StringUtils.isBlank(snapshot.errorMessage())
-            ? null : truncateForColumn(snapshot.errorMessage()));
-        result.setLastCheckpointId(task.getLastCheckpointId());
-        result.setLastCheckpointTime(task.getLastCheckpointTime());
-        result.setLastCheckpointStatus(task.getLastCheckpointStatus());
-        result.setKafkaPublishedCount(task.getKafkaPublishedCount());
-        result.setKafkaLastPartition(task.getKafkaLastPartition());
-        result.setKafkaLastOffset(task.getKafkaLastOffset());
-        result.setKafkaLastSourceEventTime(task.getKafkaLastSourceEventTime());
-        result.setKafkaLastBrokerAckTime(task.getKafkaLastBrokerAckTime());
-        result.setKafkaLagSeconds(task.getKafkaLagSeconds());
-        applyMetrics(result, snapshot);
+        SeaTunnelJobStatus result = statusOf(task, jobId, snapshot.status(), platformStatus,
+            StringUtils.isBlank(snapshot.errorMessage()) ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
+        copyKafkaMetrics(result, task);
+        EngineJobStates.applyMetrics(result, snapshot);
         return result;
-    }
-
-    private void applyMetrics(SeaTunnelJobStatus result, SeaTunnelRestClient.JobSnapshot snapshot) {
-        var metrics = snapshot.metrics();
-        String engineStatus = snapshot.status();
-        result.setPhase(engineStatus != null && Set.of("INITIALIZING", "CREATED", "PENDING", "STARTING").contains(engineStatus)
-            ? "SNAPSHOT" : "CDC");
-        result.setSourceReceivedCount(metricLong(metrics, "SourceReceivedCount"));
-        result.setSinkCommittedCount(metricLong(metrics, "SinkCommittedCount"));
-        result.setSourceReceivedBytes(metricLong(metrics, "SourceReceivedBytes"));
-        result.setSinkCommittedBytes(metricLong(metrics, "SinkCommittedBytes"));
-        result.setSourceQps(metricDouble(metrics, "SourceReceivedQPS"));
-        result.setSinkQps(metricDouble(metrics, "SinkCommittedQPS"));
-        Long sourceEvent = metricLong(metrics, "SourceLatestEventTime");
-        Long sinkCommit = metricLong(metrics, "SinkLatestCommitTime");
-        if (sourceEvent != null && sinkCommit != null && sinkCommit >= sourceEvent) {
-            result.setCdcLagSeconds((sinkCommit - sourceEvent) / 1000L);
-        } else {
-            result.setMetricsMessage("SeaTunnel 未返回源事件时间，CDC 延迟暂不可计算");
-        }
-    }
-
-    private static Long metricLong(tools.jackson.databind.JsonNode metrics, String key) {
-        var node = metrics == null ? null : metrics.get(key);
-        if (node == null || !node.canConvertToLong()) return null;
-        return node.asLong();
-    }
-
-    private static Double metricDouble(tools.jackson.databind.JsonNode metrics, String key) {
-        var node = metrics == null ? null : metrics.get(key);
-        if (node == null || !node.isNumber()) return null;
-        return node.asDouble();
     }
 
     @Override
     @EventListener(ApplicationReadyEvent.class)
     public void recoverRunningTasks() {
-        syncTaskMapper.selectList(new LambdaQueryWrapper<SyncTask>().in(SyncTask::getStatus, "RUNNING", "PAUSING"))
-            .forEach(task -> {
-                try {
-                    if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
-                        requireSource(task.getSourceId(), "源").getDatabaseName());
-                    refreshStatus(task.getTaskId());
-                } catch (Exception ex) {
-                    markFailed(task, task.getEngineJobId(), ex.getMessage());
-                }
-            });
+        syncTaskMapper.selectActive().forEach(task -> {
+            try {
+                if (isKafkaTask(task)) startBridge(task);
+                refreshStatus(task.getTaskId());
+            } catch (Exception ex) {
+                markFailed(task, task.getEngineJobId(), ex.getMessage());
+            }
+        });
     }
 
     /**
@@ -270,26 +220,25 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
      */
     @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}")
     public void refreshRunningTaskStatus() {
-        syncTaskMapper.selectList(new LambdaQueryWrapper<SyncTask>().in(SyncTask::getStatus, "RUNNING", "PAUSING"))
-            .forEach(task -> {
-                try {
-                    refreshStatus(task.getTaskId());
-                } catch (Exception ex) {
-                    markFailed(task, task.getEngineJobId(), ex.getMessage());
-                }
-            });
+        syncTaskMapper.selectActive().forEach(task -> {
+            try {
+                refreshStatus(task.getTaskId());
+            } catch (Exception ex) {
+                markFailed(task, task.getEngineJobId(), ex.getMessage());
+            }
+        });
     }
 
     @Override
     public SeaTunnelJobOperationResult pause(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
-        if (!"RUNNING".equals(task.getStatus()) && !"PAUSING".equals(task.getStatus())) {
+        if (!SyncStatus.isActive(task.getStatus())) {
             throw new ServiceException("只有运行中的任务可以暂停");
         }
         restClient.stop(jobId, true, false);
         if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
-        task.setStatus("PAUSING");
+        task.setStatus(SyncStatus.PAUSING);
         task.setLastError("");
         syncTaskMapper.updateById(task);
         return operation(task, "暂停请求已提交，请刷新状态确认 savepoint 完成");
@@ -299,12 +248,13 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     public SeaTunnelJobOperationResult resume(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
-        if (!"PAUSED".equals(task.getStatus()) && !"FAILED".equals(task.getStatus())) {
+        if (!SyncStatus.PAUSED.equals(task.getStatus()) && !SyncStatus.FAILED.equals(task.getStatus())) {
             throw new ServiceException("只有已暂停或可恢复失败任务可以恢复");
         }
+        boolean kafka = isKafkaTask(task);
         try {
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
-            String configHash = hash(generated.config());
+            String configHash = SyncText.sha256Hex(generated.config());
             if (StringUtils.isNotBlank(task.getEngineConfigHash()) && !task.getEngineConfigHash().equals(configHash)) {
                 throw new ServiceException("任务配置已变化，不能使用原 checkpoint 恢复，请重新初始化");
             }
@@ -312,10 +262,9 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (checkpoint.id() == null) {
                 throw new ServiceException("任务没有可用的 checkpoint/savepoint，不能从未知位点恢复，请重新初始化");
             }
-            if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
-                requireSource(task.getSourceId(), "源").getDatabaseName());
+            if (kafka) startBridge(task);
             restClient.submit(generated.jobName(), generated.config(), jobId, true);
-            task.setStatus("RUNNING");
+            task.setStatus(SyncStatus.RUNNING);
             task.setLastError("");
             syncTaskMapper.updateById(task);
             return operation(task, "作业已从 savepoint 恢复");
@@ -323,17 +272,17 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             // The Kafka bridge (if any) is started before restClient.submit() above, so a
             // ServiceException from submit()/checkpoints() must stop it too - otherwise the
             // bridge's consumer thread and Kafka consumer-group membership are orphaned.
-            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
-            if (isRecoveryBoundaryError(ex.getMessage())) {
+            if (kafka) kafkaTaskBridgeService.stop(taskId);
+            if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) {
                 markReinitializeRequired(task, jobId, ex.getMessage());
                 throw new ServiceException(ex.getMessage());
             }
             markFailed(task, jobId, ex.getMessage());
             throw ex;
         } catch (Exception ex) {
-            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
+            if (kafka) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, jobId, ex.getMessage());
-            throw new ServiceException("恢复同步任务失败：" + safeMessage(ex));
+            throw new ServiceException("恢复同步任务失败：" + SyncText.safeMessage(ex, "未知错误"));
         }
     }
 
@@ -341,12 +290,12 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     public SeaTunnelJobOperationResult stop(Long taskId) {
         SyncTask task = requireTask(taskId);
         String jobId = requireJobId(task);
-        if ("STOPPED".equals(task.getStatus()) || "DRAFT".equals(task.getStatus())) {
+        if (SyncStatus.STOPPED.equals(task.getStatus()) || SyncStatus.DRAFT.equals(task.getStatus())) {
             throw new ServiceException("任务当前未运行");
         }
         restClient.stop(jobId, false, false);
         if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
-        task.setStatus("STOPPED");
+        task.setStatus(SyncStatus.STOPPED);
         task.setLastError("");
         // SyncTaskScheduler treats STOPPED as an eligible status (a fresh STOPPED task can be
         // rearmed by editing its schedule), but a leftover past nextRunTime from the run that
@@ -360,14 +309,14 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     @Override
     public SeaTunnelJobOperationResult reinitialize(Long taskId) {
         SyncTask task = requireTask(taskId);
-        if ("INCREMENTAL".equalsIgnoreCase(task.getSyncMode())) {
+        if (SyncMode.INCREMENTAL.equalsIgnoreCase(task.getSyncMode())) {
             throw new ServiceException("纯增量任务没有全量初始化语义，请新建全量 + CDC 任务并先建立目标基线");
         }
-        if (!"REINITIALIZE_REQUIRED".equals(task.getStatus()) && !"FAILED".equals(task.getStatus())
-            && !"STOPPED".equals(task.getStatus())) {
+        if (task.getStatus() == null || !REINITIALIZABLE_STATUSES.contains(task.getStatus())) {
             throw new ServiceException("只有需重新初始化、失败或已停止任务可以重新初始化");
         }
         prepareResourceProtection(task);
+        boolean kafka = isKafkaTask(task);
         try {
             if (StringUtils.isNotBlank(task.getEngineJobId())) {
                 try {
@@ -381,38 +330,38 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
                 throw new ServiceException("重新初始化前校验未通过：" + validation.getMessage());
             }
             SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
-            if (isKafkaTask(task)) kafkaTaskBridgeService.start(task, requireSource(task.getTargetId(), "目标"),
-                requireSource(task.getSourceId(), "源").getDatabaseName());
+            if (kafka) startBridge(task);
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);
-            task.setEngineJobId(submitted.jobId());
-            task.setEngineConfigHash(hash(generated.config()));
             task.setLastCheckpointId(null);
             task.setLastCheckpointTime(null);
             task.setLastCheckpointStatus(null);
-            task.setLastError("");
-            task.setStatus("RUNNING");
-            syncTaskMapper.updateById(task);
+            markRunning(task, submitted.jobId(), generated.config());
             return operation(task, "已丢弃旧恢复状态并重新启动全量初始化");
         } catch (ServiceException ex) {
-            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
+            if (kafka) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, task.getEngineJobId(), ex.getMessage());
             throw ex;
         } catch (Exception ex) {
-            if (isKafkaTask(task)) kafkaTaskBridgeService.stop(taskId);
+            if (kafka) kafkaTaskBridgeService.stop(taskId);
             markFailed(task, task.getEngineJobId(), ex.getMessage());
-            throw new ServiceException("重新初始化任务失败：" + safeMessage(ex));
+            throw new ServiceException("重新初始化任务失败：" + SyncText.safeMessage(ex, "未知错误"));
         }
     }
 
     private SeaTunnelJobConfigGenerator.GeneratedConfig generate(SyncTask task) {
-        DataSource source = requireSource(task.getSourceId(), "源");
-        DataSource target = requireSource(task.getTargetId(), "目标");
+        DataSource source = dataSourceService.requireUsable(task.getSourceId(), "源");
+        DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
         return SeaTunnelJobConfigGenerator.generate(task, source, target, properties);
     }
 
+    /** Lenient: a task whose target row is missing is simply not a Kafka task here; the start paths fail loudly later. */
     private boolean isKafkaTask(SyncTask task) {
-        DataSource target = task == null ? null : dataSourceMapper.selectById(task.getTargetId());
-        return target != null && "KAFKA".equalsIgnoreCase(target.getSourceType());
+        return task != null && DataSourceType.isKafka(dataSourceMapper.selectById(task.getTargetId()));
+    }
+
+    private void startBridge(SyncTask task) {
+        kafkaTaskBridgeService.start(task, dataSourceService.requireUsable(task.getTargetId(), "目标"),
+            dataSourceService.requireUsable(task.getSourceId(), "源").getDatabaseName());
     }
 
     private void prepareResourceProtection(SyncTask task) {
@@ -420,10 +369,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         syncTaskMapper.updateById(task);
     }
 
+    /** FULL + OVERWRITE writes into a versioned staging table that {@link #finalizeOverwrite} swaps in on completion. */
     private void prepareOverwriteStage(SyncTask task) {
-        if ("FULL".equalsIgnoreCase(task.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(task.getFullDataMode())) {
-            String schema = StringUtils.defaultIfBlank(task.getTargetSchema(), "public");
-            task.setOverwriteStageTable("__ds_stage_" + task.getTaskId() + "_v" + (task.getConfigVersion() == null ? 1 : task.getConfigVersion()));
+        if (SyncMode.isFull(task.getSyncMode()) && "OVERWRITE".equalsIgnoreCase(task.getFullDataMode())) {
+            task.setOverwriteStageTable("__ds_stage_" + task.getTaskId() + "_v" + configVersionOf(task));
             task.setLastError("");
             syncTaskMapper.updateById(task);
         } else {
@@ -431,59 +380,21 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         }
     }
 
-    /** Atomically swaps a completed staging table into place on PostgreSQL. */
     private void finalizeOverwrite(SyncTask task) throws SQLException {
-        DataSource target = requireSource(task.getTargetId(), "目标");
-        String schema = StringUtils.defaultIfBlank(task.getTargetSchema(), "public");
-        String targetName = task.getTargetTable();
-        String stageName = task.getOverwriteStageTable();
-        String backupName = "__ds_backup_" + task.getTaskId() + "_v" + (task.getConfigVersion() == null ? 1 : task.getConfigVersion());
-        try (Connection connection = DriverManager.getConnection(postgresJdbcUrl(target), target.getUsername(), target.getPassword())) {
-            connection.setAutoCommit(false);
-            try {
-                if (tableExists(connection, schema, targetName)) {
-                    executeRename(connection, schema, targetName, backupName);
-                }
-                executeRename(connection, schema, stageName, targetName);
-                if (tableExists(connection, schema, backupName)) {
-                    execute(connection, "drop table " + quote(schema) + "." + quote(backupName));
-                }
-                connection.commit();
-                task.setOverwriteStageTable(null);
-                // MyBatis-Plus skips null fields for ordinary updates. Explicitly
-                // clear the stage marker so a later status refresh is idempotent.
-                syncTaskMapper.update(null, new LambdaUpdateWrapper<SyncTask>()
-                    .eq(SyncTask::getTaskId, task.getTaskId())
-                    .set(SyncTask::getOverwriteStageTable, null));
-            } catch (SQLException ex) {
-                connection.rollback();
-                throw ex;
-            } finally {
-                connection.setAutoCommit(true);
-            }
-        }
+        DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
+        String schema = StringUtils.defaultIfBlank(task.getTargetSchema(), TableNames.DEFAULT_POSTGRES_SCHEMA);
+        String backupName = "__ds_backup_" + task.getTaskId() + "_v" + configVersionOf(task);
+        PostgresTableSwap.swap(target, schema, task.getTargetTable(), task.getOverwriteStageTable(), backupName);
+        task.setOverwriteStageTable(null);
+        // MyBatis-Plus skips null fields for ordinary updates. Explicitly clear the stage
+        // marker so a later status refresh is idempotent.
+        syncTaskMapper.update(null, new LambdaUpdateWrapper<SyncTask>()
+            .eq(SyncTask::getTaskId, task.getTaskId())
+            .set(SyncTask::getOverwriteStageTable, null));
     }
 
-    private static boolean tableExists(Connection connection, String schema, String table) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("select 1 from information_schema.tables where table_schema=? and table_name=?")) {
-            statement.setString(1, schema); statement.setString(2, table);
-            try (ResultSet result = statement.executeQuery()) { return result.next(); }
-        }
-    }
-
-    private static void executeRename(Connection connection, String schema, String from, String to) throws SQLException {
-        execute(connection, "alter table " + quote(schema) + "." + quote(from) + " rename to " + quote(to));
-    }
-
-    private static void execute(Connection connection, String sql) throws SQLException {
-        try (var statement = connection.createStatement()) { statement.execute(sql); }
-    }
-
-    private static String quote(String value) { return "\"" + value.replace("\"", "\"\"") + "\""; }
-
-    private static String postgresJdbcUrl(DataSource source) {
-        return "jdbc:postgresql://" + source.getHost() + ':' + source.getPort() + '/' + source.getDatabaseName()
-            + "?connectTimeout=5&socketTimeout=5&ssl=" + ("1".equals(source.getSslEnabled()));
+    private static int configVersionOf(SyncTask task) {
+        return task.getConfigVersion() == null ? 1 : task.getConfigVersion();
     }
 
     private SyncTask requireTask(Long taskId) {
@@ -493,10 +404,10 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
     }
 
     private static void ensureStartable(SyncTask task) {
-        if ("RUNNING".equals(task.getStatus()) || "PAUSING".equals(task.getStatus())) {
+        if (SyncStatus.isActive(task.getStatus())) {
             throw new ServiceException("任务当前正在运行");
         }
-        if ("FAILED".equals(task.getStatus()) || "REINITIALIZE_REQUIRED".equals(task.getStatus())) {
+        if (SyncStatus.FAILED.equals(task.getStatus()) || SyncStatus.REINITIALIZE_REQUIRED.equals(task.getStatus())) {
             throw new ServiceException("任务存在恢复风险，请使用恢复任务或重新初始化");
         }
     }
@@ -506,131 +417,70 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         return task.getEngineJobId();
     }
 
-    private static String mapStatus(String engineStatus) {
-        if (engineStatus == null) return "FAILED";
-        return switch (engineStatus.toUpperCase()) {
-            case "RUNNING", "STARTING", "INITIALIZING", "CREATED", "PENDING", "RESTARTING" -> "RUNNING";
-            case "DOING_SAVEPOINT" -> "PAUSING";
-            case "SAVEPOINT_DONE" -> "PAUSED";
-            case "CANCELED", "CANCELLED" -> "STOPPED";
-            case "FINISHED" -> "FINISHED";
-            case "FAILED" -> "FAILED";
-            default -> "FAILED";
-        };
-    }
-
-    private static String hash(String config) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(config.getBytes(StandardCharsets.UTF_8));
-            StringBuilder result = new StringBuilder(digest.length * 2);
-            for (byte value : digest) result.append(String.format("%02x", value));
-            return result.toString();
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("SHA-256 不可用", ex);
-        }
+    private void markRunning(SyncTask task, String jobId, String submittedConfig) {
+        task.setEngineJobId(jobId);
+        task.setEngineConfigHash(SyncText.sha256Hex(submittedConfig));
+        task.setStatus(SyncStatus.RUNNING);
+        task.setLastError("");
+        syncTaskMapper.updateById(task);
     }
 
     /** A status poll failed but not enough times to give up - report last-known state, persist nothing. */
     private SeaTunnelJobStatus transientStatus(SyncTask task, String jobId, String error, int streak) {
+        SeaTunnelJobStatus result = statusOf(task, jobId, "UNREACHABLE_TRANSIENT", task.getStatus(),
+            "SeaTunnel 状态暂不可达（第 " + streak + "/" + STATUS_FAILURE_TOLERANCE
+                + " 次），作业与 Kafka 桥接保持运行：" + SyncText.truncateForColumn(StringUtils.defaultIfBlank(error, "")));
+        copyKafkaMetrics(result, task);
+        return result;
+    }
+
+    private SeaTunnelJobStatus markFailed(SyncTask task, String jobId, String error) {
+        persistTerminalError(task, SyncStatus.FAILED, StringUtils.isBlank(error) ? "SeaTunnel 作业状态不可用" : error);
+        return statusOf(task, jobId, "UNREACHABLE", SyncStatus.FAILED, task.getLastError());
+    }
+
+    /** Keep the terminal engine state visible when post-processing fails. */
+    private SeaTunnelJobStatus markFailedAfterEngineCompletion(SyncTask task, String jobId, String error) {
+        persistTerminalError(task, SyncStatus.FAILED, error);
+        SeaTunnelJobStatus result = statusOf(task, jobId, "FINISHED", SyncStatus.FAILED, task.getLastError());
+        result.setPhase("SNAPSHOT");
+        return result;
+    }
+
+    private SeaTunnelJobStatus markReinitializeRequired(SyncTask task, String jobId, String error) {
+        persistTerminalError(task, SyncStatus.REINITIALIZE_REQUIRED,
+            StringUtils.isBlank(error) ? "checkpoint/savepoint 或 binlog 位点不可恢复，请重新初始化" : error);
+        return statusOf(task, jobId, "RECOVERY_REQUIRED", SyncStatus.REINITIALIZE_REQUIRED, task.getLastError());
+    }
+
+    private void persistTerminalError(SyncTask task, String status, String error) {
+        task.setStatus(status);
+        task.setLastError(SyncText.truncateForColumn(error));
+        syncTaskMapper.updateById(task);
+    }
+
+    /** Identity + checkpoint fields every status projection carries; callers add metrics as appropriate. */
+    private static SeaTunnelJobStatus statusOf(SyncTask task, String jobId, String engineStatus, String platformStatus,
+                                               String errorMessage) {
         SeaTunnelJobStatus result = new SeaTunnelJobStatus();
         result.setTaskId(task.getTaskId());
         result.setEngineJobId(jobId);
-        result.setEngineStatus("UNREACHABLE_TRANSIENT");
-        result.setStatus(task.getStatus());
-        result.setErrorMessage("SeaTunnel 状态暂不可达（第 " + streak + "/" + STATUS_FAILURE_TOLERANCE
-            + " 次），作业与 Kafka 桥接保持运行：" + truncateForColumn(StringUtils.defaultIfBlank(error, "")));
+        result.setEngineStatus(engineStatus);
+        result.setStatus(platformStatus);
+        result.setErrorMessage(errorMessage);
         result.setLastCheckpointId(task.getLastCheckpointId());
         result.setLastCheckpointTime(task.getLastCheckpointTime());
         result.setLastCheckpointStatus(task.getLastCheckpointStatus());
+        return result;
+    }
+
+    private static void copyKafkaMetrics(SeaTunnelJobStatus result, SyncTask task) {
         result.setKafkaPublishedCount(task.getKafkaPublishedCount());
         result.setKafkaLastPartition(task.getKafkaLastPartition());
         result.setKafkaLastOffset(task.getKafkaLastOffset());
         result.setKafkaLastSourceEventTime(task.getKafkaLastSourceEventTime());
         result.setKafkaLastBrokerAckTime(task.getKafkaLastBrokerAckTime());
         result.setKafkaLagSeconds(task.getKafkaLagSeconds());
-        return result;
-    }
-
-    private SeaTunnelJobStatus markFailed(SyncTask task, String jobId, String error) {
-        String safeError = StringUtils.isBlank(error) ? "SeaTunnel 作业状态不可用" : error;
-        task.setStatus("FAILED");
-        task.setLastError(truncateForColumn(safeError));
-        syncTaskMapper.updateById(task);
-        SeaTunnelJobStatus result = new SeaTunnelJobStatus();
-        result.setTaskId(task.getTaskId());
-        result.setEngineJobId(jobId);
-        result.setEngineStatus("UNREACHABLE");
-        result.setStatus("FAILED");
-        result.setErrorMessage(task.getLastError());
-        result.setLastCheckpointId(task.getLastCheckpointId());
-        result.setLastCheckpointTime(task.getLastCheckpointTime());
-        result.setLastCheckpointStatus(task.getLastCheckpointStatus());
-        return result;
-    }
-
-    /** Keep the terminal engine state visible when post-processing fails. */
-    private SeaTunnelJobStatus markFailedAfterEngineCompletion(SyncTask task, String jobId, String error) {
-        task.setStatus("FAILED");
-        task.setLastError(truncateForColumn(error));
-        syncTaskMapper.updateById(task);
-        SeaTunnelJobStatus result = new SeaTunnelJobStatus();
-        result.setTaskId(task.getTaskId());
-        result.setEngineJobId(jobId);
-        result.setEngineStatus("FINISHED");
-        result.setStatus("FAILED");
-        result.setErrorMessage(task.getLastError());
-        result.setPhase("SNAPSHOT");
-        result.setLastCheckpointId(task.getLastCheckpointId());
-        result.setLastCheckpointTime(task.getLastCheckpointTime());
-        result.setLastCheckpointStatus(task.getLastCheckpointStatus());
-        return result;
-    }
-
-    private SeaTunnelJobStatus markReinitializeRequired(SyncTask task, String jobId, String error) {
-        String safeError = StringUtils.isBlank(error)
-            ? "checkpoint/savepoint 或 binlog 位点不可恢复，请重新初始化"
-            : error;
-        task.setStatus("REINITIALIZE_REQUIRED");
-        task.setLastError(truncateForColumn(safeError));
-        syncTaskMapper.updateById(task);
-        SeaTunnelJobStatus result = new SeaTunnelJobStatus();
-        result.setTaskId(task.getTaskId());
-        result.setEngineJobId(jobId);
-        result.setEngineStatus("RECOVERY_REQUIRED");
-        result.setStatus("REINITIALIZE_REQUIRED");
-        result.setErrorMessage(task.getLastError());
-        result.setLastCheckpointId(task.getLastCheckpointId());
-        result.setLastCheckpointTime(task.getLastCheckpointTime());
-        result.setLastCheckpointStatus(task.getLastCheckpointStatus());
-        return result;
-    }
-
-    private static boolean isRecoveryBoundaryError(String error) {
-        if (StringUtils.isBlank(error)) return false;
-        String normalized = error.toLowerCase(java.util.Locale.ROOT);
-        return normalized.contains("checkpoint")
-            || normalized.contains("savepoint")
-            || normalized.contains("binlog")
-            || normalized.contains("offset")
-            || normalized.contains("restore")
-            || normalized.contains("恢复")
-            || normalized.contains("位点")
-            || normalized.contains("日志已过期");
-    }
-
-    private static String safeMessage(Exception ex) {
-        String message = ex == null ? null : ex.getMessage();
-        return StringUtils.isBlank(message) ? "未知错误" : message;
-    }
-
-    /** Keep multibyte database error text within the varchar(2000) byte limit. */
-    private static String truncateForColumn(String value) {
-        if (value == null) return null;
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length <= 1800) return value;
-        int end = 1800;
-        while (end > 0 && (bytes[end] & 0xC0) == 0x80) end--;
-        return new String(bytes, 0, end, StandardCharsets.UTF_8);
     }
 
     private static SeaTunnelJobOperationResult operation(SyncTask task, String message) {
@@ -640,23 +490,5 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         result.setStatus(task.getStatus());
         result.setMessage(message);
         return result;
-    }
-
-    private DataSource requireSource(Long sourceId, String side) {
-        if (sourceId == null) {
-            throw new ServiceException(side + "数据源不能为空");
-        }
-        DataSource source = dataSourceMapper.selectById(sourceId);
-        if (source == null) {
-            throw new ServiceException(side + "数据源不存在");
-        }
-        // Kafka brokers are commonly unauthenticated (see DataSourceServiceImpl,
-        // which never requires a password for KAFKA); rejecting a blank password here
-        // made every passwordless Kafka data source permanently unusable as a sync
-        // source/target - start()/resume()/reinitialize() all route through this check.
-        if (!"KAFKA".equalsIgnoreCase(source.getSourceType()) && StringUtils.isBlank(source.getPassword())) {
-            throw new ServiceException(side + "数据源密码未配置");
-        }
-        return source;
     }
 }
