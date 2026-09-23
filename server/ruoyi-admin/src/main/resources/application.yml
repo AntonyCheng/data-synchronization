@@ -177,6 +177,11 @@ sync:
     # 每个实例定期让本地 Kafka 桥接 worker 与库中 RUNNING 的 Kafka 任务/表项对齐（补起、停掉）。
     # raw topic 单分区 + 所有实例加入同一 consumer group = 天然的故障转移。
     reconcile-interval-ms: ${SYNC_KAFKA_BRIDGE_RECONCILE_INTERVAL_MS:30000}
+  orphan-sweep:
+    # 提交超时会丢失应答，但引擎通常已接单。作业名确定性（ds-task-<id>），据此把引擎上
+    # 仍在运行、平台却没有 jobId 的作业重新接管，避免"幽灵作业"与重复提交双写。
+    interval-ms: ${SYNC_ORPHAN_SWEEP_INTERVAL_MS:30000}
+    initial-delay-ms: ${SYNC_ORPHAN_SWEEP_INITIAL_DELAY_MS:50000}
   alerts:
     # 任务 FAILED/REINITIALIZE_REQUIRED、任务组 FAILED/DEGRADED、表项 FAILED/DDL_BLOCKED
     # 进入时通过消息中心（sys_message + SSE）通知一次，状态离开后再次进入才会再通知。

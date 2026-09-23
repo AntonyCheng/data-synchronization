@@ -21,7 +21,9 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Small REST adapter for the SeaTunnel Zeta 2.3.13 lifecycle API. */
 @Component
@@ -41,17 +43,60 @@ public class SeaTunnelRestClient {
                 builder.queryParam("isStartWithSavePoint", withSavepoint);
             }
         });
-        JsonNode body = request(client -> client.post()
-            .uri(uri)
-            .contentType(MediaType.TEXT_PLAIN)
-            .body(config)
-            .retrieve()
-            .body(String.class));
+        JsonNode body;
+        try {
+            body = requestRaw(client -> client.post()
+                .uri(uri)
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(config)
+                .retrieve()
+                .body(String.class));
+        } catch (EngineUnreachable unreachable) {
+            // We never saw an answer, so we cannot know whether the engine took the job. It
+            // usually did - a cold Zeta accepts the submit and only exceeds our request timeout
+            // while answering. Leaving it unclaimed is the worst outcome: the job keeps writing
+            // to the target while the platform records FAILED with no jobId, never polls it, and
+            // a retry would submit a second job onto the same table. Job names are deterministic,
+            // so look ours up and adopt it. An HTTP error is NOT routed here on purpose: that is
+            // the engine answering "no", and nothing was created.
+            String adopted = findRunningJobIdByName(jobName);
+            if (adopted == null) throw unreachable.asServiceException();
+            return new SubmitResult(adopted, jobName);
+        }
         String returnedJobId = text(body, "jobId");
         if (StringUtils.isBlank(returnedJobId)) {
             throw new ServiceException("SeaTunnel 提交成功但未返回 jobId");
         }
         return new SubmitResult(returnedJobId, text(body, "jobName"));
+    }
+
+    /**
+     * The id of the running job named {@code jobName}, or null when the engine does not list
+     * one (yet). A job accepted moments ago may still be compiling and not appear here at all,
+     * which is why this is only a fast path - {@code EngineOrphanSweeper} is the safety net.
+     */
+    public String findRunningJobIdByName(String jobName) {
+        return runningJobIdsByName().get(jobName);
+    }
+
+    /** Job name -> job id for everything the engine currently runs; empty when it is unreachable. */
+    public Map<String, String> runningJobIdsByName() {
+        try {
+            JsonNode body = request(client -> client.get()
+                .uri(uri("/running-jobs", ignored -> { }))
+                .retrieve()
+                .body(String.class));
+            Map<String, String> result = new LinkedHashMap<>();
+            for (JsonNode job : body) {
+                String name = text(job, "jobName");
+                String id = text(job, "jobId");
+                if (StringUtils.isNotBlank(name) && StringUtils.isNotBlank(id)) result.put(name, id);
+            }
+            return result;
+        } catch (RuntimeException ex) {
+            // Nothing to reconcile against while the engine is unreachable.
+            return Map.of();
+        }
     }
 
     public JobSnapshot status(String jobId) {
@@ -143,17 +188,43 @@ public class SeaTunnelRestClient {
         return builder.build().encode().toUri();
     }
 
+    /**
+     * Every caller but {@link #submit} treats the two failure kinds the same, so this maps
+     * {@link EngineUnreachable} straight to the usual ServiceException.
+     */
     private JsonNode request(java.util.function.Function<RestClient, String> operation) {
+        try {
+            return requestRaw(operation);
+        } catch (EngineUnreachable ex) {
+            throw ex.asServiceException();
+        }
+    }
+
+    private JsonNode requestRaw(java.util.function.Function<RestClient, String> operation) {
         try {
             String response = operation.apply(client());
             return jsonMapper.readTree(response == null ? "{}" : response);
         } catch (RestClientResponseException ex) {
+            // The engine answered, it just answered with an error - the request had no effect.
             String detail = ex.getResponseBodyAsString();
             throw new ServiceException("SeaTunnel 接口调用失败（HTTP " + ex.getStatusCode().value() + "）：" + safeDetail(detail));
         } catch (ServiceException ex) {
             throw ex;
         } catch (Exception ex) {
-            throw new ServiceException("SeaTunnel 接口不可用：" + safeDetail(ex.getMessage()));
+            // No answer at all (timeout, connection refused, reset): the request may or may not
+            // have been applied. Only submit() cares about the difference.
+            throw new EngineUnreachable(safeDetail(ex.getMessage()));
+        }
+    }
+
+    /** No HTTP answer was received, so the effect of the request is unknown. */
+    private static final class EngineUnreachable extends RuntimeException {
+        private EngineUnreachable(String detail) {
+            super(detail);
+        }
+
+        private ServiceException asServiceException() {
+            return new ServiceException("SeaTunnel 接口不可用：" + getMessage());
         }
     }
 

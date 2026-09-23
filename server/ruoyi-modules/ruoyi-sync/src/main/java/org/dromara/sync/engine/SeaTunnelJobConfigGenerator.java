@@ -43,6 +43,14 @@ public final class SeaTunnelJobConfigGenerator {
     private static final String SOURCE_TIME_ZONE = "Asia/Shanghai";
 
     /**
+     * Job names are deterministic so a job can always be traced back to the row that owns it -
+     * see EngineOrphanSweeper, which relies on it to re-attach jobs after a lost submit answer.
+     * A group's table item is projected onto a SyncTask carrying the item id, so items share
+     * this shape.
+     */
+    public static final String JOB_NAME_PREFIX = "ds-task-";
+
+    /**
      * Each CDC config claims a {@code server-id} range of {@link #SERVER_ID_RANGE_WIDTH}
      * consecutive values (see the {@code server-id = "X-(X+3)"} field). Bucketing by
      * multiplying the modulo result by the range width - instead of adding it directly -
@@ -83,7 +91,7 @@ public final class SeaTunnelJobConfigGenerator {
         String targetTable = kafkaTarget || DataSourceType.isMysql(target)
             ? configuredTargetTable
             : TableNames.qualified(defaultValue(task.getTargetSchema(), TableNames.DEFAULT_POSTGRES_SCHEMA), configuredTargetTable);
-        String jobName = "ds-task-" + task.getTaskId();
+        String jobName = JOB_NAME_PREFIX + task.getTaskId();
         String config;
         if (kafkaTarget) {
             config = buildKafkaConfig(task, source, target, sourceTable, primaryKeys, selectedColumns, syncMode, properties);

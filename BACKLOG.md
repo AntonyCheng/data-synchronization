@@ -14,7 +14,7 @@
 
 ## P0 — 正确性 / 数据安全
 
-### [ ] P0-1 提交超时会留下"幽灵作业"，且可能造成目标表双写
+### [x] P0-1 提交超时会留下"幽灵作业"，且可能造成目标表双写 — 已完成（见文末「已完成」）
 
 **问题**：`submit` 受 `sync.engine.request-timeout`（10s）约束。引擎冷启动或繁忙时，平台侧超时抛错，
 但**引擎其实已经接单并开始运行**。此时：
@@ -119,7 +119,7 @@
 **影响面**：两处。**工作量**：1 天。**风险**：中（并发下的 `itemStatusFailureStreak` 计数要保持正确，
 目前是 `ConcurrentHashMap`，可用）。
 
-### [ ] P1-5 后台热查询全是全表扫
+### [x] P1-5 后台热查询全是全表扫 — 已完成 f22e076（migration 022）
 
 **问题**：`ds_sync_task` 只有 `task_name / source_id / target_id` 上的索引，没有 `status` 和
 `next_run_time`。而调度器每 15 秒查一次 `schedule_mode in (…) and next_run_time <= now()`，
@@ -172,7 +172,7 @@
 本节针对"填表不丝滑"。全部是纯交互改动，不动任何接口和校验规则。下面每条都在代码里能指到位置，
 其中 UX-1 和 UX-2 是 2026-09-22 用浏览器实测两个向导时亲自踩到的。
 
-### [ ] UX-1 误按 Esc 或点遮罩会丢掉整份填了一半的表单
+### [x] UX-1 误按 Esc 或点遮罩会丢掉整份填了一半的表单 — 已完成 f22e076
 
 **问题**：两个弹窗的 `modalProps` 都只有 `destroyOnHidden: true`，没有关闭防护。按 Esc、点遮罩
 都会直接关闭，`destroyOnHidden` 随即销毁表单——单表向导填到第 5 步、任务组加了好几张表，
@@ -217,7 +217,7 @@
 **方案**：换成带搜索框 + 全选/反选 + "已选 N / 共 M"的选择器（列多时用虚拟滚动）；同步键字段保持
 禁用且置顶显示，说明为什么不能取消。**工作量**：1 天。**风险**：低。
 
-### [ ] UX-5 关系型目标表名没有默认值，Kafka 有
+### [x] UX-5 关系型目标表名没有默认值，Kafka 有 — 已完成 f22e076
 
 **问题**：选完源表后，Kafka 目标会自动填出 topic 名（`defaultKafkaTopic`），但 MySQL / PostgreSQL
 目标的"目标表名"是空的，必须手输——而绝大多数场景就是同名。
@@ -251,7 +251,7 @@
 
 ## P2 — 结构与可维护性
 
-### [ ] P2-1 三个高风险类零测试
+### [~] P2-1 三个高风险类零测试 — `SyncColumnSelectionValidator` 已补（f22e076），`SeaTunnelRestClient` 已补（P0-1），剩 `TargetTableSwap`、`SyncTaskGroupDdlServiceImpl`
 
 `SyncTaskGroupDdlServiceImpl`（漂移状态机，228 行，决定一张表是否被隔离）、
 `SyncColumnSelectionValidator`（每个任务创建都要过的纯函数）、`TargetTableSwap`（见 P0-2）。
@@ -285,14 +285,14 @@
 "整库发现"和"数据核对"可以按同样的方式拆成独立服务。做完 P2-3 后会自然瘦身，建议合并考虑。
 **工作量**：1 天。**风险**：中。
 
-### [ ] P2-5 `schemaHash` 存了但从不参与比较
+### [x] P2-5 `schemaHash` 存了但从不参与比较 — 已完成 f22e076
 
 DDL 检查每次都把快照 JSON 解析成对象做完整 diff，而行上已经存了 `schema_hash`。先比 hash、
 相等直接跳过 diff，能省掉绝大多数轮次的解析开销，语义不变。
 **证据**：`SyncTaskGroupDdlServiceImpl.java:107`（算出 hash）、`:121`（仍做完整 diff）
 **工作量**：1 小时。**风险**：无。
 
-### [ ] P2-6 `itemStatusFailureStreak` 不随表项删除清理
+### [x] P2-6 `itemStatusFailureStreak` 不随表项删除清理 — 已完成 f22e076
 
 内存里的 `ConcurrentMap<Long, Integer>`，表项被删除后其计数项永远留着。单条数据量极小，
 但属于无界增长。删除表项/任务组时顺手清一下即可。
@@ -331,3 +331,27 @@ DDL 检查每次都把快照 JSON 解析成对象做完整 diff，而行上已�
 - 目标端额外唯一约束的非阻断告警（`docs/api-contract.md:94` 标注为"后续版本补充"）；
 - 源端扩展到 MySQL 以外；
 - 任务依赖编排（`docs/scheduling-and-overwrite.md` 明确划在 MVP 之外）。
+
+---
+
+## 已完成
+
+### P0-1 幽灵作业（2026-09-23）
+
+最终方案与清单里的设想不同，实测推翻了第一版：
+
+1. **快路径**：`SeaTunnelRestClient.submit` 区分「引擎答了 HTTP 错误」（它拒绝了，什么都没创建，
+   不认领）和「压根没收到应答」（超时/连接断，作业可能已被接受）。只有后者去 `/running-jobs`
+   按作业名认领。用内部 `EngineUnreachable` 异常区分，不做错误文案匹配。
+2. **兜底**：新增 `EngineOrphanSweeper`（每 30s）——列一次引擎运行中的作业，把
+   `ds-task-<id>` 里平台没有 jobId 的重新接管。**这是主力**：实测发现冷引擎注册作业比任何
+   合理的内联重试窗口都慢（第一版 1 秒重试完全没赶上），而让操作员的请求阻塞十几秒去等更糟。
+   持锁的行会跳过，避免 reinitialize 换作业的过程中被误接管。
+
+只认领 `engine_job_id` 为空的行——已有 jobId 的行归状态对账管，从这里改指向会掩盖真实分歧。
+
+**验证**：把 `SEATUNNEL_REQUEST_TIMEOUT` 压到 500ms 真实复现了幽灵作业（引擎在跑
+`ds-task-2102583902907822081`，平台 FAILED + jobId 为空）；部署修复后清扫器在 40 秒内接管，
+随后刷新状态（引擎 RUNNING、已读取 3 行）、停止成功、引擎运行中作业归零——证明确实重获控制权。
+单测 120/120，其中 `SeaTunnelRestClientTest` 用 JDK 自带 HttpServer 覆盖了
+「应答丢失且能认领 / 丢失但查不到 / HTTP 500 不认领 / 无 jobId」四条分支。
