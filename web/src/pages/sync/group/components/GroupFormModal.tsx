@@ -6,7 +6,20 @@ import {
   ProFormSwitch,
   ProFormText
 } from '@ant-design/pro-components';
-import { Alert, AutoComplete, Button, Checkbox, Divider, Form, Input, message, Radio, Select, Space } from 'antd';
+import {
+  Alert,
+  AutoComplete,
+  Button,
+  Checkbox,
+  Divider,
+  Form,
+  Input,
+  message,
+  Modal,
+  Radio,
+  Select,
+  Space
+} from 'antd';
 import { useEffect, useState } from 'react';
 import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupForm, SyncTaskGroupVO } from '@/api/sync/group/types';
@@ -35,6 +48,8 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
   const [targetTablesLoading, setTargetTablesLoading] = useState(false);
   const [topicCreateLoading, setTopicCreateLoading] = useState<number>();
   const [itemMetadata, setItemMetadata] = useState<Record<string, DataSourceMetadataVO>>({});
+  // See TaskFormModal: onValuesChange marks real user edits, the prefill of an edit form does not.
+  const [dirty, setDirty] = useState(false);
 
   const syncScope = Form.useWatch('syncScope', form) || 'MULTI_TABLE';
   const targetId = Form.useWatch('targetId', form);
@@ -46,6 +61,7 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
   useEffect(() => {
     if (!open) return;
     form.resetFields();
+    setDirty(false);
     setItemMetadata({});
     setTargetTables([]);
     if (!groupId) {
@@ -122,6 +138,22 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
       form.setFieldValue(['items', itemIndex, 'syncKeyColumns'], keyOptions(result.data)[0]?.value);
   };
 
+  /** Closing a half-filled form throws the work away, so ask first once anything was typed. */
+  const confirmClose = () => {
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    Modal.confirm({
+      title: '放弃本次填写？',
+      content: '关闭后已填写的内容不会保留。',
+      okText: '放弃',
+      okButtonProps: { danger: true },
+      cancelText: '继续填写',
+      onOk: onClose
+    });
+  };
+
   const submit = async (values: SyncTaskGroupForm) => {
     const databaseScope = values.syncScope === 'DATABASE';
     const payload = {
@@ -158,10 +190,17 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
       form={form}
       width={880}
       layout="vertical"
-      modalProps={{ destroyOnHidden: true, onCancel: onClose }}
-      onOpenChange={isOpen => {
-        if (!isOpen) onClose();
+      modalProps={{
+        destroyOnHidden: true,
+        // The table list can take a while to fill in; Esc / a mask click used to discard it all.
+        mask: { closable: false },
+        keyboard: false,
+        onCancel: confirmClose
       }}
+      onOpenChange={isOpen => {
+        if (!isOpen) confirmClose();
+      }}
+      onValuesChange={() => setDirty(true)}
       onFinish={submit}
     >
       <ProFormText name="groupId" hidden />

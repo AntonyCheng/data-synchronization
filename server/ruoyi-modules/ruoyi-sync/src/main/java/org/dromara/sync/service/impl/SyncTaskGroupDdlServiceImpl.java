@@ -118,9 +118,15 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
                 continue;
             }
 
-            TableSchemaSnapshot.Diff diff = TableSchemaSnapshot.diff(TableSchemaSnapshot.fromJson(item.getSchemaSnapshot()), snapshot);
+            // schema_hash is the hash of the stored snapshot's exact bytes, so an equal hash
+            // means an identical snapshot and a guaranteed-empty diff. Skipping the parse keeps
+            // the common case (nothing changed) cheap; a blank hash falls through to the diff so
+            // rows written before the column was populated still behave.
+            boolean unchanged = StringUtils.isNotBlank(item.getSchemaHash()) && currentHash.equals(item.getSchemaHash());
+            TableSchemaSnapshot.Diff diff = unchanged ? null
+                : TableSchemaSnapshot.diff(TableSchemaSnapshot.fromJson(item.getSchemaSnapshot()), snapshot);
             SyncTaskGroupDdlEvent existing = ddlEventMapper.selectLatestOpen(item.getItemId());
-            if (!diff.changed()) {
+            if (unchanged || !diff.changed()) {
                 if (existing != null) {
                     existing.setStatus(EVENT_READY_TO_RESUME);
                     existing.setDetails("源表结构已恢复为启动快照。请确认目标端结构后恢复该表。");

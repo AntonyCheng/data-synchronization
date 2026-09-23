@@ -166,6 +166,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (current.getStatus() == null || !DELETABLE_STATUSES.contains(current.getStatus())) {
             throw new ServiceException("运行中的任务组不能删除");
         }
+        forgetFailureStreaks(groupId);
         itemMapper.deleteByGroupId(groupId);
         metricsService.deleteForGroup(groupId);
         return groupMapper.deleteById(groupId) > 0;
@@ -793,6 +794,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     private void replaceItems(SyncTaskGroup group, List<SyncTaskGroupItemBo> itemBos) {
+        forgetFailureStreaks(group.getGroupId());
         itemMapper.deleteByGroupId(group.getGroupId());
         if (itemBos == null) return;
         DataSource source = requireSource(group);
@@ -920,6 +922,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     private static boolean configChanged(SyncTaskGroupItem item, SeaTunnelJobConfigGenerator.GeneratedConfig generated) {
         return StringUtils.isNotBlank(item.getEngineConfigHash()) && !generated.matchesFingerprint(item.getEngineConfigHash());
+    }
+
+    /**
+     * Drops the in-memory poll-failure counters of a group's items. Items are re-created with
+     * fresh ids on every save and deleted with the group, so without this the map would keep
+     * an entry per item that ever existed in this process.
+     */
+    private void forgetFailureStreaks(Long groupId) {
+        items(groupId).forEach(item -> itemStatusFailureStreak.remove(item.getItemId()));
     }
 
     private void isolateItem(SyncTaskGroupItem item, String error) {

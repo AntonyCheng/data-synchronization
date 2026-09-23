@@ -8,6 +8,7 @@ import {
   Divider,
   Form,
   message,
+  Modal,
   Radio,
   Select,
   Space,
@@ -72,6 +73,10 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
   const [form] = Form.useForm<SyncTaskForm>();
   const [wizardStep, setWizardStep] = useState(0);
   const [submitLoading, setSubmitLoading] = useState(false);
+  // Set by onValuesChange, which fires for user edits but not for the programmatic prefill
+  // of an edit form - isFieldsTouched() is unusable here because each wizard step unmounts
+  // the previous step's controls.
+  const [dirty, setDirty] = useState(false);
   const [sourceDatabases, setSourceDatabases] = useState<string[]>([]);
   const [sourceTables, setSourceTables] = useState<string[]>([]);
   const [sourceDatabase, setSourceDatabase] = useState('');
@@ -89,6 +94,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
   useEffect(() => {
     if (!open) return;
     setWizardStep(0);
+    setDirty(false);
     resetMetadataState();
     resetTargetTables();
     form.resetFields();
@@ -129,6 +135,22 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
     resetMetadataState();
     resetTargetTables();
     onClose();
+  };
+
+  /** Closing a half-filled wizard throws the work away, so ask first once anything was typed. */
+  const confirmClose = () => {
+    if (!dirty) {
+      close();
+      return;
+    }
+    Modal.confirm({
+      title: '放弃本次填写？',
+      content: '关闭后已填写的内容不会保留。',
+      okText: '放弃',
+      okButtonProps: { danger: true },
+      cancelText: '继续填写',
+      onOk: close
+    });
   };
 
   const loadTargetTables = async (targetId?: string | number) => {
@@ -222,8 +244,11 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
         result.data.columns.map(column => column.name)
       );
       form.setFieldValue('syncKeyColumns', reliableKeyOptions(result.data)[0]?.value);
-      if (sourceTypeOf(dataSources, form.getFieldValue('targetId')) === 'KAFKA' && !form.getFieldValue('targetTable')) {
-        form.setFieldValue('targetTable', defaultKafkaTopic(sourceDatabase, tableName));
+      // Same-name is the overwhelmingly common case, so prefill it for every target type
+      // (Kafka gets a sanitized topic name); the field stays editable.
+      if (!form.getFieldValue('targetTable')) {
+        const targetIsKafka = sourceTypeOf(dataSources, form.getFieldValue('targetId')) === 'KAFKA';
+        form.setFieldValue('targetTable', targetIsKafka ? defaultKafkaTopic(sourceDatabase, tableName) : tableName);
       }
     } finally {
       setMetadataLoading(false);
@@ -305,16 +330,24 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       preserve
       layout="vertical"
       width={760}
-      modalProps={{ destroyOnHidden: true, onCancel: close }}
-      onOpenChange={isOpen => {
-        if (!isOpen) close();
+      modalProps={{
+        destroyOnHidden: true,
+        // A 5-step wizard is easy to lose: Esc and a stray mask click used to discard
+        // everything typed so far, because destroyOnHidden tears the form down with it.
+        mask: { closable: false },
+        keyboard: false,
+        onCancel: confirmClose
       }}
+      onOpenChange={isOpen => {
+        if (!isOpen) confirmClose();
+      }}
+      onValuesChange={() => setDirty(true)}
       onFinish={submitForm}
       onFinishFailed={() => message.error('请先完善当前步骤的必填项')}
       submitter={{
         render: () => (
           <Space>
-            <Button onClick={close}>取消</Button>
+            <Button onClick={confirmClose}>取消</Button>
             {wizardStep > 0 && <Button onClick={() => setWizardStep(current => current - 1)}>上一步</Button>}
             {wizardStep < LAST_STEP ? (
               <Button type="primary" onClick={() => void nextWizardStep()}>
