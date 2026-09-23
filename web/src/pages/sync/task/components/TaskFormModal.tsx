@@ -36,7 +36,6 @@ import { addSyncTask, getSyncTask, updateSyncTask } from '@/api/sync/task';
 import ColumnSelector from '@/components/sync/ColumnSelector';
 import {
   defaultForm,
-  defaultKafkaTopic,
   kafkaOutputFormatLabel,
   kafkaOutputFormatOptions,
   mappingRisks,
@@ -44,6 +43,7 @@ import {
   sourceLabel,
   sourceTypeOf
 } from '@/pages/sync/task/shared';
+import { defaultKafkaTopic } from '@/utils/syncNaming';
 
 const WIZARD_STEPS = ['数据源', '同步粒度', '目标端', '字段映射', '同步方式'];
 /** Human label per field, used when sending the operator back to the step that is missing it. */

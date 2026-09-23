@@ -15,7 +15,9 @@ export const emptyForm: SyncTaskGroupForm = {
   readLimitBytesPerSecond: 10485760,
   snapshotParallelism: 1,
   sourceConnectionLimit: 2,
-  items: [{ targetSchema: 'public' }]
+  // No blank starter row: tables are added through the picker (one or many at a time), and an
+  // empty item would just be an incomplete row that blocks validation on save.
+  items: []
 };
 
 export const kafkaOutputFormatOptions = [

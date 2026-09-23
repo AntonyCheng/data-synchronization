@@ -10,7 +10,7 @@ import {
   Alert,
   AutoComplete,
   Button,
-  Checkbox,
+  Collapse,
   Divider,
   Form,
   Input,
@@ -18,7 +18,8 @@ import {
   Modal,
   Radio,
   Select,
-  Space
+  Space,
+  Tag
 } from 'antd';
 import { useEffect, useState } from 'react';
 import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
@@ -27,6 +28,10 @@ import { createKafkaTopic, getDataSourceMetadata, listDataSourceTables, listKafk
 import { addSyncTaskGroup, getSyncTaskGroup, updateSyncTaskGroup } from '@/api/sync/group';
 import ColumnSelector from '@/components/sync/ColumnSelector';
 import { emptyForm, kafkaOutputFormatOptions, keyOptions, sourceTypeOf } from '@/pages/sync/group/shared';
+import { defaultTargetName } from '@/utils/syncNaming';
+
+/** Mirrors MAX_TABLES_PER_GROUP on the backend. */
+const MAX_TABLES_PER_GROUP = 20;
 
 export interface GroupFormModalProps {
   open: boolean;
@@ -51,8 +56,14 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
   const [itemMetadata, setItemMetadata] = useState<Record<string, DataSourceMetadataVO>>({});
   // See TaskFormModal: onValuesChange marks real user edits, the prefill of an edit form does not.
   const [dirty, setDirty] = useState(false);
+  // Which table panels are open. A long single-page form was the complaint: by the third table
+  // you are scrolling past everything you already configured.
+  const [openItems, setOpenItems] = useState<string[]>([]);
+  const [tablesToAdd, setTablesToAdd] = useState<string[]>([]);
+  const [bulkSchema, setBulkSchema] = useState('');
 
   const syncScope = Form.useWatch('syncScope', form) || 'MULTI_TABLE';
+  const itemValues: NonNullable<SyncTaskGroupForm['items']> = Form.useWatch('items', form) || [];
   const targetId = Form.useWatch('targetId', form);
   const targetType = sourceTypeOf(dataSources, targetId);
   const kafkaTarget = targetType === 'KAFKA';
@@ -63,6 +74,9 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
     if (!open) return;
     form.resetFields();
     setDirty(false);
+    setOpenItems([]);
+    setTablesToAdd([]);
+    setBulkSchema('');
     setItemMetadata({});
     setTargetTables([]);
     if (!groupId) {
@@ -157,6 +171,10 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
 
   const submit = async (values: SyncTaskGroupForm) => {
     const databaseScope = values.syncScope === 'DATABASE';
+    if (!databaseScope && !values.items?.length) {
+      message.error('请至少添加一张表');
+      return false;
+    }
     const payload = {
       ...values,
       kafkaOutputFormat: sourceTypeOf(dataSources, values.targetId) === 'KAFKA' ? values.kafkaOutputFormat : undefined,
@@ -203,6 +221,11 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
       }}
       onValuesChange={() => setDirty(true)}
       onFinish={submit}
+      onFinishFailed={({ errorFields }) => {
+        // An error inside a collapsed panel would otherwise be invisible.
+        setOpenItems(errorFields.length ? itemValues.map((_, index) => String(index)) : openItems);
+        message.error('请检查标红的表项');
+      }}
     >
       <ProFormText name="groupId" hidden />
       <ProFormText name="groupName" label="任务组名称" rules={[{ required: true, message: '请输入任务组名称' }]} />
@@ -333,138 +356,238 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
         </Space>
       ) : (
         <Form.List name="items">
-          {(fields, { add, remove }) => (
-            <Space direction="vertical" style={{ width: '100%' }} size={8}>
-              {/* key is destructured out: spreading it into each Form.Item gave every control
-                  in a row the same React key (antd's Form.List field carries it). */}
-              {fields.map(({ key, ...field }) => {
-                const metadata = itemMetadata[String(field.name)];
-                return (
-                  <div key={key} style={{ borderBottom: '1px solid #f0f0f0', paddingBottom: 12 }}>
-                    <Space align="start" wrap>
-                      <Form.Item {...field} name={[field.name, 'sourceDatabase']} hidden>
-                        <Input />
-                      </Form.Item>
-                      <Form.Item
-                        {...field}
-                        name={[field.name, 'sourceTable']}
-                        label="源表"
-                        rules={[
-                          { required: true, message: '请选择源表' },
-                          {
-                            validator: (_rule, value) => {
-                              if (!value) return Promise.resolve();
-                              const items: NonNullable<SyncTaskGroupForm['items']> = form.getFieldValue('items') || [];
-                              const duplicate = items.some(
-                                (item, index) => index !== field.name && item?.sourceTable === value
-                              );
-                              return duplicate
-                                ? Promise.reject(new Error('该表已在本任务组中选过'))
-                                : Promise.resolve();
-                            }
-                          }
-                        ]}
-                      >
-                        <Select
-                          showSearch
-                          options={sourceTables.map(table => ({ label: table, value: table }))}
-                          style={{ width: 220 }}
-                          onChange={value => void loadItemMetadata(field.name, value)}
-                        />
-                      </Form.Item>
-                      {postgresTarget && (
-                        <Form.Item {...field} name={[field.name, 'targetSchema']} label="目标 Schema">
-                          <Input placeholder="public" style={{ width: 120 }} />
-                        </Form.Item>
-                      )}
-                      <Form.Item
-                        {...field}
-                        name={[field.name, 'targetTable']}
-                        label={kafkaTarget ? '目标 topic' : '目标表'}
-                        rules={[{ required: true, message: kafkaTarget ? '请选择或填写目标 topic' : '请输入目标表' }]}
-                      >
-                        <AutoComplete
-                          options={targetTables.map(table => ({ label: table, value: table }))}
-                          allowClear
-                          placeholder={
-                            kafkaTarget
-                              ? targetTablesLoading
-                                ? '正在读取 topic 列表'
-                                : '选择已有 topic 或输入新 topic'
-                              : targetTablesLoading
-                                ? '正在读取目标表，可直接输入新表名'
-                                : '选择已有表或输入新表名'
-                          }
-                          style={{ width: 220 }}
-                        />
-                      </Form.Item>
-                      {kafkaTarget && (
-                        <Button
-                          type="default"
-                          loading={topicCreateLoading === field.name}
-                          onClick={() => void createGroupTopic(field.name)}
-                        >
-                          创建 topic
-                        </Button>
-                      )}
-                      <Button danger type="text" onClick={() => remove(field.name)}>
-                        删除
-                      </Button>
-                    </Space>
-                    <Alert
-                      type="info"
-                      showIcon
-                      message={
-                        kafkaTarget
-                          ? '可选择已有 topic，也可输入名称后点击“创建 topic”；平台不会依赖 broker 自动建 topic。'
-                          : '可选择目标库已有表，也可直接输入新表名；新表启动时按源表字段结构自动创建。'
-                      }
-                      style={{ marginTop: 8 }}
+          {(fields, { add, remove }) => {
+            const chosen = new Set(itemValues.map(item => item?.sourceTable).filter(Boolean));
+            const addable = sourceTables.filter(table => !chosen.has(table));
+            const sourceDb =
+              dataSources.find(item => String(item.sourceId) === String(form.getFieldValue('sourceId')))
+                ?.databaseName || '';
+
+            /** Adds one panel per picked table, pre-filled the way a single table would be. */
+            const addPicked = () => {
+              tablesToAdd.forEach((table, offset) => {
+                const index = fields.length + offset;
+                add({
+                  sourceTable: table,
+                  targetTable: defaultTargetName(sourceDb, table, kafkaTarget),
+                  targetSchema: postgresTarget ? bulkSchema.trim() || 'public' : undefined
+                });
+                void loadItemMetadata(index, table);
+              });
+              setOpenItems(current => [...current, ...tablesToAdd.map((_, offset) => String(fields.length + offset))]);
+              setTablesToAdd([]);
+            };
+
+            const applySchemaToAll = () => {
+              const schema = bulkSchema.trim() || 'public';
+              const items = (form.getFieldValue('items') || []) as NonNullable<SyncTaskGroupForm['items']>;
+              form.setFieldsValue({ items: items.map(item => ({ ...item, targetSchema: schema })) });
+              setDirty(true);
+              message.success(`已将目标 Schema 设为 ${schema}`);
+            };
+
+            return (
+              <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Space wrap size={4}>
+                    <Select
+                      mode="multiple"
+                      allowClear
+                      showSearch
+                      value={tablesToAdd}
+                      onChange={setTablesToAdd}
+                      options={addable.map(table => ({ label: table, value: table }))}
+                      placeholder={sourceTables.length ? '选择要加入的源表（可多选）' : '请先选择源数据源'}
+                      style={{ minWidth: 320 }}
+                      maxTagCount="responsive"
                     />
-                    {metadata && (
-                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                        <Form.Item
-                          {...field}
-                          name={[field.name, 'selectedColumns']}
-                          label="同步字段"
-                          rules={[{ required: true, message: '至少选择一个同步字段' }]}
-                          extra="同步键字段不可排除。"
-                        >
-                          <ColumnSelector
-                            columns={metadata.columns.map(column => ({
-                              name: column.name,
-                              typeName: column.typeName
-                            }))}
-                            lockedColumns={String(form.getFieldValue(['items', field.name, 'syncKeyColumns']) || '')
-                              .split(',')
-                              .filter(Boolean)}
-                          />
-                        </Form.Item>
-                        <Form.Item
-                          {...field}
-                          name={[field.name, 'syncKeyColumns']}
-                          label="同步键"
-                          rules={[{ required: true, message: '请选择可靠同步键' }]}
-                        >
-                          <Select
-                            options={keyOptions(metadata)}
-                            disabled={keyOptions(metadata).length === 0}
-                            placeholder="请选择主键或非空唯一键"
-                          />
-                        </Form.Item>
-                        {keyOptions(metadata).length === 0 && (
-                          <Alert type="warning" showIcon message="该表没有可靠同步键，无法加入 CDC 任务组。" />
-                        )}
-                      </Space>
+                    <Button type="primary" disabled={tablesToAdd.length === 0} onClick={addPicked}>
+                      {tablesToAdd.length ? `添加 ${tablesToAdd.length} 张表` : '添加表'}
+                    </Button>
+                    {postgresTarget && (
+                      <>
+                        <Input
+                          value={bulkSchema}
+                          onChange={event => setBulkSchema(event.target.value)}
+                          placeholder="目标 Schema"
+                          style={{ width: 140 }}
+                        />
+                        <Button disabled={fields.length === 0} onClick={applySchemaToAll}>
+                          应用到全部表项
+                        </Button>
+                      </>
                     )}
-                  </div>
-                );
-              })}
-              <Button type="dashed" onClick={() => add({ targetSchema: postgresTarget ? 'public' : undefined })}>
-                添加表
-              </Button>
-            </Space>
-          )}
+                  </Space>
+                  <Tag color={fields.length ? 'processing' : 'default'}>
+                    已选 {fields.length} / 上限 {MAX_TABLES_PER_GROUP} 张
+                  </Tag>
+                </Space>
+                {fields.length === 0 && (
+                  <Alert type="info" showIcon title="还没有表项：在上面挑选源表后点「添加」，可一次加入多张。" />
+                )}
+                <Collapse
+                  activeKey={openItems}
+                  onChange={keys => setOpenItems(([] as (string | number)[]).concat(keys).map(String))}
+                  items={fields.map(({ key, ...field }) => {
+                    const metadata = itemMetadata[String(field.name)];
+                    const item = itemValues[field.name] || {};
+                    const columnCount = Array.isArray(item.selectedColumns)
+                      ? item.selectedColumns.length
+                      : String(item.selectedColumns || '')
+                          .split(',')
+                          .filter(Boolean).length;
+                    return {
+                      key: String(field.name),
+                      // Kept mounted so validation still reaches fields in a collapsed panel.
+                      forceRender: true,
+                      label: (
+                        <Space wrap size={8}>
+                          <span>{item.sourceTable || '未选择源表'}</span>
+                          <span style={{ opacity: 0.45 }}>→</span>
+                          <span>{item.targetTable || (kafkaTarget ? '未填 topic' : '未填目标表')}</span>
+                          {columnCount > 0 && <Tag>已选 {columnCount} 字段</Tag>}
+                          {item.syncKeyColumns && <Tag color="blue">键 {item.syncKeyColumns}</Tag>}
+                        </Space>
+                      ),
+                      extra: (
+                        <Button
+                          danger
+                          type="text"
+                          size="small"
+                          onClick={event => {
+                            event.stopPropagation();
+                            remove(field.name);
+                          }}
+                        >
+                          删除
+                        </Button>
+                      ),
+                      children: (
+                        <>
+                          <Space align="start" wrap>
+                            <Form.Item {...field} name={[field.name, 'sourceDatabase']} hidden>
+                              <Input />
+                            </Form.Item>
+                            <Form.Item
+                              {...field}
+                              name={[field.name, 'sourceTable']}
+                              label="源表"
+                              rules={[
+                                { required: true, message: '请选择源表' },
+                                {
+                                  validator: (_rule, value) => {
+                                    if (!value) return Promise.resolve();
+                                    const items: NonNullable<SyncTaskGroupForm['items']> =
+                                      form.getFieldValue('items') || [];
+                                    const duplicate = items.some(
+                                      (other, index) => index !== field.name && other?.sourceTable === value
+                                    );
+                                    return duplicate
+                                      ? Promise.reject(new Error('该表已在本任务组中选过'))
+                                      : Promise.resolve();
+                                  }
+                                }
+                              ]}
+                            >
+                              <Select
+                                showSearch
+                                options={sourceTables.map(table => ({ label: table, value: table }))}
+                                style={{ width: 220 }}
+                                onChange={value => void loadItemMetadata(field.name, value)}
+                              />
+                            </Form.Item>
+                            {postgresTarget && (
+                              <Form.Item {...field} name={[field.name, 'targetSchema']} label="目标 Schema">
+                                <Input placeholder="public" style={{ width: 120 }} />
+                              </Form.Item>
+                            )}
+                            <Form.Item
+                              {...field}
+                              name={[field.name, 'targetTable']}
+                              label={kafkaTarget ? '目标 topic' : '目标表'}
+                              rules={[
+                                { required: true, message: kafkaTarget ? '请选择或填写目标 topic' : '请输入目标表' }
+                              ]}
+                            >
+                              <AutoComplete
+                                options={targetTables.map(table => ({ label: table, value: table }))}
+                                allowClear
+                                placeholder={
+                                  kafkaTarget
+                                    ? targetTablesLoading
+                                      ? '正在读取 topic 列表'
+                                      : '选择已有 topic 或输入新 topic'
+                                    : targetTablesLoading
+                                      ? '正在读取目标表，可直接输入新表名'
+                                      : '选择已有表或输入新表名'
+                                }
+                                style={{ width: 220 }}
+                              />
+                            </Form.Item>
+                            {kafkaTarget && (
+                              <Button
+                                type="default"
+                                loading={topicCreateLoading === field.name}
+                                onClick={() => void createGroupTopic(field.name)}
+                              >
+                                创建 topic
+                              </Button>
+                            )}
+                          </Space>
+                          {metadata ? (
+                            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'selectedColumns']}
+                                label="同步字段"
+                                rules={[{ required: true, message: '至少选择一个同步字段' }]}
+                                extra="同步键字段不可排除。"
+                              >
+                                <ColumnSelector
+                                  columns={metadata.columns.map(column => ({
+                                    name: column.name,
+                                    typeName: column.typeName
+                                  }))}
+                                  lockedColumns={String(item.syncKeyColumns || '')
+                                    .split(',')
+                                    .filter(Boolean)}
+                                />
+                              </Form.Item>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, 'syncKeyColumns']}
+                                label="同步键"
+                                rules={[{ required: true, message: '请选择可靠同步键' }]}
+                              >
+                                <Select
+                                  options={keyOptions(metadata)}
+                                  disabled={keyOptions(metadata).length === 0}
+                                  placeholder="请选择主键或非空唯一键"
+                                />
+                              </Form.Item>
+                              {keyOptions(metadata).length === 0 && (
+                                <Alert type="warning" showIcon title="该表没有可靠同步键，无法加入 CDC 任务组。" />
+                              )}
+                            </Space>
+                          ) : (
+                            <Alert
+                              type="info"
+                              showIcon
+                              title={
+                                kafkaTarget
+                                  ? '可选择已有 topic，也可输入名称后点击「创建 topic」；平台不会依赖 broker 自动建 topic。'
+                                  : '选择源表后会读取它的字段结构；新表在任务启动时按源表结构自动创建。'
+                              }
+                            />
+                          )}
+                        </>
+                      )
+                    };
+                  })}
+                />
+              </Space>
+            );
+          }}
         </Form.List>
       )}
     </ModalForm>

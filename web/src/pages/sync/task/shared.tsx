@@ -101,10 +101,6 @@ export function reliableKeyOptions(metadata?: DataSourceMetadataVO) {
   return options;
 }
 
-export function defaultKafkaTopic(database: string, table: string) {
-  return `${database || 'source'}_${table}`.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 249);
-}
-
 export function mappingRisks(metadata?: DataSourceMetadataVO) {
   if (!metadata) return [];
   const risks: string[] = [];
