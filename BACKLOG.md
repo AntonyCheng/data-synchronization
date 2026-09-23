@@ -70,7 +70,7 @@
 + 表项的口径，前端改读它。顺带补上自动刷新。**影响面**：新增一个端点 + 首页改造。
 **工作量**：1 天。**风险**：低（新端点，不动既有接口）。
 
-### [ ] P1-2 元数据读取每次新建一条不池化的 JDBC 连接
+### [x] P1-2 元数据读取每次新建一条不池化的 JDBC 连接 —— 已做（见「已完成」）
 
 **问题**：`JdbcUrls.open` 走 `DriverManager.getConnection`，每次调用一条新连接。DDL 检查每 60 秒
 **逐表**调一次 `queryTableMetadata`——一个 20 张表的任务组 = 每分钟 20 次到客户源库的 TCP+认证握手，
@@ -251,7 +251,7 @@
 
 ## P2 — 结构与可维护性
 
-### [~] P2-1 三个高风险类零测试 — `SyncColumnSelectionValidator`（f22e076）、`SeaTunnelRestClient`（P0-1）、`TargetTableSwap`（P0-2）均已补，剩 `SyncTaskGroupDdlServiceImpl`
+### [x] P2-1 三个高风险类零测试 — `SyncColumnSelectionValidator`（f22e076）、`SeaTunnelRestClient`（P0-1）、`TargetTableSwap`（P0-2）、`SyncTaskGroupDdlServiceImpl`（P1-2）均已补
 
 `SyncTaskGroupDdlServiceImpl`（漂移状态机，228 行，决定一张表是否被隔离）、
 `SyncColumnSelectionValidator`（每个任务创建都要过的纯函数）、`TargetTableSwap`（见 P0-2）。
@@ -418,3 +418,31 @@ DDL 检查每次都把快照 JSON 解析成对象做完整 diff，而行上已�
 **验证**：造了一个"只有任务组、没有任何单表任务"的场景（正是旧仪表盘显示 0 的那个 bug）——
 `/sync/overview` 返回作业 2/2、单表任务 0、表项 2 运行中 2；浏览器实测首页 KPI 显示
 「运行中作业 2 / 2」、链路卡片「2 个任务，2 个运行中」、状态分布饼图有数据，0 页面错误。
+
+### P1-2 源库连接复用（2026-09-23）
+
+DDL 检查过去**逐表**调 `queryTableMetadata`，而 `JdbcUrls.open` 走 `DriverManager` 不池化——
+一个 20 张表的任务组每分钟就是 20 次到客户生产库的 TCP+认证握手，长期常驻。平台一边卖"源库保护"
+（限速、连接数上限），一边自己是源库上最吵的那个客户端。
+
+做法是给 `IDataSourceMetadataService` 加一个批量入口
+`queryTablesMetadata(sourceId, database, tables)`：一条连接读完整组表，返回 `表名 -> TableMetadata`，
+其中 `metadata` 与 `error` 恰有一个有值——**逐表失败隔离的语义必须原样保留**，一张表被删/被回收权限
+不能连累其余表的检查。实现上把"开连接"与"读一张表"拆开（`readTable`），单表入口照旧；顺带把
+charset/collation 提到批次级别读一次（它是库级属性，过去每张表都查一遍 `information_schema.schemata`）。
+`doCheckDdl` 按 `sourceDatabase` 分组后每库一次批量读，整批连不上时退化成逐表 `TABLE_UNAVAILABLE`，
+与改之前的行为一致。
+
+**验证**：5 张表的任务组跑起来后开 MySQL general log 采样 70 秒（覆盖一整轮 DDL 检查），
+平台侧 `seatunnel@172.19.0.1` 的 Connect 事件为 **1 次**（另外 14 次 `root@127.0.0.1` 是我自己的
+探针命令）——改之前这里必然是 5 次。随后给 `ddl_probe_a` 加一列，`ddl-check` 只隔离了这一张
+（ADD_COLUMN / 新增字段：email / READY_TO_RESUME，组转 DEGRADED），其余 4 张继续 RUNNING，
+逐表隔离语义未变；单表元数据接口的 charset/collation 仍正确返回 `utf8mb4 / utf8mb4_0900_ai_ci`。
+
+同时补齐 P2-1 最后一块：新增 `SyncTaskGroupDdlServiceImplTest`（8 条），覆盖"一轮一次批量读"、
+"跨库分别读"、加列→隔离该表、目标不兼容→PENDING_FIX、回到基线→READY_TO_RESUME、
+无基线→只建基线不报事件、单表不可读不连累其余、整库不可达逐表标记。后端单测 127 → 135 全绿。
+
+**仍未做**：`checkTargetCompatibility` 内部仍是每次两条新连接（源+目标），只在表结构真变了或首次
+建基线时触发，属低频路径；向导里的连续探查也还没有连接缓存（原清单方案 2），留待后续。
+

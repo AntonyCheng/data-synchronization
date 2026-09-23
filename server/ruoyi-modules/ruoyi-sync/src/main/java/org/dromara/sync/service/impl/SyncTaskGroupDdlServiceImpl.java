@@ -31,6 +31,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Periodic and on-demand DDL drift checks for task groups. Isolates only the changed table
@@ -87,14 +91,16 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
 
         int newlyDetected = 0;
         int readyToResume = 0;
-        for (SyncTaskGroupItem item : itemMapper.selectByGroupId(groupId)) {
-            DataSourceMetadataVo current;
-            try {
-                current = metadataService.queryTableMetadata(source.getSourceId(),
-                    StringUtils.defaultIfBlank(item.getSourceDatabase(), source.getDatabaseName()), item.getSourceTable());
-            } catch (RuntimeException ex) {
+        List<SyncTaskGroupItem> items = itemMapper.selectByGroupId(groupId);
+        // One connection per source database for the whole pass rather than one per table: this
+        // runs every minute against the customer's production database.
+        Map<String, IDataSourceMetadataService.TableMetadata> schemas = readSourceSchemas(source, items);
+        for (SyncTaskGroupItem item : items) {
+            IDataSourceMetadataService.TableMetadata read = schemas.get(item.getSourceTable());
+            DataSourceMetadataVo current = read == null ? null : read.metadata();
+            if (current == null) {
                 SyncTaskGroupDdlEvent event = upsertEvent(group, item, null, "TABLE_UNAVAILABLE", "HIGH",
-                    "无法读取源表结构：" + StringUtils.defaultIfBlank(ex.getMessage(), "元数据读取失败"),
+                    "无法读取源表结构：" + StringUtils.defaultIfBlank(read == null ? null : read.error(), "元数据读取失败"),
                     "确认源表仍存在且同步账号具有读取元数据权限后重新执行结构检查。", EVENT_PENDING_FIX);
                 isolate(item, event);
                 result.getEvents().add(toVo(event, item, target));
@@ -155,6 +161,30 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
         result.setMessage(result.getEvents().isEmpty() ? "未发现运行中表结构变更"
             : "检测到 " + result.getEvents().size() + " 条结构变更事件，其中 " + readyToResume + " 条已可恢复");
         return result;
+    }
+
+    /**
+     * Current source structure for every table of the group, keyed by table name. Items normally
+     * share one database, so this is one connection; a group whose items were discovered against
+     * different databases gets one per database. A batch that cannot even connect degrades to a
+     * per-table error rather than aborting the pass, which is how the old per-table read behaved.
+     */
+    private Map<String, IDataSourceMetadataService.TableMetadata> readSourceSchemas(DataSource source,
+                                                                                    List<SyncTaskGroupItem> items) {
+        Map<String, List<String>> tablesByDatabase = items.stream().collect(Collectors.groupingBy(
+            item -> StringUtils.defaultIfBlank(item.getSourceDatabase(), source.getDatabaseName()),
+            LinkedHashMap::new,
+            Collectors.mapping(SyncTaskGroupItem::getSourceTable, Collectors.toList())));
+        Map<String, IDataSourceMetadataService.TableMetadata> schemas = new LinkedHashMap<>();
+        tablesByDatabase.forEach((database, tables) -> {
+            try {
+                schemas.putAll(metadataService.queryTablesMetadata(source.getSourceId(), database, tables));
+            } catch (RuntimeException ex) {
+                String message = SyncText.safeMessage(ex, "元数据读取失败");
+                tables.forEach(table -> schemas.put(table, new IDataSourceMetadataService.TableMetadata(null, message)));
+            }
+        });
+        return schemas;
     }
 
     private SyncTaskGroupOperationResult doResumeDdlItem(Long groupId, Long itemId) {

@@ -31,6 +31,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -114,26 +115,58 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         DataSource source = requireSource(sourceId);
         if (DataSourceType.isKafka(source)) throw new ServiceException("Kafka 数据源没有关系型表元数据");
         String database = StringUtils.isBlank(databaseName) ? source.getDatabaseName() : databaseName.trim();
-        String table = tableName.trim();
         try (Connection connection = openConnection(source, database)) {
-            DatabaseMetaData metadata = connection.getMetaData();
-            String catalog = DataSourceType.isMysql(source) ? database : null;
-            String schema = DataSourceType.isPostgres(source)
-                ? (StringUtils.isBlank(schemaName) ? defaultSchema(source) : schemaName.trim()) : null;
-            DataSourceMetadataVo result = new DataSourceMetadataVo();
-            result.setSourceId(sourceId);
-            result.setSourceType(source.getSourceType());
-            result.setDatabaseName(database);
-            result.setTableName(table);
+            return readTable(connection, source, database, schemaName, tableName.trim(),
+                readDatabaseEncoding(connection, source, database));
+        } catch (SQLException ex) {
+            throw metadataFailure("读取表结构失败", ex);
+        }
+    }
 
-            Map<String, DataSourceColumnVo> columns = readColumns(metadata, catalog, schema, table, result);
-            result.setPrimaryKeys(readPrimaryKeys(metadata, catalog, schema, table));
-            result.setUniqueKeys(readUniqueKeys(metadata, catalog, schema, table, columns));
-            readDatabaseEncoding(connection, source, database, result);
+    @Override
+    public Map<String, TableMetadata> queryTablesMetadata(Long sourceId, String databaseName, Collection<String> tableNames) {
+        Map<String, TableMetadata> result = new LinkedHashMap<>();
+        if (tableNames == null || tableNames.isEmpty()) return result;
+        DataSource source = requireSource(sourceId);
+        if (DataSourceType.isKafka(source)) throw new ServiceException("Kafka 数据源没有关系型表元数据");
+        String database = StringUtils.isBlank(databaseName) ? source.getDatabaseName() : databaseName.trim();
+        try (Connection connection = openConnection(source, database)) {
+            DatabaseEncoding encoding = readDatabaseEncoding(connection, source, database);
+            for (String tableName : tableNames) {
+                if (StringUtils.isBlank(tableName)) continue;
+                String table = tableName.trim();
+                if (result.containsKey(table)) continue;
+                try {
+                    result.put(table, new TableMetadata(readTable(connection, source, database, null, table, encoding), null));
+                } catch (SQLException | RuntimeException ex) {
+                    result.put(table, new TableMetadata(null, SyncText.safeMessage(ex, "读取表结构失败")));
+                }
+            }
             return result;
         } catch (SQLException ex) {
             throw metadataFailure("读取表结构失败", ex);
         }
+    }
+
+    /** The read itself, against a connection the caller owns and may reuse across tables. */
+    private DataSourceMetadataVo readTable(Connection connection, DataSource source, String database,
+                                           String schemaName, String table, DatabaseEncoding encoding) throws SQLException {
+        DatabaseMetaData metadata = connection.getMetaData();
+        String catalog = DataSourceType.isMysql(source) ? database : null;
+        String schema = DataSourceType.isPostgres(source)
+            ? (StringUtils.isBlank(schemaName) ? defaultSchema(source) : schemaName.trim()) : null;
+        DataSourceMetadataVo result = new DataSourceMetadataVo();
+        result.setSourceId(source.getSourceId());
+        result.setSourceType(source.getSourceType());
+        result.setDatabaseName(database);
+        result.setTableName(table);
+        result.setCharset(encoding.charset());
+        result.setCollation(encoding.collation());
+
+        Map<String, DataSourceColumnVo> columns = readColumns(metadata, catalog, schema, table, result);
+        result.setPrimaryKeys(readPrimaryKeys(metadata, catalog, schema, table));
+        result.setUniqueKeys(readUniqueKeys(metadata, catalog, schema, table, columns));
+        return result;
     }
 
     @Override
@@ -453,17 +486,21 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         return new ArrayList<>(indexes.values());
     }
 
-    private void readDatabaseEncoding(Connection connection, DataSource source, String database, DataSourceMetadataVo result) throws SQLException {
-        if (DataSourceType.isMysql(source)) {
-            try (PreparedStatement statement = connection.prepareStatement(
-                "select default_character_set_name, default_collation_name from information_schema.schemata where schema_name = ?")) {
-                statement.setString(1, database);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next()) {
-                        result.setCharset(resultSet.getString(1));
-                        result.setCollation(resultSet.getString(2));
-                    }
-                }
+    /** Charset and collation belong to the database, not the table, so a batch read fetches them once. */
+    private record DatabaseEncoding(String charset, String collation) {
+
+        private static final DatabaseEncoding UNKNOWN = new DatabaseEncoding(null, null);
+    }
+
+    private DatabaseEncoding readDatabaseEncoding(Connection connection, DataSource source, String database) throws SQLException {
+        if (!DataSourceType.isMysql(source)) return DatabaseEncoding.UNKNOWN;
+        try (PreparedStatement statement = connection.prepareStatement(
+            "select default_character_set_name, default_collation_name from information_schema.schemata where schema_name = ?")) {
+            statement.setString(1, database);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next()
+                    ? new DatabaseEncoding(resultSet.getString(1), resultSet.getString(2))
+                    : DatabaseEncoding.UNKNOWN;
             }
         }
     }
