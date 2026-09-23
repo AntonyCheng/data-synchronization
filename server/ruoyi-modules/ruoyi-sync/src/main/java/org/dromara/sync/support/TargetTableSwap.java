@@ -8,6 +8,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Swaps a completed FULL/OVERWRITE staging table into place on a relational target so that
@@ -42,12 +44,10 @@ public final class TargetTableSwap {
         try (Connection connection = JdbcUrls.open(target)) {
             connection.setAutoCommit(false);
             try {
-                execute(connection, "drop table if exists " + pgName(schema, backupName));
-                if (postgresTableExists(connection, schema, targetName)) {
-                    execute(connection, "alter table " + pgName(schema, targetName) + " rename to " + pgQuote(backupName));
+                for (String sql : postgresPlan(schema, targetName, stageName, backupName,
+                    postgresTableExists(connection, schema, targetName))) {
+                    execute(connection, sql);
                 }
-                execute(connection, "alter table " + pgName(schema, stageName) + " rename to " + pgQuote(targetName));
-                execute(connection, "drop table if exists " + pgName(schema, backupName));
                 connection.commit();
             } catch (SQLException ex) {
                 connection.rollback();
@@ -61,18 +61,47 @@ public final class TargetTableSwap {
     private static void swapMysql(DataSource target, String targetName, String stageName, String backupName) throws SQLException {
         String database = target.getDatabaseName();
         try (Connection connection = JdbcUrls.open(target)) {
-            execute(connection, "DROP TABLE IF EXISTS " + myName(database, backupName));
             boolean targetExists;
             try (ResultSet tables = connection.getMetaData().getTables(database, null, targetName, TABLE_TYPES)) {
                 targetExists = tables.next();
             }
-            String rename = targetExists
-                ? "RENAME TABLE " + myName(database, targetName) + " TO " + myName(database, backupName)
-                + ", " + myName(database, stageName) + " TO " + myName(database, targetName)
-                : "RENAME TABLE " + myName(database, stageName) + " TO " + myName(database, targetName);
-            execute(connection, rename);
-            if (targetExists) execute(connection, "DROP TABLE IF EXISTS " + myName(database, backupName));
+            for (String sql : mysqlPlan(database, targetName, stageName, backupName, targetExists)) {
+                execute(connection, sql);
+            }
         }
+    }
+
+    /**
+     * The statements a PostgreSQL swap runs, in order. Kept separate from execution because
+     * this is the part that must be exactly right - it renames tables in a customer database.
+     * The leading drop clears a backup left by an earlier failed swap, which would otherwise
+     * block the rename; PostgreSQL's RENAME TO takes a bare name, never a qualified one.
+     */
+    static List<String> postgresPlan(String schema, String targetName, String stageName, String backupName, boolean targetExists) {
+        List<String> plan = new ArrayList<>();
+        plan.add("drop table if exists " + pgName(schema, backupName));
+        if (targetExists) {
+            plan.add("alter table " + pgName(schema, targetName) + " rename to " + pgQuote(backupName));
+        }
+        plan.add("alter table " + pgName(schema, stageName) + " rename to " + pgQuote(targetName));
+        plan.add("drop table if exists " + pgName(schema, backupName));
+        return plan;
+    }
+
+    /**
+     * The statements a MySQL swap runs, in order. MySQL DDL is not transactional, so both
+     * renames must live in ONE multi-table RENAME TABLE - that statement is atomic, which is
+     * what keeps readers from ever seeing a missing table.
+     */
+    static List<String> mysqlPlan(String database, String targetName, String stageName, String backupName, boolean targetExists) {
+        List<String> plan = new ArrayList<>();
+        plan.add("DROP TABLE IF EXISTS " + myName(database, backupName));
+        plan.add(targetExists
+            ? "RENAME TABLE " + myName(database, targetName) + " TO " + myName(database, backupName)
+            + ", " + myName(database, stageName) + " TO " + myName(database, targetName)
+            : "RENAME TABLE " + myName(database, stageName) + " TO " + myName(database, targetName));
+        if (targetExists) plan.add("DROP TABLE IF EXISTS " + myName(database, backupName));
+        return plan;
     }
 
     private static boolean postgresTableExists(Connection connection, String schema, String table) throws SQLException {

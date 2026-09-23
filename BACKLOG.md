@@ -42,7 +42,7 @@
 **影响面**：单表任务 + 任务组表项两条提交路径。**工作量**：0.5 天。**风险**：低，纯增量逻辑。
 **测试**：mock `findByName` 覆盖「超时后查到 / 查不到」两条分支。
 
-### [ ] P0-2 `TargetTableSwap` 是破坏性操作但零测试
+### [x] P0-2 `TargetTableSwap` 是破坏性操作但零测试 — 已完成（见文末「已完成」）
 
 **问题**：FULL/OVERWRITE 模式下做 `target → backup、stage → target、drop backup` 的重命名切换。
 代码本身写得稳（标识符正确转义，PG 走事务、MySQL 走原子多表 RENAME），但**没有任何测试**，
@@ -251,7 +251,7 @@
 
 ## P2 — 结构与可维护性
 
-### [~] P2-1 三个高风险类零测试 — `SyncColumnSelectionValidator` 已补（f22e076），`SeaTunnelRestClient` 已补（P0-1），剩 `TargetTableSwap`、`SyncTaskGroupDdlServiceImpl`
+### [~] P2-1 三个高风险类零测试 — `SyncColumnSelectionValidator`（f22e076）、`SeaTunnelRestClient`（P0-1）、`TargetTableSwap`（P0-2）均已补，剩 `SyncTaskGroupDdlServiceImpl`
 
 `SyncTaskGroupDdlServiceImpl`（漂移状态机，228 行，决定一张表是否被隔离）、
 `SyncColumnSelectionValidator`（每个任务创建都要过的纯函数）、`TargetTableSwap`（见 P0-2）。
@@ -355,3 +355,15 @@ DDL 检查每次都把快照 JSON 解析成对象做完整 diff，而行上已�
 随后刷新状态（引擎 RUNNING、已读取 3 行）、停止成功、引擎运行中作业归零——证明确实重获控制权。
 单测 120/120，其中 `SeaTunnelRestClientTest` 用 JDK 自带 HttpServer 覆盖了
 「应答丢失且能认领 / 丢失但查不到 / HTTP 500 不认领 / 无 jobId」四条分支。
+
+### P0-2 目标表切换（2026-09-23）
+
+把"生成哪些 SQL"从"在哪执行"里拆出来（`postgresPlan` / `mysqlPlan` 两个纯函数），风险最高的
+部分从此可断言。7 条单测覆盖：目标表存在 / 不存在两条分支的完整语句序列、PostgreSQL 的
+`RENAME TO` 必须用裸名（带 schema 是语法错误）、MySQL 两次重命名必须在**同一条** RENAME TABLE
+里（DDL 非事务，拆开会露出目标表缺失的窗口）、残留 backup 一定先于任何重命名被清掉、
+标识符转义（表名来自用户输入，引号必须成对翻倍而不是截断标识符）。
+
+**真实验证**：在本地 PostgreSQL 上跑了两次 FULL/OVERWRITE——首次（目标表不存在）落 2 行、
+无残留；源端加一行后再跑（目标表已存在，走 backup 分支）得到 3 行且数据被整体替换，
+`\dt swap_check*` 确认没有遗留 stage/backup 表。
