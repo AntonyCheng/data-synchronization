@@ -25,6 +25,7 @@ import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/
 import type { SyncTaskGroupForm, SyncTaskGroupVO } from '@/api/sync/group/types';
 import { createKafkaTopic, getDataSourceMetadata, listDataSourceTables, listKafkaTopics } from '@/api/sync/data-source';
 import { addSyncTaskGroup, getSyncTaskGroup, updateSyncTaskGroup } from '@/api/sync/group';
+import ColumnSelector from '@/components/sync/ColumnSelector';
 import { emptyForm, kafkaOutputFormatOptions, keyOptions, sourceTypeOf } from '@/pages/sync/group/shared';
 
 export interface GroupFormModalProps {
@@ -429,11 +430,14 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
                           rules={[{ required: true, message: '至少选择一个同步字段' }]}
                           extra="同步键字段不可排除。"
                         >
-                          <Checkbox.Group
-                            options={metadata.columns.map(column => ({
-                              label: `${column.name} (${column.typeName || '-'})`,
-                              value: column.name
+                          <ColumnSelector
+                            columns={metadata.columns.map(column => ({
+                              name: column.name,
+                              typeName: column.typeName
                             }))}
+                            lockedColumns={String(form.getFieldValue(['items', field.name, 'syncKeyColumns']) || '')
+                              .split(',')
+                              .filter(Boolean)}
                           />
                         </Form.Item>
                         <Form.Item

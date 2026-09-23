@@ -1,9 +1,9 @@
+import { LoadingOutlined } from '@ant-design/icons';
 import { ModalForm, ProFormDependency, ProFormDigit, ProFormSelect, ProFormText } from '@ant-design/pro-components';
 import {
   Alert,
   AutoComplete,
   Button,
-  Checkbox,
   Descriptions,
   Divider,
   Form,
@@ -33,6 +33,7 @@ import {
   testDataSource
 } from '@/api/sync/data-source';
 import { addSyncTask, getSyncTask, updateSyncTask } from '@/api/sync/task';
+import ColumnSelector from '@/components/sync/ColumnSelector';
 import {
   defaultForm,
   defaultKafkaTopic,
@@ -45,6 +46,16 @@ import {
 } from '@/pages/sync/task/shared';
 
 const WIZARD_STEPS = ['数据源', '同步粒度', '目标端', '字段映射', '同步方式'];
+/** Human label per field, used when sending the operator back to the step that is missing it. */
+const FIELD_LABELS: Record<string, string> = {
+  sourceId: '源数据源',
+  targetId: '目标数据源',
+  sourceTable: '源表',
+  targetTable: '目标表',
+  selectedColumns: '同步字段',
+  syncKeyColumns: '同步键',
+  taskName: '任务名称'
+};
 const LAST_STEP = WIZARD_STEPS.length - 1;
 /** Fields each step must fill before the wizard advances. */
 const REQUIRED_FIELDS_BY_STEP = [
@@ -88,6 +99,10 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
   const [cdcPrecheck, setCdcPrecheck] = useState<DataSourceCdcPrecheckVO>();
   const [sourceConnectionTest, setSourceConnectionTest] = useState<ConnectionTestResult>();
   const [metadataLoading, setMetadataLoading] = useState(false);
+  // What the source probe is doing right now. Shown while it runs, because the probe takes a
+  // couple of seconds and used to be completely silent - the only feedback was an error toast
+  // if you clicked 下一步 too early.
+  const [probePhase, setProbePhase] = useState<string>();
 
   const taskId = task?.taskId;
 
@@ -199,22 +214,27 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
     if (!source) return;
     setMetadataLoading(true);
     try {
+      setProbePhase('正在测试源端连接…');
       const connectionResult = await testDataSource(sourceId);
       setSourceConnectionTest(connectionResult.data);
       if (!connectionResult.data?.success) return;
       if (source.sourceType === 'MYSQL') {
+        setProbePhase('正在检查 binlog / CDC 前置条件…');
         const cdcResult = await checkDataSourceCdc(sourceId);
         setCdcPrecheck(cdcResult.data);
       }
+      setProbePhase('正在读取数据库列表…');
       const databasesResult = await listDataSourceDatabases(sourceId);
       const databases = databasesResult.data || [];
       setSourceDatabases(databases);
       const database = source.databaseName || databases[0] || '';
       setSourceDatabase(database);
       if (!database) return;
+      setProbePhase('正在读取表列表…');
       const tablesResult = await listDataSourceTables(sourceId, database);
       setSourceTables(tablesResult.data || []);
       if (!tableName) return;
+      setProbePhase('正在读取源表结构…');
       const table = tableName.includes('.') ? tableName.slice(tableName.lastIndexOf('.') + 1) : tableName;
       if (!table) return;
       const metadataResult = await getDataSourceMetadata(sourceId, database, table);
@@ -228,6 +248,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
         form.setFieldValue('syncKeyColumns', reliableKeyOptions(metadataResult.data)[0]?.value);
     } finally {
       setMetadataLoading(false);
+      setProbePhase(undefined);
     }
   };
 
@@ -236,6 +257,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
     const sourceId = form.getFieldValue('sourceId');
     if (!sourceId || !sourceDatabase || !tableName) return;
     setMetadataLoading(true);
+    setProbePhase('正在读取源表结构…');
     try {
       const result = await getDataSourceMetadata(sourceId, sourceDatabase, tableName);
       setSourceMetadata(result.data);
@@ -252,7 +274,20 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       }
     } finally {
       setMetadataLoading(false);
+      setProbePhase(undefined);
     }
+  };
+
+  /** Sends the operator to the step that owns {@code field} and highlights it there. */
+  const jumpToField = (field: string) => {
+    const step = REQUIRED_FIELDS_BY_STEP.findIndex(fields => fields.includes(field));
+    const label = FIELD_LABELS[field] || field;
+    if (step >= 0) setWizardStep(step);
+    message.error(
+      step >= 0 ? `第 ${step + 1} 步「${WIZARD_STEPS[step]}」还缺少必填项：${label}` : `还缺少必填项：${label}`
+    );
+    // The panel for that step has to mount before its field can be scrolled to.
+    window.setTimeout(() => form.scrollToField(field, { behavior: 'smooth', block: 'center' }), 120);
   };
 
   const nextWizardStep = async () => {
@@ -264,7 +299,9 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
         return;
       }
       if (wizardStep === 1 && !sourceMetadata) {
-        message.error('请等待源表元数据加载完成后继续');
+        // Unreachable while a probe runs (the button is disabled then); this is the case where
+        // the probe finished without metadata, i.e. no source table was picked.
+        message.error('请先选择源表');
         return;
       }
     }
@@ -280,19 +317,25 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       : String(allValues.selectedColumns || '')
           .split(',')
           .filter(Boolean);
-    if (
-      !allValues.sourceId ||
-      !allValues.targetId ||
-      !allValues.sourceTable ||
-      !allValues.targetTable ||
-      selectedColumns.length === 0 ||
-      !allValues.syncKeyColumns
-    ) {
-      message.error('请返回前面步骤，补全源数据源、源表、目标表、字段和同步键');
+    // Name the step that is incomplete and take the operator there, instead of asking them to
+    // walk back through five steps looking for it.
+    const missing = (
+      [
+        ['sourceId', allValues.sourceId],
+        ['targetId', allValues.targetId],
+        ['sourceTable', allValues.sourceTable],
+        ['targetTable', allValues.targetTable],
+        ['selectedColumns', selectedColumns.length ? 'ok' : ''],
+        ['syncKeyColumns', allValues.syncKeyColumns]
+      ] as [string, unknown][]
+    ).find(([, value]) => !value)?.[0];
+    if (missing) {
+      jumpToField(missing);
       return false;
     }
     if (allValues.syncMode === 'INCREMENTAL' && !cdcPrecheck?.passed) {
-      message.error('纯增量任务必须先通过 CDC 前置检查，请返回第一步重新选择并检查源数据源');
+      setWizardStep(0);
+      message.error('纯增量任务必须先通过 CDC 前置检查，已返回第 1 步「数据源」，请重新选择源数据源');
       return false;
     }
     const targetType = sourceTypeOf(dataSources, allValues.targetId);
@@ -350,8 +393,13 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
             <Button onClick={confirmClose}>取消</Button>
             {wizardStep > 0 && <Button onClick={() => setWizardStep(current => current - 1)}>上一步</Button>}
             {wizardStep < LAST_STEP ? (
-              <Button type="primary" onClick={() => void nextWizardStep()}>
-                下一步
+              <Button
+                type="primary"
+                loading={metadataLoading}
+                disabled={metadataLoading}
+                onClick={() => void nextWizardStep()}
+              >
+                {metadataLoading ? '正在探查' : '下一步'}
               </Button>
             ) : (
               <Button type="primary" loading={submitLoading} onClick={() => form.submit()}>
@@ -366,9 +414,12 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       <Steps
         current={wizardStep}
         size="small"
-        style={{ marginBottom: 24 }}
+        style={{ marginBottom: probePhase ? 12 : 24 }}
         items={WIZARD_STEPS.map(title => ({ title }))}
       />
+      {probePhase && (
+        <Alert type="info" showIcon icon={<LoadingOutlined />} title={probePhase} style={{ marginBottom: 16 }} />
+      )}
       {wizardStep === 0 && (
         <>
           <Alert
@@ -572,12 +623,11 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
             rules={[{ required: true, message: '至少选择一个字段' }]}
             extra="MVP 仅支持同名字段映射；同步键字段不可排除。"
           >
-            <Checkbox.Group
-              options={sourceMetadata.columns.map(column => ({
-                label: `${column.name} (${column.typeName || '-'})`,
-                value: column.name,
-                disabled: (form.getFieldValue('syncKeyColumns') || '').split(',').includes(column.name)
-              }))}
+            <ColumnSelector
+              columns={sourceMetadata.columns.map(column => ({ name: column.name, typeName: column.typeName }))}
+              lockedColumns={String(form.getFieldValue('syncKeyColumns') || '')
+                .split(',')
+                .filter(Boolean)}
             />
           </Form.Item>
           <Form.Item
