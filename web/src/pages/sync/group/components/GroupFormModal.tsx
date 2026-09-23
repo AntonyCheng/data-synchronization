@@ -22,7 +22,7 @@ import {
   Tag
 } from 'antd';
 import { useEffect, useState } from 'react';
-import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupForm, SyncTaskGroupVO } from '@/api/sync/group/types';
 import { createKafkaTopic, getDataSourceMetadata, listDataSourceTables, listKafkaTopics } from '@/api/sync/data-source';
 import { addSyncTaskGroup, getSyncTaskGroup, updateSyncTaskGroup } from '@/api/sync/group';
@@ -37,7 +37,7 @@ export interface GroupFormModalProps {
   open: boolean;
   /** Set to edit that group, left out to create a new one. */
   group?: SyncTaskGroupVO;
-  dataSources: DataSourceVO[];
+  dataSources: DataSourceOptionVO[];
   onClose: () => void;
   onSaved: () => void;
 }

@@ -95,3 +95,13 @@ export interface KafkaTopicVO {
   partitions: number;
   replicationFactor: number;
 }
+
+/** Lightweight row for the wizards' source / target pickers (GET /sync/data-source/options). */
+export interface DataSourceOptionVO {
+  sourceId: number | string;
+  sourceName: string;
+  sourceType?: 'MYSQL' | 'POSTGRESQL' | 'KAFKA';
+  databaseName?: string;
+  /** '0' = enabled. */
+  status?: string;
+}

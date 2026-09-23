@@ -7,6 +7,7 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemVo;
 
+import java.util.Collection;
 import java.util.List;
 
 public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupItem, SyncTaskGroupItemVo> {
@@ -22,6 +23,14 @@ public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupIte
     default SyncTaskGroupItem selectOneOfGroup(Long groupId, Long itemId) {
         SyncTaskGroupItem item = selectById(itemId);
         return item != null && groupId.equals(item.getGroupId()) ? item : null;
+    }
+
+    /** All items of the given groups, ordered so each group's tables keep a stable order. */
+    default List<SyncTaskGroupItem> selectByGroupIds(Collection<Long> groupIds) {
+        if (groupIds == null || groupIds.isEmpty()) return List.of();
+        return selectList(new LambdaQueryWrapper<SyncTaskGroupItem>()
+            .in(SyncTaskGroupItem::getGroupId, groupIds)
+            .orderByAsc(SyncTaskGroupItem::getItemId));
     }
 
     /** Items the alert notifier must look at: isolated / DDL-blocked, or still carrying an open alert marker. */

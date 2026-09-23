@@ -24,7 +24,7 @@ import {
   Typography
 } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import type { DataSourceCdcPrecheckVO, DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceCdcPrecheckVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SeaTunnelJobStatus, SyncTaskVO, TaskValidationResult } from '@/api/sync/task/types';
 import { checkDataSourceCdc } from '@/api/sync/data-source';
 import { syncPhaseLabel } from '@/api/sync/metrics/types';
@@ -56,7 +56,7 @@ export interface TaskDetailModalProps {
   open: boolean;
   /** The clicked row; the modal reloads it from the server and keeps the fresh copy. */
   task?: SyncTaskVO;
-  dataSources: DataSourceVO[];
+  dataSources: DataSourceOptionVO[];
   onClose: () => void;
   /** The task changed server-side (action, delete) - the list should reload. */
   onChanged: () => void;

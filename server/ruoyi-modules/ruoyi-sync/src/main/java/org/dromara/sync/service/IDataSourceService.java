@@ -6,7 +6,10 @@ import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.bo.DataSourceBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceCredentialMigrationResult;
+import org.dromara.sync.domain.vo.DataSourceOptionVo;
 import org.dromara.sync.domain.vo.DataSourceVo;
+
+import java.util.List;
 
 /**
  * Data source service.
@@ -16,6 +19,13 @@ public interface IDataSourceService {
     PageResult<DataSourceVo> queryPageList(DataSourceBo bo, PageQuery pageQuery);
 
     DataSourceVo queryById(Long sourceId);
+
+    /**
+     * Every data source, id + name + type + database only. The wizards need the full list to
+     * populate their source / target pickers; paging them (the pages used to ask for the first
+     * 100) silently hides the rest.
+     */
+    List<DataSourceOptionVo> options();
 
     Boolean insertByBo(DataSourceBo bo);
 

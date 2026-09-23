@@ -15,6 +15,7 @@ import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.bo.DataSourceBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceCredentialMigrationResult;
+import org.dromara.sync.domain.vo.DataSourceOptionVo;
 import org.dromara.sync.domain.vo.DataSourceVo;
 import org.dromara.sync.kafka.KafkaAdminClients;
 import org.dromara.sync.mapper.DataSourceMapper;
@@ -28,6 +29,7 @@ import org.springframework.stereotype.Service;
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -57,6 +59,23 @@ public class DataSourceServiceImpl implements IDataSourceService {
     @Override
     public DataSourceVo queryById(Long sourceId) {
         return dataSourceMapper.selectVoById(sourceId);
+    }
+
+    @Override
+    public List<DataSourceOptionVo> options() {
+        return dataSourceMapper.selectList(new LambdaQueryWrapper<DataSource>()
+                .orderByAsc(DataSource::getSourceName))
+            .stream()
+            .map(source -> {
+                DataSourceOptionVo option = new DataSourceOptionVo();
+                option.setSourceId(source.getSourceId());
+                option.setSourceName(source.getSourceName());
+                option.setSourceType(source.getSourceType());
+                option.setDatabaseName(source.getDatabaseName());
+                option.setStatus(source.getStatus());
+                return option;
+            })
+            .toList();
     }
 
     @Override

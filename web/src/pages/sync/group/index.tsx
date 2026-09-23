@@ -2,9 +2,9 @@ import { DeleteOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
 import { PageContainer, ProTable, type ActionType, type ProColumns } from '@ant-design/pro-components';
 import { Button, message, Modal, Space, Tag } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import type { DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupQuery, SyncTaskGroupVO } from '@/api/sync/group/types';
-import { listDataSources } from '@/api/sync/data-source';
+import { listDataSourceOptions } from '@/api/sync/data-source';
 import { deleteSyncTaskGroup, listSyncTaskGroups } from '@/api/sync/group';
 import { useTableScroll } from '@/hooks/useTableScroll';
 import GroupDetailModal from '@/pages/sync/group/components/GroupDetailModal';
@@ -17,14 +17,15 @@ export default function SyncTaskGroupPage() {
   const actionRef = useRef<ActionType | undefined>(undefined);
   const { tableScroll } = useTableScroll(1000);
   const can = useGroupPermissions();
-  const [dataSources, setDataSources] = useState<DataSourceVO[]>([]);
+  const [dataSources, setDataSources] = useState<DataSourceOptionVO[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<SyncTaskGroupVO>();
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailGroup, setDetailGroup] = useState<SyncTaskGroupVO>();
 
   useEffect(() => {
-    listDataSources({ pageNum: 1, pageSize: 100 }).then(res => setDataSources(res.data?.rows || []));
+    // Unpaged: a paged call silently hid every data source past the first 100.
+    listDataSourceOptions().then(res => setDataSources(res.data || []));
   }, []);
 
   const reload = () => actionRef.current?.reload();

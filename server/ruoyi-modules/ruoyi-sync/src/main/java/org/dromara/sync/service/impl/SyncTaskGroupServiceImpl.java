@@ -71,6 +71,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
 
 /**
  * Multi-table / whole-database release lifecycle. One SeaTunnel job per table item; the
@@ -121,7 +122,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             .eq(StringUtils.isNotBlank(bo.getStatus()), SyncTaskGroup::getStatus, bo.getStatus())
             .orderByDesc(SyncTaskGroup::getGroupId);
         Page<SyncTaskGroupVo> page = groupMapper.selectVoPage(pageQuery.build(), wrapper);
-        page.getRecords().forEach(this::attachItems);
+        attachItems(page.getRecords());
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
@@ -817,10 +818,25 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     private void attachItems(SyncTaskGroupVo group) {
-        List<SyncTaskGroupItemVo> items = MapstructUtils.convert(itemMapper.selectByGroupId(group.getGroupId()), SyncTaskGroupItemVo.class);
-        Map<Long, SyncMetricsSampleVo> latest = metricsService.latestForGroupItems(items.stream().map(SyncTaskGroupItemVo::getItemId).toList());
+        attachItems(List.of(group));
+    }
+
+    /**
+     * Fills in every group's table items and their latest metrics with two queries in total.
+     * Doing it per row made a page of ten groups issue twenty-one queries.
+     */
+    private void attachItems(List<SyncTaskGroupVo> groups) {
+        if (groups.isEmpty()) return;
+        List<SyncTaskGroupItemVo> items = MapstructUtils.convert(
+            itemMapper.selectByGroupIds(groups.stream().map(SyncTaskGroupVo::getGroupId).toList()),
+            SyncTaskGroupItemVo.class);
+        if (items == null) items = List.of();
+        Map<Long, SyncMetricsSampleVo> latest =
+            metricsService.latestForGroupItems(items.stream().map(SyncTaskGroupItemVo::getItemId).toList());
         items.forEach(item -> item.setLatestMetrics(latest.get(item.getItemId())));
-        group.setItems(items);
+        Map<Long, List<SyncTaskGroupItemVo>> byGroup = items.stream()
+            .collect(Collectors.groupingBy(SyncTaskGroupItemVo::getGroupId));
+        groups.forEach(group -> group.setItems(byGroup.getOrDefault(group.getGroupId(), List.of())));
     }
 
     /** Expands / validates the column projection and sync key against live source metadata. */

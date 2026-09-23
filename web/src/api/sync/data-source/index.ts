@@ -6,10 +6,19 @@ import type {
   DataSourceCredentialMigrationResult,
   DataSourceForm,
   DataSourceMetadataVO,
+  DataSourceOptionVO,
   DataSourceQuery,
   DataSourceVO,
   KafkaTopicVO
 } from './types';
+
+/** Every data source, unpaged - the pickers must not silently stop at the first page. */
+export function listDataSourceOptions() {
+  return request<R<DataSourceOptionVO[]>>({
+    url: '/sync/data-source/options',
+    method: 'get'
+  });
+}
 
 export function listDataSources(query?: DataSourceQuery) {
   return request<R<PageResult<DataSourceVO>>>({ url: '/sync/data-source/list', method: 'get', params: query });

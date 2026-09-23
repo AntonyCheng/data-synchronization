@@ -1,4 +1,4 @@
-import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupForm } from '@/api/sync/group/types';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
@@ -83,7 +83,7 @@ export function keyOptions(metadata?: DataSourceMetadataVO) {
   return options;
 }
 
-export function sourceTypeOf(dataSources: DataSourceVO[], sourceId?: string | number) {
+export function sourceTypeOf(dataSources: DataSourceOptionVO[], sourceId?: string | number) {
   return dataSources.find(item => String(item.sourceId) === String(sourceId))?.sourceType;
 }
 

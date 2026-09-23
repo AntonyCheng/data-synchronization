@@ -20,7 +20,7 @@ import type {
   ConnectionTestResult,
   DataSourceCdcPrecheckVO,
   DataSourceMetadataVO,
-  DataSourceVO
+  DataSourceOptionVO
 } from '@/api/sync/data-source/types';
 import type { SyncTaskForm, SyncTaskVO } from '@/api/sync/task/types';
 import {
@@ -70,7 +70,7 @@ export interface TaskFormModalProps {
   open: boolean;
   /** Set to edit that task, left out to create a new one. */
   task?: SyncTaskVO;
-  dataSources: DataSourceVO[];
+  dataSources: DataSourceOptionVO[];
   onClose: () => void;
   onSaved: () => void;
 }

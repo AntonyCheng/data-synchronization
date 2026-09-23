@@ -11,7 +11,7 @@ import {
 } from '@ant-design/icons';
 import { Alert, Button, Descriptions, Divider, Input, message, Modal, Space, Tag } from 'antd';
 import { useEffect, useState } from 'react';
-import type { DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupDataCheckResult, SyncTaskGroupVO } from '@/api/sync/group/types';
 import {
   checkSyncTaskGroupData,
@@ -46,7 +46,7 @@ export interface GroupDetailModalProps {
   open: boolean;
   /** The clicked row; the modal reloads it from the server and keeps the fresh copy. */
   group?: SyncTaskGroupVO;
-  dataSources: DataSourceVO[];
+  dataSources: DataSourceOptionVO[];
   onClose: () => void;
   /** The group changed server-side (action, discover, delete) - the list should reload. */
   onChanged: () => void;

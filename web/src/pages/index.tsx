@@ -16,9 +16,9 @@ import { history } from '@umijs/max';
 import { Alert, Button, Card, Col, Empty, Progress, Row, Spin, Statistic, Tag, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import { useEffect, useMemo, useState } from 'react';
-import type { DataSourceVO } from '@/api/sync/data-source/types';
+import type { SyncOverviewVO } from '@/api/sync/overview/types';
 import type { SyncTaskVO } from '@/api/sync/task/types';
-import { listDataSources } from '@/api/sync/data-source';
+import { getSyncOverview } from '@/api/sync/overview';
 import { listSyncTasks } from '@/api/sync/task';
 
 const statusLabels: Record<string, string> = {
@@ -49,8 +49,8 @@ function formatTime(value?: string) {
 }
 
 export default function Dashboard() {
-  const [tasks, setTasks] = useState<SyncTaskVO[]>([]);
-  const [sources, setSources] = useState<DataSourceVO[]>([]);
+  const [overview, setOverview] = useState<SyncOverviewVO>();
+  const [recentTasks, setRecentTasks] = useState<SyncTaskVO[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>();
   const [refreshedAt, setRefreshedAt] = useState<Date>(new Date());
@@ -58,42 +58,37 @@ export default function Dashboard() {
   const loadSnapshot = async () => {
     setLoading(true);
     setLoadError(undefined);
-    const [taskResult, sourceResult] = await Promise.allSettled([
-      listSyncTasks({ pageNum: 1, pageSize: 100 }),
-      listDataSources({ pageNum: 1, pageSize: 100 })
+    // Counters come from the server so they cover task groups too and are not capped at a page;
+    // the list below is genuinely just the newest handful.
+    const [overviewResult, taskResult] = await Promise.allSettled([
+      getSyncOverview(),
+      listSyncTasks({ pageNum: 1, pageSize: 6 })
     ]);
-    if (taskResult.status === 'fulfilled') setTasks(taskResult.value.data?.rows || []);
-    if (sourceResult.status === 'fulfilled') setSources(sourceResult.value.data?.rows || []);
-    if (taskResult.status === 'rejected' || sourceResult.status === 'rejected')
+    if (overviewResult.status === 'fulfilled') setOverview(overviewResult.value.data);
+    if (taskResult.status === 'fulfilled') setRecentTasks(taskResult.value.data?.rows || []);
+    if (overviewResult.status === 'rejected' || taskResult.status === 'rejected')
       setLoadError('部分运营数据暂时无法读取，请检查后端服务或刷新重试。');
     setRefreshedAt(new Date());
     setLoading(false);
   };
   useEffect(() => {
     void loadSnapshot();
+    // Keep the console current without the operator having to click 刷新.
+    const timer = window.setInterval(() => void loadSnapshot(), 30000);
+    return () => window.clearInterval(timer);
   }, []);
 
-  const runningTasks = tasks.filter(task => ['RUNNING', 'PAUSING'].includes(task.status || '')).length;
-  const activeSources = sources.filter(source => source.status === '0');
-  const kafkaTasks = tasks.filter(
-    task => sources.find(source => String(source.sourceId) === String(task.targetId))?.sourceType === 'KAFKA'
-  ).length;
-  const checkedRows = tasks.reduce((total, task) => total + (task.lastCheckTargetRows || 0), 0);
-  const checkedTasks = tasks.filter(task => task.lastCheckMatched === '0' || task.lastCheckMatched === '1');
-  const successRate = checkedTasks.length
-    ? Math.round((checkedTasks.filter(task => task.lastCheckMatched === '1').length / checkedTasks.length) * 100)
-    : 0;
-  const cdcLags = tasks.map(task => task.kafkaLagSeconds).filter((lag): lag is number => typeof lag === 'number');
-  const avgLag = cdcLags.length ? Math.round(cdcLags.reduce((sum, lag) => sum + lag, 0) / cdcLags.length) : 0;
-  const recentTasks = [...tasks]
-    .sort((a, b) =>
-      String(b.updateTime || b.createTime || '').localeCompare(String(a.updateTime || a.createTime || ''))
-    )
-    .slice(0, 6);
+  const runningJobs = overview?.jobRunning ?? 0;
+  const totalJobs = overview?.jobTotal ?? 0;
+  const activeSources = overview?.dataSourceEnabled ?? 0;
+  const kafkaJobs = overview?.targetTypeCounts?.KAFKA ?? 0;
+  const checkedRows = overview?.checkedRows ?? 0;
+  const avgLag = overview?.avgCdcLagSeconds ?? 0;
+  const successRate = overview?.checkedJobs ? Math.round((overview.checkedMatched / overview.checkedJobs) * 100) : 0;
 
   const statusChart = useMemo<EChartsOption>(() => {
     const counts = Object.entries(statusLabels)
-      .map(([value, name]) => ({ value: tasks.filter(task => task.status === value).length, name }))
+      .map(([value, name]) => ({ value: overview?.statusCounts?.[value] ?? 0, name }))
       .filter(item => item.value > 0);
     return {
       tooltip: { trigger: 'item' },
@@ -111,16 +106,11 @@ export default function Dashboard() {
       ],
       color: ['#21d4a7', '#4ea1ff', '#f7b955', '#ff6b6b', '#8b9bb4', '#7c8cff', '#45c7d9', '#aab4c3']
     };
-  }, [tasks]);
+  }, [overview]);
   const chainChart = useMemo<EChartsOption>(() => {
     const chainTypes = ['POSTGRESQL', 'MYSQL', 'KAFKA'];
     const labels = chainTypes.map(type => `MySQL → ${typeLabels[type]}`);
-    const values = chainTypes.map(
-      type =>
-        tasks.filter(
-          task => sources.find(source => String(source.sourceId) === String(task.targetId))?.sourceType === type
-        ).length
-    );
+    const values = chainTypes.map(type => overview?.targetTypeCounts?.[type] ?? 0);
     return {
       grid: { left: 96, right: 20, top: 12, bottom: 20 },
       xAxis: {
@@ -133,7 +123,7 @@ export default function Dashboard() {
       tooltip: { trigger: 'axis' },
       series: [{ type: 'bar', data: values, barWidth: 14, itemStyle: { color: '#3ed6c0', borderRadius: [0, 4, 4, 0] } }]
     };
-  }, [sources, tasks]);
+  }, [overview]);
 
   return (
     <PageContainer title={false} className="dashboard-page">
@@ -166,16 +156,16 @@ export default function Dashboard() {
           <Col xs={24} sm={12} xl={6}>
             <Card className="kpi-card kpi-green">
               <Statistic
-                title="运行中任务"
-                value={runningTasks}
-                suffix={`/ ${tasks.length}`}
+                title="运行中作业"
+                value={runningJobs}
+                suffix={`/ ${totalJobs}`}
                 prefix={<ThunderboltOutlined />}
               />
             </Card>
           </Col>
           <Col xs={24} sm={12} xl={6}>
             <Card className="kpi-card kpi-blue">
-              <Statistic title="活跃数据源" value={activeSources.length} prefix={<DatabaseOutlined />} />
+              <Statistic title="活跃数据源" value={activeSources} prefix={<DatabaseOutlined />} />
             </Card>
           </Col>
           <Col xs={24} sm={12} xl={6}>
@@ -207,15 +197,8 @@ export default function Dashboard() {
             >
               <div className="chain-grid">
                 {['POSTGRESQL', 'MYSQL', 'KAFKA'].map(type => {
-                  const count = tasks.filter(
-                    task =>
-                      sources.find(source => String(source.sourceId) === String(task.targetId))?.sourceType === type
-                  ).length;
-                  const active = tasks.filter(
-                    task =>
-                      sources.find(source => String(source.sourceId) === String(task.targetId))?.sourceType === type &&
-                      task.status === 'RUNNING'
-                  ).length;
+                  const count = overview?.targetTypeCounts?.[type] ?? 0;
+                  const active = overview?.targetTypeRunningCounts?.[type] ?? 0;
                   return (
                     <div className="chain-item" key={type}>
                       <div className="chain-icon">
@@ -249,7 +232,7 @@ export default function Dashboard() {
                   <b>{successRate}%</b> 核对一致率
                 </span>
                 <span>
-                  <b>{kafkaTasks}</b> Kafka 任务
+                  <b>{kafkaJobs}</b> Kafka 作业
                 </span>
               </div>
             </Card>
@@ -318,13 +301,15 @@ export default function Dashboard() {
                   <span className="health-state-success">
                     <CheckCircleOutlined /> 数据源连接
                   </span>
-                  <Tag color={sources.length ? 'success' : 'default'}>{sources.length ? '已接入' : '暂无'}</Tag>
+                  <Tag color={overview?.dataSourceTotal ? 'success' : 'default'}>
+                    {overview?.dataSourceTotal ? '已接入' : '暂无'}
+                  </Tag>
                 </div>
                 <div>
-                  <span className={kafkaTasks ? 'health-state-success' : 'health-state-warning'}>
-                    {kafkaTasks ? <CheckCircleOutlined /> : <WarningOutlined />} Kafka 目标链路
+                  <span className={kafkaJobs ? 'health-state-success' : 'health-state-warning'}>
+                    {kafkaJobs ? <CheckCircleOutlined /> : <WarningOutlined />} Kafka 目标链路
                   </span>
-                  <Tag color={kafkaTasks ? 'success' : 'warning'}>{kafkaTasks ? '已配置' : '待配置'}</Tag>
+                  <Tag color={kafkaJobs ? 'success' : 'warning'}>{kafkaJobs ? '已配置' : '待配置'}</Tag>
                 </div>
               </div>
             </Card>

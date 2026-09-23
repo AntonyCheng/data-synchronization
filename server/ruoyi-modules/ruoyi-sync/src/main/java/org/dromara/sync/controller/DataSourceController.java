@@ -15,6 +15,7 @@ import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
 import org.dromara.sync.domain.vo.DataSourceCredentialMigrationResult;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
+import org.dromara.sync.domain.vo.DataSourceOptionVo;
 import org.dromara.sync.domain.vo.DataSourceVo;
 import org.dromara.sync.domain.bo.KafkaTopicCreateBo;
 import org.dromara.sync.domain.vo.KafkaTopicVo;
@@ -50,6 +51,13 @@ public class DataSourceController extends BaseController {
     @GetMapping("/list")
     public R<PageResult<DataSourceVo>> list(DataSourceBo bo, PageQuery pageQuery) {
         return R.ok(dataSourceService.queryPageList(bo, pageQuery));
+    }
+
+    /** The full list for the wizards' pickers - no paging, so nothing is silently cut off. */
+    @SaCheckPermission("sync:data-source:list")
+    @GetMapping("/options")
+    public R<List<DataSourceOptionVo>> options() {
+        return R.ok(dataSourceService.options());
     }
 
     @SaCheckPermission("sync:data-source:query")

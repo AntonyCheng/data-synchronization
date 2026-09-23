@@ -2,9 +2,9 @@ import { DeleteOutlined, EyeOutlined, PlusOutlined, StopOutlined } from '@ant-de
 import { PageContainer, ProTable, type ActionType, type ProColumns } from '@ant-design/pro-components';
 import { Button, message, Modal, Space, Tooltip } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import type { DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskQuery, SyncTaskVO } from '@/api/sync/task/types';
-import { listDataSources } from '@/api/sync/data-source';
+import { listDataSourceOptions } from '@/api/sync/data-source';
 import { deleteSyncTask, listSyncTasks, stopSyncTask } from '@/api/sync/task';
 import { useTableScroll } from '@/hooks/useTableScroll';
 import TaskDetailModal from '@/pages/sync/task/components/TaskDetailModal';
@@ -17,7 +17,7 @@ export default function SyncTaskPage() {
   const actionRef = useRef<ActionType | undefined>(undefined);
   const { tableScroll } = useTableScroll(1080);
   const permissions = useTaskPermissions();
-  const [dataSources, setDataSources] = useState<DataSourceVO[]>([]);
+  const [dataSources, setDataSources] = useState<DataSourceOptionVO[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<SyncTaskVO>();
   const [detailOpen, setDetailOpen] = useState(false);
@@ -25,7 +25,8 @@ export default function SyncTaskPage() {
   const [busyRowAction, setBusyRowAction] = useState<string>();
 
   useEffect(() => {
-    listDataSources({ pageNum: 1, pageSize: 100 }).then(res => setDataSources(res.data?.rows || []));
+    // Unpaged: a paged call silently hid every data source past the first 100.
+    listDataSourceOptions().then(res => setDataSources(res.data || []));
   }, []);
 
   const reload = () => actionRef.current?.reload();

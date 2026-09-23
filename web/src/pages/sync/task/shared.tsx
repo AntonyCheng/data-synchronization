@@ -1,6 +1,6 @@
 import { CloseOutlined } from '@ant-design/icons';
 import { Button, Tag, Tooltip, Typography } from 'antd';
-import type { DataSourceMetadataVO, DataSourceVO } from '@/api/sync/data-source/types';
+import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskForm } from '@/api/sync/task/types';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
@@ -43,11 +43,11 @@ export const statusLabels: Record<string, string> = {
   REINITIALIZE_REQUIRED: '需重新初始化'
 };
 
-export function sourceLabel(source: DataSourceVO) {
+export function sourceLabel(source: DataSourceOptionVO) {
   return `${source.sourceName} (${source.sourceType})`;
 }
 
-export function sourceTypeOf(dataSources: DataSourceVO[], sourceId?: string | number) {
+export function sourceTypeOf(dataSources: DataSourceOptionVO[], sourceId?: string | number) {
   return dataSources.find(item => String(item.sourceId) === String(sourceId))?.sourceType;
 }
 
