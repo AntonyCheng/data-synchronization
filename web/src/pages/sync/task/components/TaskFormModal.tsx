@@ -19,10 +19,10 @@ import {
   kafkaOutputFormatLabel,
   kafkaOutputFormatOptions,
   mappingRisks,
-  reliableKeyOptions,
   sourceLabel,
   sourceTypeOf
 } from '@/pages/sync/task/shared';
+import { reliableUniqueKeys, syncKeyOptions } from '@/utils/syncKeys';
 import { defaultKafkaTopic } from '@/utils/syncNaming';
 
 const WIZARD_STEPS = ['数据源', '同步粒度', '目标端', '字段映射', '同步方式'];
@@ -156,7 +156,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
           metadataResult.data.columns.map(column => column.name)
         );
       if (!form.getFieldValue('syncKeyColumns'))
-        form.setFieldValue('syncKeyColumns', reliableKeyOptions(metadataResult.data)[0]?.value);
+        form.setFieldValue('syncKeyColumns', syncKeyOptions(metadataResult.data)[0]?.value);
     });
   };
 
@@ -171,7 +171,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
         'selectedColumns',
         result.data.columns.map(column => column.name)
       );
-      form.setFieldValue('syncKeyColumns', reliableKeyOptions(result.data)[0]?.value);
+      form.setFieldValue('syncKeyColumns', syncKeyOptions(result.data)[0]?.value);
       // Same-name is the overwhelmingly common case, so prefill it for every target type
       // (Kafka gets a sanitized topic name); the field stays editable.
       if (!form.getFieldValue('targetTable')) {
@@ -267,6 +267,9 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       title={taskId ? '修改同步任务' : '新增同步任务'}
       open={open}
       form={form}
+      // Prefixes the field ids: the list's search form has its own taskName / sourceTable /
+      // targetTable inputs, and a shared id sent the labels (and scrollToField) to those instead.
+      name="syncTaskWizard"
       preserve
       layout="vertical"
       width={760}
@@ -297,7 +300,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
           <Alert
             type="info"
             showIcon
-            message="选择数据源后会重新连接并探查元数据，不直接信任历史连接状态。"
+            title="选择数据源后会重新连接并探查元数据，不直接信任历史连接状态。"
             style={{ marginBottom: 16 }}
           />
           <ProFormSelect
@@ -334,7 +337,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
           <Alert
             type="info"
             showIcon
-            message="当前入口创建单表任务；多表和整库同步请在“同步任务组”页面创建。"
+            title="当前入口创建单表任务；多表和整库同步请在“同步任务组”页面创建。"
             style={{ marginBottom: 16 }}
           />
           <ProFormSelect
@@ -356,15 +359,14 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                   : 'warning'
               }
               showIcon
-              message={`已读取 ${sourceMetadata.tableName} 元数据`}
+              title={`已读取 ${sourceMetadata.tableName} 元数据`}
               description={
                 <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
                   <Descriptions.Item label="字段数">{sourceMetadata.columns.length}</Descriptions.Item>
                   <Descriptions.Item label="字符集">{sourceMetadata.charset || '-'}</Descriptions.Item>
                   <Descriptions.Item label="主键">{sourceMetadata.primaryKeys.join(', ') || '无'}</Descriptions.Item>
                   <Descriptions.Item label="可靠唯一键">
-                    {sourceMetadata.uniqueKeys
-                      .filter(item => item.allNotNull)
+                    {reliableUniqueKeys(sourceMetadata)
                       .map(item => `${item.name} (${item.columns.join(', ')})`)
                       .join('; ') || '无'}
                   </Descriptions.Item>
@@ -429,7 +431,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                 <Alert
                   type="info"
                   showIcon
-                  message="选择已有 topic 或创建新 topic（默认 1 分区 1 副本）；创建 topic 需要 Kafka 凭证具备 Create 权限。"
+                  title="选择已有 topic 或创建新 topic（默认 1 分区 1 副本）；创建 topic 需要 Kafka 凭证具备 Create 权限。"
                 />
               </>
             ) : (
@@ -450,7 +452,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                     }
                   />
                 </Form.Item>
-                <Alert type="info" showIcon message="关系型目标已有表会执行兼容性检查；新表在任务启动时自动创建。" />
+                <Alert type="info" showIcon title="关系型目标已有表会执行兼容性检查；新表在任务启动时自动创建。" />
               </>
             )
           }
@@ -459,7 +461,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       {wizardStep === 3 && sourceMetadata && (
         <>
           {mappingRisks(sourceMetadata).map(risk => (
-            <Alert key={risk} type="warning" showIcon message={risk} style={{ marginBottom: 8 }} />
+            <Alert key={risk} type="warning" showIcon title={risk} style={{ marginBottom: 8 }} />
           ))}
           <Form.Item
             name="selectedColumns"
@@ -481,16 +483,16 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
             extra="优先使用主键；没有主键时仅可选择所有字段均为非空的唯一键。"
           >
             <Select
-              options={reliableKeyOptions(sourceMetadata)}
-              disabled={reliableKeyOptions(sourceMetadata).length === 0}
-              placeholder={reliableKeyOptions(sourceMetadata).length ? '请选择同步键' : '源表没有可靠同步键'}
+              options={syncKeyOptions(sourceMetadata)}
+              disabled={syncKeyOptions(sourceMetadata).length === 0}
+              placeholder={syncKeyOptions(sourceMetadata).length ? '请选择同步键' : '源表没有可靠同步键'}
             />
           </Form.Item>
-          {reliableKeyOptions(sourceMetadata).length === 0 && (
+          {syncKeyOptions(sourceMetadata).length === 0 && (
             <Alert
               type="warning"
               showIcon
-              message="该表没有可靠同步键，只能创建全量任务；增量相关模式在保存时会被阻断。"
+              title="该表没有可靠同步键，只能创建全量任务；增量相关模式在保存时会被阻断。"
             />
           )}
         </>
@@ -520,14 +522,14 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                   <Alert
                     type="warning"
                     showIcon
-                    message="纯增量不会补齐任务创建前的历史数据，目标端必须已有可信基线。"
+                    title="纯增量不会补齐任务创建前的历史数据，目标端必须已有可信基线。"
                     style={{ marginBottom: 12 }}
                   />
                   {cdcPrecheck && !cdcPrecheck.passed && (
                     <Alert
                       type="error"
                       showIcon
-                      message="CDC 前置检查未通过，不能创建纯增量任务。"
+                      title="CDC 前置检查未通过，不能创建纯增量任务。"
                       description={cdcPrecheck.message}
                       style={{ marginBottom: 12 }}
                     />
@@ -618,10 +620,10 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                 <Alert
                   type="warning"
                   showIcon
-                  message="全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 请使用合并（upsert）或创建纯全量覆盖任务。"
+                  title="全量 + CDC 的覆盖刷新需要一致性切换水位，当前 MVP 请使用合并（upsert）或创建纯全量覆盖任务。"
                 />
               ) : getFieldValue('fullDataMode') === 'OVERWRITE' && getFieldValue('syncMode') !== 'INCREMENTAL' ? (
-                <Alert type="warning" showIcon message="覆盖刷新将先写入临时表，作业成功后才替换正式表。" />
+                <Alert type="warning" showIcon title="覆盖刷新将先写入临时表，作业成功后才替换正式表。" />
               ) : null
             }
           </Form.Item>

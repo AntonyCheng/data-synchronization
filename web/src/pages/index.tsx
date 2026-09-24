@@ -150,7 +150,7 @@ export default function Dashboard() {
           </div>
         </section>
         {loadError && (
-          <Alert type="warning" showIcon message={loadError} closable onClose={() => setLoadError(undefined)} />
+          <Alert type="warning" showIcon title={loadError} closable onClose={() => setLoadError(undefined)} />
         )}
         <Row gutter={[16, 16]} className="dashboard-kpis">
           <Col xs={24} sm={12} xl={6}>

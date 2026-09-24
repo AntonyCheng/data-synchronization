@@ -1,4 +1,4 @@
-import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
+import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupForm } from '@/api/sync/group/types';
 import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
@@ -67,20 +67,6 @@ export function itemStatusColor(status?: string) {
   if (status === 'FAILED' || status === 'DDL_BLOCKED') return 'error';
   if (status === 'PAUSING' || status === 'PAUSED') return 'warning';
   return 'default';
-}
-
-/** Sync-key candidates: the primary key, then unique indexes whose columns are all NOT NULL. */
-export function keyOptions(metadata?: DataSourceMetadataVO) {
-  if (!metadata) return [];
-  const options = metadata.primaryKeys.length
-    ? [{ label: `主键（${metadata.primaryKeys.join(', ')}）`, value: metadata.primaryKeys.join(',') }]
-    : [];
-  metadata.uniqueKeys
-    .filter(key => key.allNotNull)
-    .forEach(key =>
-      options.push({ label: `唯一键 ${key.name}（${key.columns.join(', ')}）`, value: key.columns.join(',') })
-    );
-  return options;
 }
 
 export function sourceTypeOf(dataSources: DataSourceOptionVO[], sourceId?: string | number) {

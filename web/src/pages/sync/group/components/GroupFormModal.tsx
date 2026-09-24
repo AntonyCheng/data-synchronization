@@ -31,13 +31,8 @@ import {
   WizardSteps
 } from '@/components/sync/SyncWizard';
 import { useSourceProbe, useTargetObjects } from '@/components/sync/useSourceProbe';
-import {
-  emptyForm,
-  kafkaOutputFormatLabel,
-  kafkaOutputFormatOptions,
-  keyOptions,
-  sourceTypeOf
-} from '@/pages/sync/group/shared';
+import { emptyForm, kafkaOutputFormatLabel, kafkaOutputFormatOptions, sourceTypeOf } from '@/pages/sync/group/shared';
+import { syncKeyOptions } from '@/utils/syncKeys';
 import { defaultTargetName } from '@/utils/syncNaming';
 
 const WIZARD_STEPS = ['数据源', '表与字段', '同步方式与限速'];
@@ -243,7 +238,7 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
           result.data.columns.map(column => column.name)
         );
       if (isBlank(items[index].syncKeyColumns))
-        form.setFieldValue(['items', index, 'syncKeyColumns'], keyOptions(result.data)[0]?.value);
+        form.setFieldValue(['items', index, 'syncKeyColumns'], syncKeyOptions(result.data)[0]?.value);
     } catch {
       // request() has already shown the error; the panel offers a retry.
       setFailedTables(current => [...current, key]);
@@ -655,12 +650,12 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
                             rules={[{ required: true, message: '请选择可靠同步键' }]}
                           >
                             <Select
-                              options={keyOptions(metadata)}
-                              disabled={keyOptions(metadata).length === 0}
+                              options={syncKeyOptions(metadata)}
+                              disabled={syncKeyOptions(metadata).length === 0}
                               placeholder="请选择主键或非空唯一键"
                             />
                           </Form.Item>
-                          {keyOptions(metadata).length === 0 && (
+                          {syncKeyOptions(metadata).length === 0 && (
                             <Alert type="warning" showIcon title="该表没有可靠同步键，无法加入 CDC 任务组。" />
                           )}
                         </Space>

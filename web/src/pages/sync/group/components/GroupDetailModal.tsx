@@ -336,7 +336,7 @@ export default function GroupDetailModal({
                 showIcon
                 closable
                 onClose={() => setValidationResult(undefined)}
-                message={validationResult.message}
+                title={validationResult.message}
                 description={
                   <Descriptions size="small" column={1}>
                     <Descriptions.Item label="源连接">{validationResult.source.message}</Descriptions.Item>
@@ -357,7 +357,7 @@ export default function GroupDetailModal({
                 showIcon
                 closable
                 onClose={() => setConfigPreview(undefined)}
-                message={`${configPreview.groupName} 配置预览`}
+                title={`${configPreview.groupName} 配置预览`}
                 description={
                   <Input.TextArea
                     value={configPreview.config}
@@ -374,7 +374,7 @@ export default function GroupDetailModal({
                 showIcon
                 closable
                 onClose={() => setDdlResult(undefined)}
-                message={ddlResult.message}
+                title={ddlResult.message}
                 description={
                   ddlResult.events.length === 0 ? undefined : (
                     <Space direction="vertical" style={{ width: '100%' }} size={12}>
@@ -468,7 +468,7 @@ export default function GroupDetailModal({
               <Alert
                 type={dataCheckResult.matched ? 'success' : 'warning'}
                 showIcon
-                message={dataCheckResult.message}
+                title={dataCheckResult.message}
                 description={
                   <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }}>
                     <Descriptions.Item label="一致表">{dataCheckResult.matchedTableCount}</Descriptions.Item>

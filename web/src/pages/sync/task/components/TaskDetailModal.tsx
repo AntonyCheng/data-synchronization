@@ -361,7 +361,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
             <Alert
               type="info"
               showIcon
-              message="实时运行指标"
+              title="实时运行指标"
               description={
                 <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }}>
                   <Descriptions.Item label="当前阶段">{syncPhaseLabel(metricsResult.phase)}</Descriptions.Item>
@@ -396,12 +396,12 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
             <Alert
               type="error"
               showIcon
-              message="最近一次错误"
+              title="最近一次错误"
               description={<Typography.Text copyable>{detail.lastError}</Typography.Text>}
             />
           )}
           {detail.lastSkipReason && (
-            <Alert type="warning" showIcon message="最近一次调度未执行" description={detail.lastSkipReason} />
+            <Alert type="warning" showIcon title="最近一次调度未执行" description={detail.lastSkipReason} />
           )}
           <Divider titlePlacement="left" plain>
             准备与诊断
@@ -497,7 +497,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
               style={{ width: '100%' }}
               type={cdcPrecheck.passed ? 'success' : 'error'}
               showIcon
-              message={diagnosticMessage(cdcPrecheck.message, () => setCdcVisible(false))}
+              title={diagnosticMessage(cdcPrecheck.message, () => setCdcVisible(false))}
               description={
                 <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
                   <Descriptions.Item label="server-id">{cdcPrecheck.serverId || '-'}</Descriptions.Item>
@@ -521,7 +521,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
               style={{ width: '100%' }}
               type={compatibilityResult.passed ? 'success' : 'error'}
               showIcon
-              message={diagnosticMessage(compatibilityResult.message, () => setCompatibilityVisible(false))}
+              title={diagnosticMessage(compatibilityResult.message, () => setCompatibilityVisible(false))}
               description={
                 <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
                   <Descriptions.Item label="源表">{compatibilityResult.sourceTable}</Descriptions.Item>
@@ -544,7 +544,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
               style={{ width: '100%' }}
               type={validationResult.valid ? 'success' : 'error'}
               showIcon
-              message={diagnosticMessage(validationResult.message, () => setValidationVisible(false))}
+              title={diagnosticMessage(validationResult.message, () => setValidationVisible(false))}
               description={
                 <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
                   <Descriptions.Item label="源连接">
@@ -574,7 +574,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
               style={{ width: '100%' }}
               type={checkResult.success && checkResult.matched ? 'success' : 'error'}
               showIcon
-              message={diagnosticMessage('数据核对结果', () => setCheckVisible(false))}
+              title={diagnosticMessage('数据核对结果', () => setCheckVisible(false))}
               description={
                 <Space direction="vertical" style={{ width: '100%' }}>
                   <Descriptions size="small" column={1}>
@@ -638,7 +638,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
               style={{ width: '100%' }}
               type="success"
               showIcon
-              message={diagnosticMessage(previewTitle, () => setPreviewVisible(false))}
+              title={diagnosticMessage(previewTitle, () => setPreviewVisible(false))}
               description={
                 <Typography.Paragraph
                   copyable={{ text: previewText }}

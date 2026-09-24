@@ -87,20 +87,6 @@ export function diagnosticMessage(title: string, onClose: () => void) {
   );
 }
 
-/** Sync-key candidates: the primary key, then unique indexes whose columns are all NOT NULL. */
-export function reliableKeyOptions(metadata?: DataSourceMetadataVO) {
-  if (!metadata) return [];
-  const options = metadata.primaryKeys.length
-    ? [{ label: `主键（${metadata.primaryKeys.join(', ')}）`, value: metadata.primaryKeys.join(',') }]
-    : [];
-  metadata.uniqueKeys
-    .filter(key => key.allNotNull)
-    .forEach(key =>
-      options.push({ label: `唯一键 ${key.name}（${key.columns.join(', ')}）`, value: key.columns.join(',') })
-    );
-  return options;
-}
-
 export function mappingRisks(metadata?: DataSourceMetadataVO) {
   if (!metadata) return [];
   const risks: string[] = [];
