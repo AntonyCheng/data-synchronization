@@ -102,7 +102,7 @@
 **风险**：**高**——这是本清单里最需要测试托底的一项，建议在 P2-3（生命周期抽取）之前或同时做，
 且必须先把状态机单测跑绿。
 
-### [~] P1-4 状态刷新串行，且 7 个后台轮询挤在共享线程池 — 第 2 部分（独立调度线程池）已完成，第 1 部分（表项并行刷新）未做
+### [x] P1-4 状态刷新串行，且 7 个后台轮询挤在共享线程池 — 已完成（两部分均见文末）
 
 **问题**：
 - `refreshStatus` 对每个表项串行发 2 次 REST（status + checkpoints），20 表 = 40 次往返，每 30 秒一轮；
@@ -279,7 +279,7 @@
 **影响面**：模块核心。**工作量**：3 天。**风险**：**高**——必须在 P1-3 的事务收窄之后、状态机单测
 全绿的前提下做，且建议单独一个提交、配一次完整 e2e。
 
-### [ ] P2-4 `SyncTaskGroupServiceImpl` 仍有 1046 行
+### [x] P2-4 `SyncTaskGroupServiceImpl` 仍有 1046 行 — 已完成（见文末）
 
 承担 CRUD + 校验 + 生命周期 + 整库发现 + 数据核对 + 两个后台轮询。DDL 和 Kafka topic 已经拆出去了，
 "整库发现"和"数据核对"可以按同样的方式拆成独立服务。做完 P2-3 后会自然瘦身，建议合并考虑。
@@ -299,7 +299,7 @@ DDL 检查每次都把快照 JSON 解析成对象做完整 diff，而行上已�
 **证据**：`SyncTaskGroupServiceImpl.java:113`
 **工作量**：15 分钟。**风险**：无。
 
-### [ ] P2-7 `MAX_TABLES_PER_GROUP = 20` 硬编码
+### [x] P2-7 `MAX_TABLES_PER_GROUP = 20` 硬编码 — 已完成（见文末）
 
 整库场景下 20 张表的上限可能不够，但放开之前必须先解决 P1-3 / P1-4（否则 50 张表的组会在一个
 事务里串行发 100 次 REST）。**结论：先别动，等并发和事务收窄做完再评估**，这里只做记录。
@@ -517,12 +517,59 @@ SeaTunnel REST 交叉核对引擎状态。场景：FULL→PG/MySQL 逐行一致�
 共 7 秒）提交超时未能执行，重跑 3 次共 12 个采样均未落在过渡窗口（记为 skipped，映射由单测钉住），全程未出现
 过渡态被判 FAILED，提交超时也未留下幽灵作业。真实后端线程转储确认 `sync-sched-1..9` 生效。
 
-### 本轮新增待办
+### MySQL 目标时间值 +8 小时（2026-09-24，子代理，由 P2-2 端到端套件发现）
 
-- **P1-4 第 1 部分**：任务组表项状态刷新并行化（`EngineJobRunner.poll` 已无副作用，可直接有界并行）。
-- **P2-7**：`MAX_TABLES_PER_GROUP` 可配置——P1-3 / P1-4(2) 已落地，可以做了。
-- **MySQL 目标 DATETIME +8 小时**：子代理排查中。
-- **编辑整库任务组会按新 id 重建全部已发现表项**：整库模式没有逐表设置，丢失的只是表项 id 与指标历史；
-  可靠修复还需处理失败表项的重新校验，收益小于风险，暂缓。
-- **FULL_CDC→Kafka 的快照事件 `phase` 实际是 `CDC`**：SeaTunnel `DEBEZIUM_JSON` sink 把快照行写成
-  `op=c`、从不写 `op=r`，而 `kafka-event-formats.md` 把这种情况写成 GoldenDB 独有。待产品决定以哪边为准。
+根因在 MySQL Jdbc sink 这一跳：sink 与 MySQL-CDC 源端共用带 `serverTimezone=Asia/Shanghai` 的 URL，SeaTunnel
+以 `setTimestamp(Timestamp.valueOf(LocalDateTime))` 绑定 DATETIME/TIMESTAMP/TIME，Connector/J 默认
+`preserveInstants=true`，把它当作引擎 JVM 时区（UTC）的时刻再按上海时间渲染——FULL 与 FULL_CDC 都 +8h；PgJDBC
+按 JVM 时区渲染，所以 PG 目标没问题。直接向引擎提交探针作业（同一源同时写 Console / 旧 URL / 新 URL / PG 四个
+sink）逐跳定位。MySQL 目标改用独立 sink URL（`preserveInstants=false`、不设时区），值原样写入且与引擎时区无关；
+源端与 PG sink URL 字节不变。**MySQL 目标任务的配置指纹随之改变**：已暂停/失败的需重新初始化（这也正是重写已偏移
+数据所需的全量），运行中的需停止后重新初始化——刻意不把该项排除出指纹，否则旧作业会在错误数据上续写。
+端到端用例 `fullToMysqlKeepsDatetimeWallClock` 已转绿。
+
+### P2-4 拆分任务组服务（2026-09-24，子代理）
+
+`SyncTaskGroupServiceImpl` 1207 → 958 行，只保留 CRUD、校验/预览、生命周期与状态刷新。整库新增表发现（含
+autoDiscover 轮询）拆为 `SyncTaskGroupDiscoveryServiceImpl`（仍在组锁内、不包事务），数据核对拆为
+`SyncTaskGroupDataCheckServiceImpl`；三者共用的表项级步骤收拢到包内可见的 `GroupItemOperations`，不暴露在任何
+服务接口上。控制器直接调用新服务，路由、权限、日志与响应结构不变；新增 `constant.SyncScope` 与
+`GroupStatuses.isLive` 收掉重复字面量。单测 178 → 193，合并后完整端到端回归全绿。
+
+### P2-7 任务组表数上限可配置，整库发现也受约束（2026-09-24）
+
+原先前后端各写死一份 20，且只在多表保存时校验——**整库自动发现完全不受约束**：500 张表的库会建出 500 个表项，
+运行中且开启自动发现的组还会提交 500 个引擎作业，每个各占一条到客户源库的 binlog 连接。新增
+`sync.group.max-tables`（默认 20、钳制 1..200；默认不上调，真正的瓶颈是源库连接数）；多表保存按它校验，整库发现
+只补到上限、超出的表不纳入并在结果与组错误信息中说明（周期发现不重复写库）；`GET /sync/group/limits` 供向导显示
+「已选 N / 上限 M」。真实后端验证接口返回 20、整库组照常发现全部 3 张表。
+
+### P1-4（第 1 部分）任务组表项并行轮询（2026-09-24）
+
+`EngineJobRunner.pollAll` 在自有的有界守护线程池（`sync.engine.poll-parallelism`，默认 4）上并行轮询各表项的
+引擎作业；只有轮询并行，结果仍在调用线程上逐表应用，语义不变。引擎变慢时，20 张表 × 2 次、每次可达 10 秒超时的
+串行轮询不再把组锁占住数分钟。单测用"三个轮询在桩里互相等待"证明确实并发；重启后完整端到端回归全绿。
+
+### Kafka `phase` 契约按实测定案（2026-09-24，子代理）
+
+实测 SeaTunnel 2.3.13 MySQL-CDC→Kafka(DEBEZIUM_JSON) 的 raw topic：初始装载行与 binlog INSERT 逐字段同形
+（`op=c`、`source` 相同、`ts_ms` 均为引擎采集时间、无 header）；连接器把 Debezium READ/CREATE 都映射为
+`RowKind.INSERT`，sink 只写 `c`/`d`。平台拿不到可靠的快照信号，因此**不猜边界**：FULL_CDC 的初始装载行恒为
+`phase=CDC`，只有 FULL 任务出现 `SNAPSHOT`；原生 MySQL 与 GoldenDB 相同（原文档写成 GoldenDB 独有有误）。
+4 万行分块快照期间持续写入，并行度 1 与 4 下均无增量穿插进快照行，现有的阶段顺序校验与引擎行为一致。文档写明
+消费端的替代依据（快照整体先于增量、按 key 幂等、装载完成需带外判定），并更正 UPDATE 恒有前像、`sourceEventTime`
+为采集时间而非提交时间。新增 `KafkaTaskBridgeRawEventsTest`（实测 raw 事件驱动真实桥接 worker）。
+
+### 仍开放的待办（2026-09-24 收尾）
+
+- **源端时间处理（影响所有目标）**：MySQL-CDC 的 `server-time-zone` 写死为 Asia/Shanghai，源库不在东八区时
+  binlog 阶段的 TIMESTAMP 会偏移（快照阶段不偏移）；应改为按数据源探测/配置时区（会改变 CDC 任务指纹）。
+  FULL 源端经 `java.sql.Time` 读 TIME 丢小数秒；FULL 源端仍依赖引擎 JVM 为 UTC。
+- **Kafka 真实快照信号与延迟**：评估 MySQL-CDC `format = compatible_debezium_json`——可保留 `op=r` 与源端提交时间，
+  从而正确标 `SNAPSHOT`、让 `kafka_lag_seconds` 包含引擎读 binlog 的落后（现状在限速快照或暂停恢复回放时偏小）。
+  代价：raw topic 编码变化、桥接需适配、现有 Kafka CDC 任务指纹变化需重新初始化。
+- **任务组数据核对不持组锁**：`checkData` 以读取时的整行 `updateById` 回写核对结果，长时间 `COUNT(*)` 期间并发刷新
+  写入的状态可能被覆盖。
+- **保存整库 Kafka 任务组时**，发现流程在数据库事务内调用 Kafka AdminClient（建 topic）。
+- **编辑整库任务组会按新 id 重建全部已发现表项**：整库模式没有逐表设置，丢失的只是表项 id 与指标历史；收益小于风险，暂缓。
+
