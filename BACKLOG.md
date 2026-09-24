@@ -580,10 +580,16 @@ MySQL-CDC 的 `server-time-zone` 与源端连接时区原先写死为 Asia/Shang
 各阶段均与源端一致；真实后端的连接测试与预检正确识别出源库 +00:00 并建议 UTC；浏览器检查 12/12（字段、检测、一键填入、
 非法缩写被拒、未保存）；合并后完整端到端回归全绿。单测 202 → 218。
 
+### TIME(p) 小数秒截断改为建任务时明确提示（2026-09-25）
+
+小数秒丢失发生在 SeaTunnel 内部（FULL 源端 `Time.toLocalTime`、PostgreSQL sink 所有模式 `Time.valueOf`），连接参数无法修复；
+绕过方案（在 SELECT 里把 TIME 转成字符串）会让 PostgreSQL 目标的自动建表把列建成 varchar，代价大于收益，因此不绕过。改为
+在两个向导的「提交确认」里，当选中的 `TIME(p>0)` 列会被截断（全量模式任意目标，或 PostgreSQL 目标任意模式）时点名提示；
+MySQL 目标的 CDC 模式保留小数秒不提示，Kafka 目标未实测不下结论。元数据接口对 `TIME(3)` 报 `DECIMAL_DIGITS=0`，改用
+`COLUMN_SIZE > 8` 识别。浏览器检查 6/6（PG 提示且只点名 `TIME(3)` 列、MySQL+CDC 不提示、切换全量后提示、未保存）。
+
 ### 仍开放的待办（2026-09-24 收尾）
 
-- **TIME(p) 小数秒**：丢失发生在 SeaTunnel 内部（FULL 源端 `Time.toLocalTime`、PG sink 所有模式 `Time.valueOf`），
-  URL 参数无法修复，已写入类型映射文档；如需支持只能等上游或自定义连接器。
 - **Kafka 真实快照信号与延迟**：评估 MySQL-CDC `format = compatible_debezium_json`——可保留 `op=r` 与源端提交时间，
   从而正确标 `SNAPSHOT`、让 `kafka_lag_seconds` 包含引擎读 binlog 的落后（现状在限速快照或暂停恢复回放时偏小）。
   代价：raw topic 编码变化、桥接需适配、现有 Kafka CDC 任务指纹变化需重新初始化。

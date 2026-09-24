@@ -34,6 +34,7 @@ import { useSourceProbe, useTargetObjects } from '@/components/sync/useSourcePro
 import { emptyForm, kafkaOutputFormatLabel, kafkaOutputFormatOptions, sourceTypeOf } from '@/pages/sync/group/shared';
 import { syncKeyOptions } from '@/utils/syncKeys';
 import { defaultTargetName } from '@/utils/syncNaming';
+import { columnList, fractionalTimeColumns, timePrecisionWarning } from '@/utils/syncTypeRisks';
 
 const WIZARD_STEPS = ['数据源', '表与字段', '同步方式与限速'];
 const LAST_STEP = WIZARD_STEPS.length - 1;
@@ -84,13 +85,6 @@ interface GroupMissingField extends MissingField {
 
 const isBlank = (value: unknown) =>
   value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0);
-
-const columnList = (value?: string | string[]) =>
-  Array.isArray(value)
-    ? value
-    : String(value || '')
-        .split(',')
-        .filter(Boolean);
 
 /** Metadata is cached per source + table: items are unique by table, but positions shift on delete. */
 const metadataKey = (sourceId: string | number | undefined, table: string) => `${sourceId}:${table}`;
@@ -752,7 +746,22 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
           ]
         : [])
     ];
-    return <Descriptions size="small" column={2} bordered items={summaryItems} />;
+    // Whole-database tables are discovered on the server, so only listed tables can be checked here.
+    const timeColumns = databaseScope
+      ? []
+      : items.flatMap(item => {
+          const metadata = item.sourceTable ? tableMetadata[metadataKey(values.sourceId, item.sourceTable)] : undefined;
+          return fractionalTimeColumns(metadata, columnList(item.selectedColumns)).map(
+            column => `${item.sourceTable}.${column}`
+          );
+        });
+    const timeWarning = timePrecisionWarning(timeColumns, values.syncMode, target?.sourceType);
+    return (
+      <>
+        <Descriptions size="small" column={2} bordered items={summaryItems} />
+        {timeWarning && <Alert type="warning" showIcon title={timeWarning} style={{ marginTop: 12 }} />}
+      </>
+    );
   };
 
   return (

@@ -24,6 +24,7 @@ import {
 } from '@/pages/sync/task/shared';
 import { reliableUniqueKeys, syncKeyOptions } from '@/utils/syncKeys';
 import { defaultKafkaTopic } from '@/utils/syncNaming';
+import { columnList, fractionalTimeColumns, timePrecisionWarning } from '@/utils/syncTypeRisks';
 
 const WIZARD_STEPS = ['数据源', '同步粒度', '目标端', '字段映射', '同步方式'];
 /** Human label per field, used when sending the operator back to the step that is missing it. */
@@ -671,31 +672,33 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
             {({ getFieldsValue }) => {
               const values = getFieldsValue(true);
               const targetType = sourceTypeOf(dataSources, values.targetId);
+              const timeWarning = timePrecisionWarning(
+                fractionalTimeColumns(sourceMetadata, columnList(values.selectedColumns)),
+                values.syncMode,
+                targetType
+              );
               return (
-                <Descriptions size="small" column={2} bordered>
-                  <Descriptions.Item label="源端">
-                    {sourceDatabase || '-'} / {values.sourceTable || '-'}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="目标端">
-                    {targetType === 'POSTGRESQL' ? `${values.targetSchema || 'public'} / ` : ''}
-                    {values.targetTable || '-'}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="同步模式">{values.syncMode || '-'}</Descriptions.Item>
-                  {targetType === 'KAFKA' && (
-                    <Descriptions.Item label="输出格式">
-                      {kafkaOutputFormatLabel(values.kafkaOutputFormat)}
+                <>
+                  <Descriptions size="small" column={2} bordered>
+                    <Descriptions.Item label="源端">
+                      {sourceDatabase || '-'} / {values.sourceTable || '-'}
                     </Descriptions.Item>
-                  )}
-                  <Descriptions.Item label="同步键">{values.syncKeyColumns || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="字段数">
-                    {Array.isArray(values.selectedColumns)
-                      ? values.selectedColumns.length
-                      : String(values.selectedColumns || '')
-                          .split(',')
-                          .filter(Boolean).length}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="调度">{values.scheduleMode || '-'}</Descriptions.Item>
-                </Descriptions>
+                    <Descriptions.Item label="目标端">
+                      {targetType === 'POSTGRESQL' ? `${values.targetSchema || 'public'} / ` : ''}
+                      {values.targetTable || '-'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="同步模式">{values.syncMode || '-'}</Descriptions.Item>
+                    {targetType === 'KAFKA' && (
+                      <Descriptions.Item label="输出格式">
+                        {kafkaOutputFormatLabel(values.kafkaOutputFormat)}
+                      </Descriptions.Item>
+                    )}
+                    <Descriptions.Item label="同步键">{values.syncKeyColumns || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="字段数">{columnList(values.selectedColumns).length}</Descriptions.Item>
+                    <Descriptions.Item label="调度">{values.scheduleMode || '-'}</Descriptions.Item>
+                  </Descriptions>
+                  {timeWarning && <Alert type="warning" showIcon title={timeWarning} style={{ marginTop: 12 }} />}
+                </>
               );
             }}
           </Form.Item>
