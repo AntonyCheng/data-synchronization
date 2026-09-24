@@ -7,6 +7,7 @@ import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupDdlEvent;
 import org.dromara.sync.domain.SyncTaskGroupItem;
+import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
@@ -22,15 +23,16 @@ import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.SyncTaskGroupDdlEventMapper;
 import org.dromara.sync.mapper.SyncTaskGroupItemMapper;
 import org.dromara.sync.mapper.SyncTaskGroupMapper;
-import org.dromara.sync.service.IDataConsistencyService;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncMetricsService;
+import org.dromara.sync.service.ISyncTaskGroupDiscoveryService;
 import org.dromara.sync.support.SyncLocks;
 import org.dromara.sync.support.TableSchemaSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -53,6 +55,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -76,7 +79,7 @@ class SyncTaskGroupServiceImplTest {
     private final SyncTaskGroupDdlEventMapper ddlEventMapper = mock(SyncTaskGroupDdlEventMapper.class);
     private final IDataSourceService dataSourceService = mock(IDataSourceService.class);
     private final IDataSourceMetadataService metadataService = mock(IDataSourceMetadataService.class);
-    private final IDataConsistencyService consistencyService = mock(IDataConsistencyService.class);
+    private final ISyncTaskGroupDiscoveryService discoveryService = mock(ISyncTaskGroupDiscoveryService.class);
     private final SeaTunnelProperties properties = new SeaTunnelProperties();
     private final SeaTunnelRestClient restClient = mock(SeaTunnelRestClient.class);
     private final KafkaTaskBridgeService bridge = mock(KafkaTaskBridgeService.class);
@@ -84,10 +87,12 @@ class SyncTaskGroupServiceImplTest {
     private final SyncLocks locks = mock(SyncLocks.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 
-    // A real runner over the mocked engine and bridge: these tests pin the lifecycle end to end.
+    // A real runner and real item operations over the mocked engine and bridge: these tests pin the lifecycle end to end.
+    private final EngineJobRunner runner = new EngineJobRunner(restClient, bridge);
     private final SyncTaskGroupServiceImpl service = new SyncTaskGroupServiceImpl(groupMapper, itemMapper, ddlEventMapper,
-        dataSourceService, metadataService, consistencyService, properties, new ResourceProtectionPolicy(properties),
-        bridge, metrics, locks, new TransactionTemplate(transactionManager), new EngineJobRunner(restClient, bridge));
+        dataSourceService, metadataService, discoveryService, properties, new ResourceProtectionPolicy(properties),
+        bridge, metrics, locks, new TransactionTemplate(transactionManager), runner,
+        new GroupItemOperations(itemMapper, metadataService, properties, runner));
 
     /** True only while the fake group lock is held. */
     private final AtomicBoolean lockHeld = new AtomicBoolean();
@@ -503,11 +508,12 @@ class SyncTaskGroupServiceImplTest {
     /**
      * The lifecycle talks to the engine, and a rollback cannot un-submit a job; an @Transactional
      * on any of these would also commit only after the group lock is released. See the class
-     * comment of SyncTaskGroupServiceImpl - this pins the decision so it is not quietly re-added.
+     * comment of SyncTaskGroupServiceImpl - this pins the decision so it is not quietly re-added,
+     * in every group service that submits or stops table jobs.
      */
     @Test
     void theEngineFacingLifecycleRunsWithoutADatabaseTransaction() throws NoSuchMethodException {
-        for (String name : List.of("start", "discover", "pause", "resume", "stop", "refreshStatus")) {
+        for (String name : List.of("start", "pause", "resume", "stop", "refreshStatus")) {
             assertFalse(SyncTaskGroupServiceImpl.class.getMethod(name, Long.class).isAnnotationPresent(Transactional.class), name);
         }
         for (String name : List.of("resumeItem", "reinitializeItem")) {
@@ -515,6 +521,85 @@ class SyncTaskGroupServiceImplTest {
         }
         assertFalse(SyncTaskGroupDdlServiceImpl.class.getMethod("checkDdl", Long.class).isAnnotationPresent(Transactional.class));
         assertFalse(SyncTaskGroupDdlServiceImpl.class.getMethod("resumeDdlItem", Long.class, Long.class).isAnnotationPresent(Transactional.class));
+        // Discovery submits the jobs of new tables on a live group.
+        assertFalse(SyncTaskGroupDiscoveryServiceImpl.class.getMethod("discover", Long.class).isAnnotationPresent(Transactional.class));
+        assertFalse(SyncTaskGroupDiscoveryServiceImpl.class.getMethod("discoverDatabaseGroups").isAnnotationPresent(Transactional.class));
+        for (Class<?> type : List.of(SyncTaskGroupServiceImpl.class, SyncTaskGroupDdlServiceImpl.class,
+            SyncTaskGroupDiscoveryServiceImpl.class, GroupItemOperations.class)) {
+            assertFalse(type.isAnnotationPresent(Transactional.class), type.getSimpleName());
+        }
+    }
+
+    // ------------------------------------------------------------------ saving a whole-database group
+
+    /**
+     * Saving a whole-database group discovers its tables as part of the save: inside the edit's
+     * transaction, which itself runs inside the group lock, so the discovered items commit with the
+     * edit and before anyone else can take the lock.
+     */
+    @Test
+    void anEditOfAWholeDatabaseGroupDiscoversItsTablesInsideTheLockedTransaction() {
+        SyncTaskGroup group = persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
+        AtomicBoolean discoveredUnderLock = new AtomicBoolean();
+        when(discoveryService.discover(GROUP_ID)).thenAnswer(invocation -> {
+            discoveredUnderLock.set(lockHeld.get());
+            return SyncTaskGroupOperationResult.of(group, "未发现新增表");
+        });
+
+        assertTrue(service.updateByBo(bo("DATABASE", POSTGRES_ID)));
+
+        assertTrue(discoveredUnderLock.get(), "discovery must run while the edit holds the group lock");
+        InOrder transaction = inOrder(transactionManager, discoveryService);
+        transaction.verify(transactionManager).getTransaction(any());
+        transaction.verify(discoveryService).discover(GROUP_ID);
+        transaction.verify(transactionManager).commit(any());
+        assertEquals(2, group.getConfigVersion());
+    }
+
+    @Test
+    void creatingAWholeDatabaseGroupDiscoversItsTablesInTheCreateTransaction() throws NoSuchMethodException {
+        when(groupMapper.insert(any(SyncTaskGroup.class))).thenAnswer(invocation -> {
+            SyncTaskGroup created = invocation.getArgument(0);
+            created.setGroupId(GROUP_ID);
+            return 1;
+        });
+
+        assertTrue(service.insertByBo(bo("DATABASE", POSTGRES_ID)));
+
+        verify(discoveryService).discover(GROUP_ID);
+        assertTrue(SyncTaskGroupServiceImpl.class.getMethod("insertByBo", SyncTaskGroupBo.class).isAnnotationPresent(Transactional.class));
+    }
+
+    // ------------------------------------------------------------------ whole-database Kafka topics
+
+    /**
+     * A whole-database Kafka group owns its topics: start recreates each table's topic and takes back
+     * a table that was isolated only for a missing topic, while one that still fails the discovery
+     * rules stays isolated.
+     */
+    @Test
+    void aWholeDatabaseKafkaStartRecreatesTopicsAndReadmitsATableIsolatedOnlyForItsTopic() {
+        SyncTaskGroup group = persisted(group("STOPPED", "DATABASE", KAFKA_ID));
+        SyncTaskGroupItem missingTopic = item(11L, "customers", "FAILED");
+        missingTopic.setLastError("Kafka topic 不存在：customers");
+        SyncTaskGroupItem keyless = item(12L, "audit_log", "FAILED");
+        keyless.setLastError("源表没有可用同步键");
+        items.add(missingTopic);
+        items.add(keyless);
+        DataSourceMetadataVo noKey = metadata("id", "name");
+        noKey.getPrimaryKeys().clear();
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), eq("audit_log"))).thenReturn(noKey);
+
+        service.start(GROUP_ID);
+
+        verify(bridge).ensureTopicExists(kafka, "customers");
+        verify(bridge).ensureTopicExists(kafka, "audit_log");
+        assertEquals("RUNNING", missingTopic.getStatus());
+        assertEquals("job-100", missingTopic.getEngineJobId());
+        assertEquals("FAILED", keyless.getStatus());
+        assertEquals("源表没有可用同步键", keyless.getLastError());
+        verify(restClient, times(1)).submit(anyString(), anyString(), isNull(), eq(false));
+        assertEquals("DEGRADED", group.getStatus());
     }
 
     @Test
@@ -702,6 +787,16 @@ class SyncTaskGroupServiceImplTest {
         group.setSnapshotParallelism(1);
         group.setSourceConnectionLimit(2);
         return group;
+    }
+
+    private static SyncTaskGroupBo bo(String scope, long targetId) {
+        SyncTaskGroupBo bo = new SyncTaskGroupBo();
+        bo.setGroupId(GROUP_ID);
+        bo.setGroupName("g");
+        bo.setSourceId(MYSQL_ID);
+        bo.setTargetId(targetId);
+        bo.setSyncScope(scope);
+        return bo;
     }
 
     private static SyncTaskGroupItem item(long id, String table, String status) {

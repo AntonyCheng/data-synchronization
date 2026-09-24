@@ -15,6 +15,11 @@ public final class GroupStatuses {
         return SyncStatus.FAILED.equals(itemStatus) || SyncStatus.DDL_BLOCKED.equals(itemStatus);
     }
 
+    /** RUNNING or DEGRADED: the group's table jobs are live on the engine, so a new table joins them at once. */
+    public static boolean isLive(String groupStatus) {
+        return SyncStatus.RUNNING.equals(groupStatus) || SyncStatus.DEGRADED.equals(groupStatus);
+    }
+
     /**
      * Any isolated table alongside a running one is DEGRADED; only isolated tables is FAILED;
      * otherwise the most "active" item state wins, and an empty group is DRAFT.
