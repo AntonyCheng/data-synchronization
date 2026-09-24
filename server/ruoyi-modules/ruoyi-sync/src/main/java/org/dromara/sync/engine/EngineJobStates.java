@@ -18,7 +18,7 @@ import java.util.Set;
 public final class EngineJobStates {
 
     /** Engine states before the job has read anything - whatever comes next starts with the snapshot. */
-    private static final Set<String> STARTUP_STATES = Set.of("INITIALIZING", "CREATED", "PENDING", "STARTING");
+    private static final Set<String> STARTUP_STATES = Set.of("INITIALIZING", "CREATED", "PENDING", "SCHEDULED", "STARTING");
 
     public static final String PHASE_SNAPSHOT = "SNAPSHOT";
     public static final String PHASE_CDC = "CDC";
@@ -28,14 +28,21 @@ public final class EngineJobStates {
     private EngineJobStates() {
     }
 
-    /** Engine {@code jobStatus} -> {@link SyncStatus}; anything unknown (or missing) is a failure. */
+    /**
+     * Engine {@code jobStatus} -> {@link SyncStatus}; anything unknown (or missing) is a failure.
+     * <p>Every transitional state of Zeta's {@code JobStatus} must be listed: the fallback is
+     * FAILED, and a status refresh that lands in a transition persists it. {@code SCHEDULED}
+     * (slots assigned, tasks not deployed yet) sits between PENDING and RUNNING on every start
+     * and resume, so leaving it out turned a healthy start into FAILED whenever a refresh hit
+     * that window; {@code CANCELING} is the way to CANCELED after a stop.
+     */
     public static String toPlatformStatus(String engineStatus) {
         if (engineStatus == null) return SyncStatus.FAILED;
         return switch (engineStatus.toUpperCase(Locale.ROOT)) {
-            case "RUNNING", "STARTING", "INITIALIZING", "CREATED", "PENDING", "RESTARTING" -> SyncStatus.RUNNING;
+            case "RUNNING", "STARTING", "INITIALIZING", "CREATED", "PENDING", "SCHEDULED", "RESTARTING" -> SyncStatus.RUNNING;
             case "DOING_SAVEPOINT" -> SyncStatus.PAUSING;
             case "SAVEPOINT_DONE" -> SyncStatus.PAUSED;
-            case "CANCELED", "CANCELLED" -> SyncStatus.STOPPED;
+            case "CANCELING", "CANCELLING", "CANCELED", "CANCELLED" -> SyncStatus.STOPPED;
             case "FINISHED" -> SyncStatus.FINISHED;
             default -> SyncStatus.FAILED;
         };

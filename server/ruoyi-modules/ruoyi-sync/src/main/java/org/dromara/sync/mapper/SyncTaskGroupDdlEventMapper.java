@@ -28,4 +28,12 @@ public interface SyncTaskGroupDdlEventMapper extends BaseMapperPlus<SyncTaskGrou
         updateById(event);
         return true;
     }
+
+    /**
+     * Every event of a group. Events hang off item ids, and items are re-created on each save and
+     * deleted with the group - without this an unresolved event outlived its table for good.
+     */
+    default int deleteByGroupId(Long groupId) {
+        return delete(new LambdaQueryWrapper<SyncTaskGroupDdlEvent>().eq(SyncTaskGroupDdlEvent::getGroupId, groupId));
+    }
 }

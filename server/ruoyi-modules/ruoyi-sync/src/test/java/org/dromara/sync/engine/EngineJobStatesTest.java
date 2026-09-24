@@ -65,4 +65,25 @@ class EngineJobStatesTest {
         assertEquals("MIXED", EngineJobStates.phaseOf("FULL_CDC", "RUNNING"));
         assertEquals("MIXED", EngineJobStates.phaseOf(null, "RUNNING"));
     }
+
+    /**
+     * Regression (found by the e2e suite): SCHEDULED - on every start and resume, between PENDING
+     * and RUNNING - fell through to FAILED, so a refresh landing in that window failed a healthy
+     * job. Every transitional state of Zeta's JobStatus must map to where the job is heading.
+     */
+    @Test
+    void everyTransitionalEngineStateMapsToWhereTheJobIsHeading() {
+        for (String starting : new String[]{"INITIALIZING", "CREATED", "PENDING", "SCHEDULED", "RUNNING"}) {
+            assertEquals("RUNNING", EngineJobStates.toPlatformStatus(starting), starting);
+        }
+        assertEquals("SNAPSHOT", EngineJobStates.phaseOf("FULL_CDC", "SCHEDULED"));
+        assertEquals("PAUSING", EngineJobStates.toPlatformStatus("DOING_SAVEPOINT"));
+        assertEquals("PAUSED", EngineJobStates.toPlatformStatus("SAVEPOINT_DONE"));
+        assertEquals("STOPPED", EngineJobStates.toPlatformStatus("CANCELING"));
+        assertEquals("STOPPED", EngineJobStates.toPlatformStatus("CANCELED"));
+        assertEquals("FINISHED", EngineJobStates.toPlatformStatus("FINISHED"));
+        assertEquals("FAILED", EngineJobStates.toPlatformStatus("FAILING"));
+        assertEquals("FAILED", EngineJobStates.toPlatformStatus("FAILED"));
+        assertEquals("FAILED", EngineJobStates.toPlatformStatus(null));
+    }
 }

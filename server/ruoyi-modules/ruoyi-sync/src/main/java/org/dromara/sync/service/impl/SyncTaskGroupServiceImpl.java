@@ -193,6 +193,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             throw new ServiceException("运行中的任务组不能删除");
         }
         forgetFailureStreaks(groupId);
+        ddlEventMapper.deleteByGroupId(groupId);
         itemMapper.deleteByGroupId(groupId);
         metricsService.deleteForGroup(groupId);
         return groupMapper.deleteById(groupId) > 0;
@@ -945,6 +946,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     private void replaceItems(SyncTaskGroup group, List<SyncTaskGroupItemBo> itemBos) {
         forgetFailureStreaks(group.getGroupId());
+        // The events belong to the item ids that are about to disappear.
+        ddlEventMapper.deleteByGroupId(group.getGroupId());
         itemMapper.deleteByGroupId(group.getGroupId());
         if (itemBos == null) return;
         DataSource source = requireSource(group);
