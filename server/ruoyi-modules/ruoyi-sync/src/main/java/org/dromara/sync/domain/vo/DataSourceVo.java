@@ -27,6 +27,8 @@ public class DataSourceVo implements Serializable {
     private String schemaName;
     private String username;
     private String sslEnabled;
+    /** MySQL only; blank = compatibility mode (Asia/Shanghai). */
+    private String serverTimeZone;
     private String status;
     private String remark;
     private LocalDateTime createTime;

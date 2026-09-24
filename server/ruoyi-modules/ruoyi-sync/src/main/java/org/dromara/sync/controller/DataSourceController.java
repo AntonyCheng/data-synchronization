@@ -96,6 +96,14 @@ public class DataSourceController extends BaseController {
         return R.ok(dataSourceService.testConnection(sourceId, bo));
     }
 
+    /** Tests the connection fields of a data source that is not saved yet (the add form). */
+    @SaCheckPermission("sync:data-source:test")
+    @Log(title = "同步数据源连接测试", businessType = BusinessType.OTHER)
+    @PostMapping("/test")
+    public R<ConnectionTestResult> testUnsaved(@RequestBody DataSourceBo bo) {
+        return R.ok(dataSourceService.testConnection(null, bo));
+    }
+
     @SaCheckPermission("sync:data-source:metadata")
     @GetMapping("/{sourceId}/databases")
     public R<List<String>> databases(@NotNull(message = "数据源ID不能为空") @PathVariable Long sourceId) {

@@ -13,6 +13,7 @@ create table if not exists ds_data_source
     username      varchar(128)   not null comment '连接用户名',
     password      varchar(512)   not null comment '连接密码（后续接入密钥管理）',
     ssl_enabled   char(1)        default '0' comment '是否启用SSL',
+    server_time_zone varchar(64) default null comment 'MySQL 源端服务器时区（IANA ID，空为兼容模式 Asia/Shanghai）',
     status        char(1)        default '0' comment '状态（0正常 1停用）',
     remark        varchar(500)   default '' comment '备注',
     create_dept   bigint         default null comment '创建部门',

@@ -51,8 +51,9 @@ services:
     pull_policy: never
     restart: unless-stopped
     environment:
-      # The FULL-mode Jdbc source pins serverTimezone=UTC so a zoneless DATETIME
-      # round-trips unchanged; that only holds if the engine JVM is on UTC too.
+      # UTC is the tested engine zone - keep it. DATETIME / TIMESTAMP values no longer depend
+      # on it: the FULL-mode Jdbc source and the MySQL sink use preserveInstants=false and the
+      # MySQL-CDC source is told the source's own zone (docs/type-mapping-mysql-postgresql.md).
       TZ: UTC
     depends_on:
       kafka:

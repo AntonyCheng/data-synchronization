@@ -9,6 +9,7 @@ import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.support.JdbcUrls;
+import org.dromara.sync.support.SourceTimeZones;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
@@ -40,7 +41,13 @@ import java.util.stream.Collectors;
  */
 public final class SeaTunnelJobConfigGenerator {
 
-    private static final String SOURCE_TIME_ZONE = "Asia/Shanghai";
+    /**
+     * Time options of the FULL-mode Jdbc source URL, see {@link #fullJdbcSourceUrl}. The
+     * {@code LEGACY_} form is what FULL configs carried before {@code preserveInstants=false};
+     * {@link GeneratedConfig#matchesFingerprint} still accepts fingerprints taken with it.
+     */
+    static final String FULL_SOURCE_TIME_OPTIONS = "serverTimezone=UTC&preserveInstants=false";
+    static final String LEGACY_FULL_SOURCE_TIME_OPTIONS = "serverTimezone=UTC";
 
     /**
      * Job names are deterministic so a job can always be traced back to the row that owns it -
@@ -70,6 +77,10 @@ public final class SeaTunnelJobConfigGenerator {
     public static GeneratedConfig generate(SyncTask task, DataSource source, DataSource target,
                                            SeaTunnelProperties properties, SourceColumns sourceColumns) {
         if (!DataSourceType.isMysql(source)) throw new ServiceException("源数据源必须是 MYSQL");
+        // Saving validates the zone; this catches a value written around the service, which the engine would reject.
+        if (!SourceTimeZones.isValid(SourceTimeZones.effective(source))) {
+            throw new ServiceException("源数据源的服务器时区“" + source.getServerTimeZone() + "”无效，请在数据源中改为 IANA 时区 ID 或留空");
+        }
         if (!DataSourceType.isSupportedTarget(target.getSourceType())) {
             throw new ServiceException("目标数据源必须是 PostgreSQL、MySQL 或 Kafka");
         }
@@ -152,7 +163,7 @@ public final class SeaTunnelJobConfigGenerator {
         appendStreamingEnv(builder, task, properties);
         appendMysqlCdcSourceHead(builder, task, source, sourceTable, properties);
         builder.append("    connection.pool.size = ").append(sourceConnectionLimit).append("\n")
-            .append(startupOptions(task, syncMode))
+            .append(startupOptions(task, syncMode, source))
             .append("    exactly_once = false\n")
             .append("    schema-changes.enabled = false\n")
             .append("    plugin_output = ").append(quote(sourceOutput)).append("\n")
@@ -175,7 +186,7 @@ public final class SeaTunnelJobConfigGenerator {
         StringBuilder builder = new StringBuilder(1600);
         appendStreamingEnv(builder, task, properties);
         appendMysqlCdcSourceHead(builder, task, source, sourceTable, properties);
-        builder.append(startupOptions(task, syncMode))
+        builder.append(startupOptions(task, syncMode, source))
             .append("    exactly_once = false\n")
             .append("    schema-changes.enabled = false\n")
             .append("  }\n}\n\nsink {\n  Kafka {\n")
@@ -246,7 +257,12 @@ public final class SeaTunnelJobConfigGenerator {
             .append("}\n\nsource {\n  Jdbc {\n");
     }
 
-    /** Connection, table selection and replication identity of the MySQL-CDC source. */
+    /**
+     * Connection, table selection and replication identity of the MySQL-CDC source.
+     * {@code server-time-zone} is the source's zone ({@link SourceTimeZones#effective}): it turns
+     * the UTC instant a binlog event carries for a {@code TIMESTAMP} back into the wall clock
+     * the server shows, so it must be the zone the server really renders in.
+     */
     private static void appendMysqlCdcSourceHead(StringBuilder builder, SyncTask task, DataSource source, String sourceTable,
                                                  SeaTunnelProperties properties) {
         int serverId = stableServerId(task.getTaskId());
@@ -256,7 +272,7 @@ public final class SeaTunnelJobConfigGenerator {
             .append("    database-names = [").append(quote(source.getDatabaseName())).append("]\n")
             .append("    table-names = [").append(quote(sourceTable)).append("]\n")
             .append("    server-id = \"").append(serverId).append('-').append(serverId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
-            .append("    server-time-zone = \"").append(SOURCE_TIME_ZONE).append("\"\n");
+            .append("    server-time-zone = ").append(quote(SourceTimeZones.effective(source))).append('\n');
     }
 
     /** FULL-mode {@code Jdbc} source: a plain projected SELECT against the source table. */
@@ -284,7 +300,8 @@ public final class SeaTunnelJobConfigGenerator {
             .append("    schema_save_mode = \"CREATE_SCHEMA_WHEN_NOT_EXIST\"\n");
     }
 
-    private static String startupOptions(SyncTask task, String syncMode) {
+    /** A TIMESTAMP start is the source's wall clock, so it is read in the source's zone. */
+    private static String startupOptions(SyncTask task, String syncMode, DataSource source) {
         if (!SyncMode.INCREMENTAL.equals(syncMode)) return "    startup.mode = \"initial\"\n";
         String mode = defaultValue(task.getIncrementalStartupMode(), "LATEST").toUpperCase(Locale.ROOT);
         return switch (mode) {
@@ -292,7 +309,8 @@ public final class SeaTunnelJobConfigGenerator {
                 if (task.getIncrementalStartupTimestamp() == null) {
                     throw new ServiceException("按时间启动纯增量任务必须填写启动时间");
                 }
-                long timestamp = task.getIncrementalStartupTimestamp().atZone(ZoneId.of(SOURCE_TIME_ZONE)).toInstant().toEpochMilli();
+                long timestamp = task.getIncrementalStartupTimestamp()
+                    .atZone(ZoneId.of(SourceTimeZones.effective(source))).toInstant().toEpochMilli();
                 yield "    startup.mode = \"timestamp\"\n    startup.timestamp = " + timestamp + "\n";
             }
             case "SPECIFIC" -> {
@@ -451,13 +469,21 @@ public final class SeaTunnelJobConfigGenerator {
     }
 
     /**
-     * JDBC URL for the MySQL-CDC source. {@code serverTimezone=Asia/Shanghai} is kept for
-     * GoldenDB's ambiguous {@code CST} system zone, and Debezium does not shift
-     * {@code DATETIME}. Every CDC config contains this URL, so changing it changes every CDC
-     * task's fingerprint.
+     * JDBC URL for the MySQL-CDC source. {@code serverTimezone} is the source's zone, the same
+     * value as {@code server-time-zone}: the snapshot phase reads {@code TIMESTAMP} through this
+     * connection, the binlog phase converts with {@code server-time-zone}, and the two phases
+     * agree only when both are the zone the server renders in. Setting it explicitly also spares
+     * Connector/J from interpreting GoldenDB's ambiguous {@code CST} system zone. Debezium does
+     * not shift {@code DATETIME} either way.
+     *
+     * <p>A data source with no configured zone gets {@code Asia/Shanghai}, byte for byte what
+     * every CDC config carried before the zone was configurable, so existing fingerprints hold.
+     * Configuring (or changing) the zone changes the fingerprint of every CDC task reading that
+     * source; such a task must be reinitialized, because its binlog position was recorded under
+     * the old zone.
      */
     private static String engineMysqlJdbcUrl(DataSource source, SeaTunnelProperties properties) {
-        return engineMysqlJdbcUrl(source, properties, "serverTimezone=Asia%2FShanghai");
+        return engineMysqlJdbcUrl(source, properties, "serverTimezone=" + SourceTimeZones.urlEncoded(SourceTimeZones.effective(source)));
     }
 
     /**
@@ -503,24 +529,30 @@ public final class SeaTunnelJobConfigGenerator {
     /**
      * JDBC URL for the FULL-mode {@code Jdbc} source (a plain {@code SELECT}).
      *
-     * <p>The CDC source URL ({@link #engineMysqlJdbcUrl(DataSource, SeaTunnelProperties)}) carries {@code serverTimezone=Asia/Shanghai}
-     * so Connector/J can resolve GoldenDB's ambiguous {@code CST} system zone. But for a
-     * plain-SELECT source the connector reads {@code DATETIME} through the driver's
-     * timezone machinery, so a zoneless wall-clock value gets reinterpreted as Shanghai
-     * and converted to the engine JVM's zone (UTC in this stack) - source
-     * {@code 2026-01-01 00:01:00} lands in Kafka as {@code 2025-12-31T16:01:00}. The
-     * MySQL-CDC / Debezium path keeps the wall-clock value, so a FULL_CDC job's snapshot
-     * rows and CDC rows would then disagree.
+     * <p>SeaTunnel reads {@code DATETIME} and {@code TIMESTAMP} here as
+     * {@code rs.getTimestamp(i).toLocalDateTime()}. With Connector/J's default
+     * {@code preserveInstants=true} the driver takes the value the server sends as a time in
+     * the connection zone and {@code toLocalDateTime()} renders that instant in the engine JVM's
+     * zone. With {@code serverTimezone=UTC} alone, the values were therefore right only on a UTC
+     * engine (measured with Connector/J 8.0.33: +8 h on an Asia/Shanghai JVM, -5 h / -4 h on
+     * America/New_York). {@code preserveInstants=false} makes the driver build the
+     * {@code Timestamp} in the JVM zone from the value as sent, so the wall clock comes through
+     * unchanged on any engine: {@code DATETIME} as stored, {@code TIMESTAMP} as the source
+     * session shows it, the same values the CDC path delivers. The connection zone then plays no
+     * part; {@code serverTimezone=UTC} stays only so Connector/J never has to interpret the
+     * server's own zone name.
      *
-     * <p>Pinning {@code serverTimezone=UTC} makes the driver read the stored value as UTC;
-     * with the engine JVM also on UTC there is no net conversion and {@code DATETIME}
-     * round-trips unchanged, matching the CDC path. {@code TIMESTAMP} columns are read in
-     * the UTC session and so line up with Debezium's UTC instants too. This assumes the
-     * SeaTunnel container runs on UTC (compose and the offline template both set
-     * {@code TZ=UTC}); a non-UTC engine would reintroduce a DATETIME offset here.
+     * <p>{@code TIME(p)} loses its fractional seconds and no URL option can fix that: the driver
+     * delivers the milliseconds, but SeaTunnel's row converter reads the column as
+     * {@code rs.getTime(i).toLocalTime()}, and {@code java.sql.Time#toLocalTime} keeps whole
+     * seconds only.
+     *
+     * <p>The URL is part of the fingerprint. A FULL job can be paused with a savepoint and
+     * resumed, so {@link GeneratedConfig#matchesFingerprint} also accepts the fingerprint taken
+     * with the pre-{@code preserveInstants} URL: on the UTC engine both URLs read identical values.
      */
     private static String fullJdbcSourceUrl(DataSource source, SeaTunnelProperties properties) {
-        return engineMysqlJdbcUrl(source, properties, "serverTimezone=UTC");
+        return engineMysqlJdbcUrl(source, properties, FULL_SOURCE_TIME_OPTIONS);
     }
 
     private static String enginePostgresJdbcUrl(DataSource source, SeaTunnelProperties properties) {
@@ -599,9 +631,25 @@ public final class SeaTunnelJobConfigGenerator {
             return SyncText.sha256Hex(redactedConfig);
         }
 
-        /** True when {@code stored} is this config's fingerprint, or the pre-rotation-safe hash of the raw config. */
+        /**
+         * True when {@code stored} is this config's fingerprint, or one of the fingerprints an
+         * equivalent config was stored under before: the pre-rotation-safe hash of the raw
+         * config, and either form taken while the FULL source URL still lacked
+         * {@code preserveInstants=false} (see {@link SeaTunnelJobConfigGenerator#fullJdbcSourceUrl}).
+         */
         public boolean matchesFingerprint(String stored) {
-            return stored != null && (stored.equals(fingerprint()) || stored.equals(SyncText.sha256Hex(config)));
+            if (stored == null) return false;
+            for (String form : List.of(redactedConfig, config)) {
+                if (stored.equals(SyncText.sha256Hex(form)) || stored.equals(SyncText.sha256Hex(beforeFullSourcePreserveInstants(form)))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** {@code text} with the FULL source URL's time options as they were before {@code preserveInstants=false}. */
+        private static String beforeFullSourcePreserveInstants(String text) {
+            return text.replace(FULL_SOURCE_TIME_OPTIONS + '&', LEGACY_FULL_SOURCE_TIME_OPTIONS + '&');
         }
     }
 }

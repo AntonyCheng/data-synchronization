@@ -23,6 +23,7 @@ import org.dromara.sync.mapper.SyncTaskGroupMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.support.JdbcUrls;
+import org.dromara.sync.support.SourceTimeZones;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
@@ -96,6 +97,10 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (StringUtils.isBlank(entity.getPassword())) {
             entity.setPassword(current.getPassword());
         }
+        // An omitted time zone keeps the stored one; an empty string clears it (compatibility mode).
+        if (entity.getServerTimeZone() == null) {
+            entity.setServerTimeZone(current.getServerTimeZone());
+        }
         normalizeAndValidate(entity, false);
         if (connectionChanged(current, entity)) ensureNotInUse(current.getSourceId());
         return dataSourceMapper.updateById(entity) > 0;
@@ -104,8 +109,9 @@ public class DataSourceServiceImpl implements IDataSourceService {
     /**
      * Endpoint / identity fields. A running SeaTunnel job keeps the connection it was submitted
      * with, so silently repointing the data source underneath it would leave the platform
-     * describing a job that no longer exists. Name, remark, status and - deliberately - the
-     * password (credential rotation) may change at any time; the next start picks them up.
+     * describing a job that no longer exists. The server time zone is part of the submitted CDC
+     * config too. Name, remark, status and - deliberately - the password (credential rotation)
+     * may change at any time; the next start picks them up.
      */
     static boolean connectionChanged(DataSource current, DataSource updated) {
         return !Objects.equals(current.getSourceType(), updated.getSourceType())
@@ -114,7 +120,8 @@ public class DataSourceServiceImpl implements IDataSourceService {
             || !Objects.equals(StringUtils.defaultIfBlank(current.getDatabaseName(), ""), StringUtils.defaultIfBlank(updated.getDatabaseName(), ""))
             || !Objects.equals(StringUtils.defaultIfBlank(current.getSchemaName(), ""), StringUtils.defaultIfBlank(updated.getSchemaName(), ""))
             || !Objects.equals(StringUtils.defaultIfBlank(current.getUsername(), ""), StringUtils.defaultIfBlank(updated.getUsername(), ""))
-            || !Objects.equals(StringUtils.defaultIfBlank(current.getSslEnabled(), "0"), StringUtils.defaultIfBlank(updated.getSslEnabled(), "0"));
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getSslEnabled(), "0"), StringUtils.defaultIfBlank(updated.getSslEnabled(), "0"))
+            || !Objects.equals(SourceTimeZones.effective(current), SourceTimeZones.effective(updated));
     }
 
     private void ensureNotInUse(Long sourceId) {
@@ -122,7 +129,7 @@ public class DataSourceServiceImpl implements IDataSourceService {
         long groups = syncTaskGroupMapper.countActiveByDataSource(sourceId);
         if (tasks > 0 || groups > 0) {
             throw new ServiceException("数据源正被 " + tasks + " 个运行中的同步任务、" + groups
-                + " 个任务组使用，运行期间不能修改连接参数（类型/主机/端口/库名/schema/用户名/SSL）；请先停止或暂停这些任务，名称、备注和密码可直接修改");
+                + " 个任务组使用，运行期间不能修改连接参数（类型/主机/端口/库名/schema/用户名/SSL/服务器时区）；请先停止或暂停这些任务，名称、备注和密码可直接修改");
         }
     }
 
@@ -159,8 +166,13 @@ public class DataSourceServiceImpl implements IDataSourceService {
                     return ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
                 }
             }
-            try (Connection ignored = JdbcUrls.open(entity)) {
-                return ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
+            try (Connection connection = JdbcUrls.open(entity)) {
+                ConnectionTestResult result = ConnectionTestResult.success(Duration.between(started, Instant.now()).toMillis());
+                if (DataSourceType.isMysql(entity)) {
+                    Instant now = Instant.now();
+                    result.setTimeZone(SourceTimeZones.verdict(entity, SourceTimeZones.read(connection, now), now));
+                }
+                return result;
             }
         } catch (Exception ex) {
             return ConnectionTestResult.failure(StringUtils.isBlank(ex.getMessage()) ? "连接失败" : ex.getMessage());
@@ -219,6 +231,8 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (StringUtils.isNotBlank(request.getUsername())) target.setUsername(request.getUsername());
         if (StringUtils.isNotBlank(request.getPassword())) target.setPassword(request.getPassword());
         if (StringUtils.isNotBlank(request.getSslEnabled())) target.setSslEnabled(request.getSslEnabled());
+        // Blank is a real value here (compatibility mode), so only an omitted zone keeps the stored one.
+        if (request.getServerTimeZone() != null) target.setServerTimeZone(request.getServerTimeZone());
     }
 
     private void normalizeAndValidate(DataSource entity, boolean passwordRequired) {
@@ -236,5 +250,8 @@ public class DataSourceServiceImpl implements IDataSourceService {
         }
         if (StringUtils.isBlank(entity.getSslEnabled())) entity.setSslEnabled("0");
         if (StringUtils.isBlank(entity.getStatus())) entity.setStatus("0");
+        // Only a MySQL source is told a zone; for other types the field has no meaning.
+        entity.setServerTimeZone(DataSourceType.isMysql(entity) ? SourceTimeZones.normalize(entity.getServerTimeZone())
+            : entity.getServerTimeZone() == null ? null : "");
     }
 }

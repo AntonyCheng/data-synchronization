@@ -11,6 +11,11 @@ export interface DataSourceForm {
   username?: string;
   password?: string;
   sslEnabled?: string;
+  /**
+   * MySQL only: IANA id of the zone the source server renders TIMESTAMP in (e.g. `UTC`,
+   * `Asia/Shanghai`). Blank = compatibility mode (Asia/Shanghai). Omitted on edit = keep.
+   */
+  serverTimeZone?: string;
   status?: string;
   remark?: string;
 }
@@ -66,12 +71,34 @@ export interface DataSourceCheckItemVO {
   suggestion?: string;
 }
 
+/** A MySQL source server's time zone next to the one the engine is told for it (server-time-zone). */
+export interface DataSourceTimeZoneVO {
+  /** What the server reports, e.g. `SYSTEM（UTC）`, `+08:00`; absent when unreadable. */
+  serverTimeZone?: string;
+  /** e.g. `UTC+00:00`; absent when unreadable. */
+  serverUtcOffset?: string;
+  /** IANA id to configure for this server; absent when none can be inferred. */
+  suggestedTimeZone?: string;
+  /** The data source's configured zone; blank in compatibility mode. */
+  configuredTimeZone?: string;
+  /** Configured zone, else Asia/Shanghai. */
+  effectiveTimeZone: string;
+  /** Absent only when a stored zone is not a valid IANA id. */
+  effectiveUtcOffset?: string;
+  /** Offsets agree now; absent when the server's zone could not be read. */
+  matched?: boolean;
+  /** How far binlog-phase TIMESTAMP values drift, in hours (e.g. `8`, `-5.5`). */
+  shiftHours?: string;
+  message: string;
+}
+
 export interface DataSourceCdcPrecheckVO {
   sourceId: string | number;
   sourceType: string;
   serverId?: string;
   gtidMode?: string;
   binlogRetention?: string;
+  timeZone?: DataSourceTimeZoneVO;
   passed: boolean;
   message: string;
   checks: DataSourceCheckItemVO[];
@@ -81,6 +108,8 @@ export interface ConnectionTestResult {
   success: boolean;
   message: string;
   latencyMs: number;
+  /** MySQL only. */
+  timeZone?: DataSourceTimeZoneVO;
 }
 
 export interface DataSourceCredentialMigrationResult {
