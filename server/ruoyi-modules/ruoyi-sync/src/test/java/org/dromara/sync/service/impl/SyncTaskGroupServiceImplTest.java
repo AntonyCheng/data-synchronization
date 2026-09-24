@@ -39,10 +39,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -327,6 +330,71 @@ class SyncTaskGroupServiceImplTest {
         verify(restClient).submit(anyString(), anyString(), eq("job-a"), eq(true));
         assertEquals("RUNNING", item.getStatus());
         assertEquals("RUNNING", group.getStatus());
+    }
+
+    // ------------------------------------------------------------------ Kafka bridge capacity
+
+    @Test
+    void aFullBridgePoolRefusesAKafkaGroupResumeBeforeAnyTableIsResubmitted() {
+        persisted(group("PAUSED", "MULTI_TABLE", KAFKA_ID));
+        SyncTaskGroupItem first = runningItem(11L, "customers", "job-a");
+        first.setStatus("PAUSED");
+        SyncTaskGroupItem second = runningItem(12L, "orders", "job-b");
+        second.setStatus("PAUSED");
+        items.add(first);
+        items.add(second);
+        doThrow(new ServiceException("Kafka 桥接容量不足（已用 63/64，本次需要 2 个）：请调大 sync.kafka-bridge.max-workers"))
+            .when(bridge).requireCapacity(any());
+
+        String refused = assertThrows(ServiceException.class, () -> service.resume(GROUP_ID)).getMessage();
+
+        assertTrue(refused.contains("本次需要 2 个"), refused);
+        verify(bridge).requireCapacity(List.of(11L, 12L));
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+        verify(bridge, never()).startGroupItem(any(), any(), any());
+        assertEquals("PAUSED", first.getStatus());
+        assertEquals("PAUSED", second.getStatus());
+    }
+
+    @Test
+    void aTableRefusedABridgeIsNeverSubmittedAndItsSiblingsAreCompensated() {
+        SyncTaskGroup group = persisted(group("STOPPED", "MULTI_TABLE", KAFKA_ID));
+        SyncTaskGroupItem first = item(11L, "customers", "PENDING");
+        SyncTaskGroupItem second = item(12L, "orders", "PENDING");
+        items.add(first);
+        items.add(second);
+        doThrow(new ServiceException("Kafka 桥接容量已满（64/64）：请调大 sync.kafka-bridge.max-workers"))
+            .when(bridge).startGroupItem(argThat(task -> task.getTaskId() == 12L), any(), any());
+
+        SyncTaskGroupOperationResult result = service.start(GROUP_ID);
+
+        // Only the first table reached the engine, and it was stopped again with its bridge.
+        verify(restClient, times(1)).submit(anyString(), anyString(), isNull(), eq(false));
+        verify(restClient).stop("job-100", false, false);
+        verify(bridge).stop(11L);
+        assertEquals("STOPPED", first.getStatus());
+        assertEquals("FAILED", second.getStatus());
+        assertEquals("FAILED", group.getStatus());
+        assertTrue(result.getMessage().contains("sync.kafka-bridge.max-workers"), result.getMessage());
+    }
+
+    @Test
+    void aFullBridgePoolNeverIsolatesAKafkaTableThatAlreadyRunsOnTheEngine() {
+        SyncTaskGroup group = persisted(group("RUNNING", "MULTI_TABLE", KAFKA_ID));
+        SyncTaskGroupItem item = runningItem(11L, "customers", "job-a");
+        items.add(item);
+        when(restClient.status("job-a")).thenReturn(new SeaTunnelRestClient.JobSnapshot("job-a", "x", "RUNNING", null, null));
+        when(restClient.checkpoints(anyString())).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+        when(bridge.isRunning(11L)).thenReturn(false);
+        when(bridge.tryStartGroupItem(any(), any(), any())).thenReturn(false); // parked: pool full
+
+        // More passes than the transient-failure tolerance: a throwing heal would isolate the table by now.
+        for (int pass = 0; pass < 4; pass++) service.refreshStatus(GROUP_ID);
+
+        assertEquals("RUNNING", item.getStatus());
+        assertEquals("RUNNING", group.getStatus());
+        verify(bridge, times(4)).tryStartGroupItem(any(), any(), eq("source_db"));
+        verify(bridge, never()).startGroupItem(any(), any(), any());
     }
 
     // ------------------------------------------------------------------ table-level reinitialize

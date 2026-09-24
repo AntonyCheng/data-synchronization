@@ -177,6 +177,10 @@ sync:
     # 每个实例定期让本地 Kafka 桥接 worker 与库中 RUNNING 的 Kafka 任务/表项对齐（补起、停掉）。
     # raw topic 单分区 + 所有实例加入同一 consumer group = 天然的故障转移。
     reconcile-interval-ms: ${SYNC_KAFKA_BRIDGE_RECONCILE_INTERVAL_MS:30000}
+    # 单实例桥接 worker 上限（每个 = 1 条线程 + 1 个 consumer）。每个运行中的 Kafka 任务/表项在
+    # 每个实例上各占 1 个，因此它也就是全集群可同时运行的 Kafka 任务+表项数，各实例应配置一致。
+    # 满额时：启动/恢复在提交引擎作业前被拒绝；已在引擎上运行的任务不会被判失败，只是等空位后补桥接。
+    max-workers: ${SYNC_KAFKA_BRIDGE_MAX_WORKERS:64}
   orphan-sweep:
     # 提交超时会丢失应答，但引擎通常已接单。作业名确定性（ds-task-<id>），据此把引擎上
     # 仍在运行、平台却没有 jobId 的作业重新接管，避免"幽灵作业"与重复提交双写。

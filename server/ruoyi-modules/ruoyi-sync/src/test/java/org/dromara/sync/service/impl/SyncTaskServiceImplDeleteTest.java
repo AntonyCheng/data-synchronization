@@ -2,6 +2,7 @@ package org.dromara.sync.service.impl;
 
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskConfigVersionMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
@@ -27,7 +28,8 @@ class SyncTaskServiceImplDeleteTest {
         mock(IDataSourceService.class),
         mock(IDataSourceMetadataService.class),
         mock(ResourceProtectionPolicy.class),
-        mock(ISyncMetricsService.class)
+        mock(ISyncMetricsService.class),
+        mock(KafkaTaskBridgeService.class)
     );
 
     @Test

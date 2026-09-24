@@ -460,6 +460,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
+        if (DataSourceType.isKafka(target)) {
+            // All or nothing: a full bridge pool must refuse before the first table is resubmitted.
+            kafkaTaskBridgeService.requireCapacity(items(groupId).stream()
+                .filter(item -> StringUtils.isNotBlank(item.getEngineJobId())).map(SyncTaskGroupItem::getItemId).toList());
+        }
         for (SyncTaskGroupItem item : items(groupId)) {
             if (StringUtils.isBlank(item.getEngineJobId())) continue;
             var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
@@ -834,7 +839,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (items == null) items = List.of();
         Map<Long, SyncMetricsSampleVo> latest =
             metricsService.latestForGroupItems(items.stream().map(SyncTaskGroupItemVo::getItemId).toList());
-        items.forEach(item -> item.setLatestMetrics(latest.get(item.getItemId())));
+        items.forEach(item -> {
+            item.setLatestMetrics(latest.get(item.getItemId()));
+            item.setLastError(kafkaTaskBridgeService.decorateLastError(item.getItemId(), item.getLastError()));
+        });
         Map<Long, List<SyncTaskGroupItemVo>> byGroup = items.stream()
             .collect(Collectors.groupingBy(SyncTaskGroupItemVo::getGroupId));
         groups.forEach(group -> group.setItems(byGroup.getOrDefault(group.getGroupId(), List.of())));
@@ -918,8 +926,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         itemMapper.updateById(item);
     }
 
+    /** Strict before a submit, parked rather than failed for an active item; see SeaTunnelJobServiceImpl#startBridge. */
     private void startItemBridge(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
-        kafkaTaskBridgeService.startGroupItem(SyncTaskGroupConfigGenerator.toTask(group, item), target, source.getDatabaseName());
+        var task = SyncTaskGroupConfigGenerator.toTask(group, item);
+        if (SyncStatus.isActive(item.getStatus())) kafkaTaskBridgeService.tryStartGroupItem(task, target, source.getDatabaseName());
+        else kafkaTaskBridgeService.startGroupItem(task, target, source.getDatabaseName());
     }
 
     private void refreshItemCheckpoint(SyncTaskGroupItem item) {

@@ -10,6 +10,7 @@
 2. 启动 SeaTunnel，确认 `/running-jobs` 可访问。
 3. 在开发机使用本机 Java 21 启动后端。单表任务由 `SeaTunnelJobServiceImpl.recoverRunningTasks()` 对账；任务组由 `SyncTaskGroupServiceImpl.recoverRunningGroups()` 对账；Kafka 桥接 worker 由 `KafkaBridgeReconciler` 在启动 40 秒后开始每 30 秒对齐一次。
 4. 对账结果写回元数据库：引擎仍运行则保持 `RUNNING`，已取消/完成则映射为 `STOPPED`/`FINISHED`，引擎不可达或作业不存在则标记 `FAILED`。
+5. 若重启前调小了 `sync.kafka-bridge.max-workers`，运行中的 Kafka 任务/表项多于上限时，超出的部分保持 `RUNNING` 但暂无桥接（列表/详情的最近错误显示「Kafka 桥接等待容量」，日志有一条 `kafka bridge pool full`）；事件留在 raw topic，调大上限或停掉其他 Kafka 任务后自动续传，不需要人工恢复。
 
 ## 本机开发启动
 

@@ -409,9 +409,17 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         return task != null && DataSourceType.isKafka(dataSourceMapper.selectById(task.getTargetId()));
     }
 
+    /**
+     * Start / resume / reinitialize call this just before submitting a job (the task is not active
+     * yet), so a full bridge pool refuses them while nothing has been submitted. An active task -
+     * status-refresh heal, startup recovery - already has its engine job: a full pool only parks
+     * its bridge until a slot frees, failing the task would not stop the job.
+     */
     private void startBridge(SyncTask task) {
-        kafkaTaskBridgeService.start(task, dataSourceService.requireUsable(task.getTargetId(), "目标"),
-            dataSourceService.requireUsable(task.getSourceId(), "源").getDatabaseName());
+        DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
+        String sourceDatabase = dataSourceService.requireUsable(task.getSourceId(), "源").getDatabaseName();
+        if (SyncStatus.isActive(task.getStatus())) kafkaTaskBridgeService.tryStart(task, target, sourceDatabase);
+        else kafkaTaskBridgeService.start(task, target, sourceDatabase);
     }
 
     private void prepareResourceProtection(SyncTask task) {

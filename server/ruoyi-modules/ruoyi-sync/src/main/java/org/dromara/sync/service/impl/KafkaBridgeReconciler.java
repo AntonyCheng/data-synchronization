@@ -38,6 +38,12 @@ import java.util.Set;
  *
  * <p>Failures to start a bridge (typically a missing output topic) are logged once per
  * failing owner and again when it recovers, not on every pass.
+ *
+ * <p>A full bridge pool ({@code sync.kafka-bridge.max-workers}) is not a failure here: every
+ * owner this pass starts already runs on the engine, so the bridge parks it (logging the
+ * transition once) and the pass leaves its status alone. The capacity check precedes any
+ * AdminClient or consumer, so asking again every pass is free, and the bridge resumes from
+ * its committed offset in the raw topic as soon as a slot frees.
  */
 @Slf4j
 @Component
@@ -76,8 +82,10 @@ public class KafkaBridgeReconciler {
         for (Desired want : desired.values()) {
             if (bridge.isRunning(want.ownerId())) continue;
             try {
-                if (want.groupItem()) bridge.startGroupItem(want.task(), want.target(), want.sourceDatabase());
-                else bridge.start(want.task(), want.target(), want.sourceDatabase());
+                boolean started = want.groupItem()
+                    ? bridge.tryStartGroupItem(want.task(), want.target(), want.sourceDatabase())
+                    : bridge.tryStart(want.task(), want.target(), want.sourceDatabase());
+                if (!started) continue;
                 if (failing.remove(want.ownerId())) log.info("kafka bridge recovered: owner {}", want.ownerId());
                 else log.info("kafka bridge started: owner {} ({})", want.ownerId(), want.groupItem() ? "group item" : "task");
                 changed++;

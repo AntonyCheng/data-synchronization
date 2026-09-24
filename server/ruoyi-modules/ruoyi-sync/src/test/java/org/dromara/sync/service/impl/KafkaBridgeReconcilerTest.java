@@ -19,6 +19,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -44,6 +45,7 @@ class KafkaBridgeReconcilerTest {
         // Locally: task 1 already bridged, 99 is a leftover from a task stopped elsewhere.
         when(bridge.localOwnerIds()).thenReturn(Set.of(1L, 99L));
         when(bridge.isRunning(1L)).thenReturn(true);
+        when(bridge.tryStartGroupItem(any(), any(), anyString())).thenReturn(true);
 
         int changed = reconciler.reconcileOnce();
 
@@ -51,10 +53,13 @@ class KafkaBridgeReconcilerTest {
         verify(bridge).stop(99L);
         verify(bridge, never()).stop(1L);
         // The PG task (2) and the PAUSING Kafka task (3) never get a bridge; the RUNNING group item (5) does.
-        verify(bridge, never()).start(any(), any(), anyString());
+        verify(bridge, never()).tryStart(any(), any(), anyString());
         ArgumentCaptor<SyncTask> started = ArgumentCaptor.forClass(SyncTask.class);
-        verify(bridge, times(1)).startGroupItem(started.capture(), any(), eq("src_db"));
+        verify(bridge, times(1)).tryStartGroupItem(started.capture(), any(), eq("src_db"));
         assertEquals(5L, started.getValue().getTaskId());
+        // Background starts never take the operator path that refuses when the pool is full.
+        verify(bridge, never()).start(any(), any(), anyString());
+        verify(bridge, never()).startGroupItem(any(), any(), anyString());
     }
 
     @Test
@@ -62,11 +67,34 @@ class KafkaBridgeReconcilerTest {
         stubWorld();
         when(bridge.localOwnerIds()).thenReturn(Set.of(1L));
         when(bridge.isRunning(1L)).thenReturn(true);
-        doThrow(new ServiceException("Kafka 目标 topic 不存在")).when(bridge).startGroupItem(any(), any(), anyString());
+        doThrow(new ServiceException("Kafka 目标 topic 不存在")).when(bridge).tryStartGroupItem(any(), any(), anyString());
 
         assertEquals(0, reconciler.reconcileOnce());
         assertEquals(0, reconciler.reconcileOnce());
-        verify(bridge, times(2)).startGroupItem(any(), any(), anyString());
+        verify(bridge, times(2)).tryStartGroupItem(any(), any(), anyString());
+    }
+
+    @Test
+    void anOwnerParkedForCapacityIsAskedAgainEachPassButNothingIsWritten() {
+        stubWorld();
+        when(bridge.localOwnerIds()).thenReturn(Set.of(1L, 5L));
+        when(bridge.isRunning(1L)).thenReturn(true);
+        // Item 5 is parked: the pool is full, the bridge says so without throwing.
+        when(bridge.tryStartGroupItem(any(), any(), anyString())).thenReturn(false);
+
+        assertEquals(0, reconciler.reconcileOnce());
+        assertEquals(0, reconciler.reconcileOnce());
+
+        verify(bridge, times(2)).tryStartGroupItem(any(), any(), anyString());
+        // Still desired, so it is neither retired nor has its (or anyone's) status touched.
+        verify(bridge, never()).stop(anyLong());
+        verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
+        verify(taskMapper, never()).updateById(any(SyncTask.class));
+        verify(groupMapper, never()).updateById(any(SyncTaskGroup.class));
+
+        // A slot frees: the next pass starts it.
+        when(bridge.tryStartGroupItem(any(), any(), anyString())).thenReturn(true);
+        assertEquals(1, reconciler.reconcileOnce());
     }
 
     private void stubWorld() {
