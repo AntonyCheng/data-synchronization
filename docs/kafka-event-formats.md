@@ -6,9 +6,9 @@
 
 ```
 SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersion}，私有）
-                              │  FULL 模式 = 普通 JSON 行；CDC 模式 = Debezium JSON
+                              │  FULL 模式 = 普通 JSON 行；FULL_CDC / INCREMENTAL = Debezium JSON（op 只有 c / d）
                               ▼
-平台桥接（KafkaTaskBridgeService，单分区消费，GoldenDB UPDATE 的 DELETE+INSERT 对合并）
+平台桥接（KafkaTaskBridgeService，单分区消费，UPDATE 的 d+c 对合并）
                               ▼
 格式序列化器（KafkaEventSerializer，按 kafkaOutputFormat）
                               ▼
@@ -21,7 +21,7 @@ SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersi
 - 生产端 `acks=all` + 幂等发送；raw topic 位点仅在目标 topic 收到 broker ack 后提交。
 - 引擎 HOCON 与配置指纹（`engine_config_hash`）**不包含输出格式**——切换格式不触碰引擎配置。
 - 修改格式与其它编辑一样提升 `configVersion`，下次启动使用新 raw topic（重新全量）。
-- GoldenDB 的 UPDATE 在 binlog 中是 DELETE+INSERT 两条，桥接恒定合并为一条 `UPDATE`（含 before 前像）后再序列化——所有格式的 UPDATE 都是单条消息。
+- UPDATE 在 raw topic 中恒为相邻的两条：`op=d`（前像）+ `op=c`（后像）。SeaTunnel 的 `DEBEZIUM_JSON` sink 把 UPDATE_BEFORE / UPDATE_AFTER 分别写成 d / c，从不写 `u`（原生 MySQL 实测；GoldenDB 走同一个 MySQL-CDC 连接器）。桥接恒定合并为一条 `UPDATE`（含完整 before 前像）后再序列化——所有格式的 UPDATE 都是单条消息。修改同步键本身的 UPDATE 前后 key 不同，不合并，输出为旧 key 的 DELETE + 新 key 的 INSERT。
 
 ## 2. ENVELOPE —— 默认 JSON（平台事件信封）
 
@@ -32,8 +32,8 @@ SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersi
 | `data` | object | 行后像；DELETE 为被删行前像；缺失时显式 `null` |
 | `before` | object | 前像；仅合并 UPDATE 与 DELETE 携带，否则显式 `null` |
 | `source` | object | `{"database": "...", "table": "..."}` |
-| `sourceEventTime` | string | ISO-8601；CDC 为 Debezium `ts_ms`，快照行为桥接接收时间 |
-| `phase` | string | `SNAPSHOT` / `CDC` |
+| `sourceEventTime` | string | ISO-8601。`FULL_CDC` / `INCREMENTAL` 取 raw 事件的 `ts_ms`，即引擎**采集**该行的时刻（初始装载行是被快照读到的时刻，binlog 事件是被引擎处理的时刻），不是源库提交时间；`FULL` 为桥接接收时间 |
+| `phase` | string | `SNAPSHOT` / `CDC`；MySQL 源 `FULL_CDC` 的初始装载行也是 `CDC`，见下文 |
 
 ```json
 {"op":"UPDATE","key":{"id":1},"data":{"id":1,"name":"B","qty":5},"before":{"id":1,"name":"A","qty":5},
@@ -45,7 +45,28 @@ SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersi
  "source":{"database":"source_db","table":"customers"},"sourceEventTime":"2026-09-10T00:00:02Z","phase":"CDC"}
 ```
 
-> GoldenDB 注意：其 CDC 连接器把快照行发为 `op=c`（非 Debezium 标准的 `op=r`），因此 `FULL_CDC` 的快照事件也会带 `phase="CDC"`。消费端应按 key 应用事件，不要依赖 `phase` 判定初始装载是否完成。
+### phase 的真实含义（所有 MySQL 协议源）
+
+| 任务同步模式 | 引擎写入 raw topic 的内容 | `phase` |
+|---|---|---|
+| `FULL` | 有界 JDBC 快照的普通 JSON 行（无 `op`） | 全部 `SNAPSHOT` |
+| `FULL_CDC` | 初始装载行与 binlog 变更都是 Debezium JSON，插入一律 `op=c` | 全部 `CDC`，**包括初始装载行** |
+| `INCREMENTAL` | binlog 变更 | 全部 `CDC` |
+
+`FULL_CDC` 的初始装载行无法标成 `SNAPSHOT`，因为 raw topic 里没有能区分它的信号。下面是同一个 `FULL_CDC` 作业实测写出的两条 raw 事件，前一条是启动前已存在、被快照读出的行，后一条是启动后的 binlog INSERT：
+
+```json
+{"before":null,"after":{"id":1,"name":"snap-1","qty":10,"amount":1.5,"created_at":"2026-01-01T00:00:01.123"},"op":"c","source":{"schema":null,"database":"source_db","table":"kp_phase_small"},"ts_ms":1790258500371}
+{"before":null,"after":{"id":4,"name":"cdc-4","qty":40,"amount":4.5,"created_at":"2026-01-01T00:00:04.5"},"op":"c","source":{"schema":null,"database":"source_db","table":"kp_phase_small"},"ts_ms":1790258542124}
+```
+
+两条逐字段同形，也都不带 Kafka header。SeaTunnel 2.3.13 的 MySQL-CDC 在反序列化时把 Debezium 的 READ（快照读）和 CREATE（binlog 插入）映射成同一个 `RowKind.INSERT`。`DEBEZIUM_JSON` sink 只写 `before` / `after` / `op` / `source{schema,database,table}` / `ts_ms` 这几个字段，`op` 只有 `c` / `d`。`ts_ms` 对两类事件都是 Debezium 信封的处理时间。原生 MySQL 与 GoldenDB 走同一个连接器，行为相同。平台不按消息间隔、顺序或“首条 UPDATE/DELETE”去猜边界：增量恰好只有 INSERT 时，这类启发式会把增量误标成快照。Zeta 也不暴露快照完成信号，见 `monitoring-and-consistency.md` 的“阶段”。
+
+消费端可以依赖：
+
+- **初始装载先于全部增量。** SeaTunnel 要等所有快照分片完成、且其后一次 checkpoint 完成，才开始读 binlog。checkpoint 会冲刷 Kafka sink，所以此时初始装载行已全部落进 raw topic。raw topic 单分区，桥接按 raw 顺序发布、按同步键分区，因此同一 key 的初始装载 INSERT 一定先于该 key 的增量事件。实测用 4 万行分块快照，快照期间持续写入 INSERT/UPDATE/DELETE：parallelism 1 和 4 下，raw topic 中都没有一条增量事件插在快照行之间。
+- **按 key 幂等应用。** INSERT 按 upsert 处理，因为初始装载行、binlog 插入、作业故障恢复后的至少一次重放，都可能让同一 key 再次出现 INSERT。DELETE 一个不存在的 key 视为无操作。
+- **初始装载是否完成，只能在带外确认。** 消息流里没有完成标记。不要用 `phase`、首条 UPDATE/DELETE 或消息间隔判断。需要时可对照源表行数与目标 topic 中去重后的 key 数。
 
 ## 3. CANAL_JSON
 
@@ -74,7 +95,7 @@ SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersi
 | NormalizedEvent | 输出字段 |
 |---|---|
 | `op`（CDC 插入） | `op`：`c` |
-| `op`（快照插入） | `op`：`r`（Debezium READ），并加 `source.snapshot: "true"` |
+| `op`（快照插入，即 `phase=SNAPSHOT`，只有 `FULL` 任务产生） | `op`：`r`（Debezium READ），并加 `source.snapshot: "true"`。`FULL_CDC` 的初始装载行是 `CDC` 插入，输出 `c` |
 | `op`（更新 / 删除） | `op`：`u` / `d` |
 | 前像 / 后像 | `before` / `after`：全量镜像；插入 `before=null`，删除 `after=null` |
 | `sourceEventTime` | `ts_ms` 与 `source.ts_ms`：epoch 毫秒 |
@@ -126,10 +147,11 @@ SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersi
 
 ## 7. 已知限制与差异汇总
 
-- **原生 MySQL 源的普通 UPDATE 无前像**：归一化器对普通 Debezium `u` 事件当前不保留 `before`（GoldenDB 的 DELETE+INSERT 合并路径恒有 before，不受影响）。后果：ENVELOPE/CANAL/MAXWELL/DEBEZIUM 四种格式的 `before`/`old` 为空均可正常消费；仅 OGG_JSON 的 `before=null` 不是 SeaTunnel ogg 反序列化器接受的形状（开启 `ignore-parse-error` 可跳过）。
+- **`FULL_CDC` 的初始装载行是 `phase=CDC`**：原因和消费端的替代依据见 §2“phase 的真实含义”。要可靠区分，只能改引擎侧 raw 格式。MySQL-CDC 源的 `format = compatible_debezium_json` 会原样输出 Debezium JSON，理论上保留 `op=r` 与源库 `source.ts_ms`，但尚未实测。它还会改变 raw 事件的值编码和引擎配置指纹，现有 Kafka CDC 任务都要重新初始化，因此目前未采用。
+- **UPDATE 恒有前像**：MySQL 协议源的 UPDATE 在 raw topic 中恒为 d+c 对（见 §1），合并后 before 是完整前像，五种格式的 `before` / `old` 都有值。归一化器对 `op=u`（无前像）的处理只作防御：SeaTunnel 的 Kafka sink 不开启 UPDATE 合并，不会写出 `u`。
 - **兼容格式不内嵌 key 对象**：record key（同步键 JSON）由生产端统一附加；ENVELOPE 额外在消息体内冗余 `key` 字段。
 - SeaTunnel 自带的 canal/maxwell **sink** 会把 UPDATE 拆成 DELETE+INSERT 两条消息；平台的输出是合并后的单条 UPDATE，无此问题。
-- 所有格式的时间戳均源自事件时间（Debezium `ts_ms` / 快照行桥接接收时间），不是 broker 写入时间。
+- **时间戳**：所有格式的时间戳都取自 `sourceEventTime`。`FULL_CDC` / `INCREMENTAL` 是引擎采集时间（raw `ts_ms`），`FULL` 是桥接接收时间。两者都不是源库提交时间，也不是 broker 写入时间。引擎落后于 binlog 时，事件时间会晚于提交时间，例如限速下的大快照之后，或暂停恢复后回放积压时。实测：限速快照期间 77 秒内陆续提交的变更，回放后 `ts_ms` 全部落在 43 毫秒之内，比提交时间晚 2～3 分钟。
 
 ## 8. 用 SeaTunnel Kafka Source 再消费
 
@@ -139,8 +161,6 @@ source {
     bootstrap_servers = "broker:9092"
     topic = "customers"
     format = "canal_json"          # 或 debezium_json / maxwell_json / ogg_json
-    # ogg 再消费含 before=null 的 UPDATE 时建议开启：
-    # ignore.parse.error = true
   }
 }
 ```

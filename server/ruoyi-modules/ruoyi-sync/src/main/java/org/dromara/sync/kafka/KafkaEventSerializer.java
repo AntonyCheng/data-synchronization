@@ -78,7 +78,7 @@ public class KafkaEventSerializer {
         message.putArray("data").add(image == null ? jsonMapper.createObjectNode() : image);
         if ("UPDATE".equals(event.op())) {
             JsonNode before = image(event.before());
-            // An absent before image (native MySQL "u" without one) degrades to an
+            // An absent before image (an op=u without one) degrades to an
             // empty old - the deserializer then backfills every column from data.
             message.putArray("old").add(before == null ? jsonMapper.createObjectNode() : changedBefore(before, image));
         }
@@ -130,8 +130,9 @@ public class KafkaEventSerializer {
 
     /**
      * Oracle GoldenGate JSON. {@code table} is the qualified db.table (the deserializer
-     * splits on "."). A null before image on UPDATE is not consumable by SeaTunnel's
-     * ogg_json source - see the documented limitation in docs/kafka-event-formats.md.
+     * splits on "."). A null before image on UPDATE would not be consumable by SeaTunnel's
+     * ogg_json source; only the defensive op=u path can produce one, which SeaTunnel's
+     * Kafka sink never writes (docs/kafka-event-formats.md section 7).
      */
     private ObjectNode oggJson(KafkaEventNormalizer.NormalizedEvent event) {
         ObjectNode message = jsonMapper.createObjectNode();

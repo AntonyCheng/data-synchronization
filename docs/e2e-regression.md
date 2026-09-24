@@ -33,7 +33,7 @@ mvn -q -o -Pdev -pl ruoyi-modules/ruoyi-sync -Dmaven.test.skip=false -Dgroups=e2
 | 同上 | FULL，MySQL→MySQL | 目标表按源 DDL 预建（`varchar(64)` 不被放宽为 TEXT、保留主键）、除时间列外逐行一致；`fullToMysqlKeepsDatetimeWallClock` 单独断言 DATETIME 原样复制 |
 | `SingleTaskCdcLifecycleE2eTest` | FULL_CDC 全生命周期，MySQL→PostgreSQL | 快照到达，INSERT/UPDATE/DELETE 生效；`RUNNING` 时拒绝再次启动、编辑、删除且状态不变；暂停 = savepoint：`PAUSING`→`PAUSED`、引擎 `SAVEPOINT_DONE`、记录 checkpoint；暂停期间写入不落目标；`PAUSED` 拒绝启动和删除；恢复复用原 jobId，引擎上只有这一个作业；暂停期写入在恢复后到达，**目标端手工打的标记行未被覆盖**（证明是 savepoint 续跑而非重新快照），无重复/无丢失；恢复后 CDC 继续；停止→`STOPPED`、调度挂起、引擎 `CANCELED` 且不在运行列表、之后的 binlog 不再消费、拒绝恢复；`STOPPED` 可删除 |
 | `TaskGroupDdlE2eTest` | MULTI_TABLE 两表 FULL_CDC→PostgreSQL + DDL 漂移 | 组 `RUNNING`、两表项各自独立引擎作业且组记录恰为这两个 jobId；两表快照、一表 CDC 到达；对 B 表 `ADD COLUMN` 后 `ddl-check`：只产生 B 的一条未关闭事件，B `DDL_BLOCKED`（引擎 `SAVEPOINT_DONE`）、A 仍 `RUNNING`、组 `DEGRADED`；状态刷新不会把 `DDL_BLOCKED` 盖成 `PAUSED`；A 继续收 CDC、B 收不到；停止降级组→组与所有表项 `STOPPED`、引擎无残留作业；可删除 |
-| `KafkaTaskE2eTest` | FULL_CDC→Kafka（ENVELOPE） | 经平台接口建输出 topic；消费真实输出 topic：快照 INSERT、CDC INSERT、合并后的单条 UPDATE（带 before 前像）、DELETE（data 为被删行），消息 Key 为同步键 JSON；停止后引擎无作业 |
+| `KafkaTaskE2eTest` | FULL_CDC→Kafka（ENVELOPE） | 经平台接口建输出 topic；消费真实输出 topic：初始装载 INSERT（`phase=CDC`，见下文）、CDC INSERT、合并后的单条 UPDATE（带 before 前像）、DELETE（data 为被删行），整个 topic 没有 `SNAPSHOT` 事件，消息 Key 为同步键 JSON；停止后引擎无作业 |
 | `EngineStateMappingE2eTest` | 引擎启动过渡态的映射 | 在启动/恢复仍在进行时就排队刷新状态（同一把任务锁，锁一释放立即执行），逐条记录“引擎状态→平台状态”；任何过渡态（CREATED/INITIALIZING/PENDING/SCHEDULED）被报成 `FAILED` 即失败；本次一个过渡态都没采到时记为 skipped（无法判定），而不是通过 |
 
 ## 隔离与清理
@@ -59,7 +59,7 @@ mvn -q -o -Pdev -pl ruoyi-modules/ruoyi-sync -Dmaven.test.skip=false -Dgroups=e2
 
 缺陷修复后对应测试应转绿；在此之前，重构验收以“其余测试全绿、上述结论不变”为准。MySQL 目标 DATETIME +8 小时的缺陷已修复（MySQL sink 改用 `preserveInstants=false`，见 `type-mapping-mysql-postgresql.md`），`fullToMysqlKeepsDatetimeWallClock` 不再列为已知失败。
 
-有意不断言的一处契约出入：MySQL `FULL_CDC`→Kafka 的快照事件 `phase` 实际是 `CDC`。SeaTunnel 的 `DEBEZIUM_JSON` sink 把快照行写成 `op=c`，从不写 `op=r`，而桥接只把 `op=r` 标成 `SNAPSHOT`。`kafka-event-formats.md` 却把这种情况写成 GoldenDB 独有。以哪边为准待产品决定，所以 `KafkaTaskE2eTest` 只要求 `phase` 合法。
+MySQL `FULL_CDC`→Kafka 的初始装载事件 `phase` 是 `CDC`，这是契约，`KafkaTaskE2eTest` 按此断言。SeaTunnel 把快照行写成 `op=c`，与 binlog INSERT 逐字段同形，平台拿不到可靠信号，因此不猜边界。实测证据与消费端的替代依据见 `kafka-event-formats.md` 的“phase 的真实含义”。
 
 ## 环境导致的失败
 

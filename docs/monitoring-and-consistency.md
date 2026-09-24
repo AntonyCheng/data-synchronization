@@ -7,7 +7,7 @@
 - 阶段：`SNAPSHOT` / `CDC` / `MIXED`，由同步模式和引擎状态推导（`EngineJobStates.phaseOf`）：`FULL` 恒为 `SNAPSHOT`，`INCREMENTAL` 恒为 `CDC`；`FULL_CDC` 在引擎启动态（INITIALIZING/CREATED/PENDING/STARTING）为 `SNAPSHOT`，进入 RUNNING 后为 `MIXED`——Zeta 不暴露快照完成信号，平台不假装知道边界。
 - 源端已读取、目标端已提交：行数和字节数；源端和目标端吞吐：引擎自己的 QPS。
 - 积压：源端已读取 − 目标端已提交（不为负），是关系型目标唯一可得的"落后程度"指标。
-- 端到端延迟：仅 Kafka 目标可得，由平台桥接按"源事件时间 → broker ack"计算；关系型目标显示为空，不以请求时间冒充延迟。
+- 端到端延迟：仅 Kafka 目标可得，由平台桥接按"`sourceEventTime` → broker ack"计算；关系型目标显示为空，不以请求时间冒充延迟。CDC 任务的 `sourceEventTime` 是引擎**采集**事件的时刻（raw `ts_ms`），不是源库提交时间，所以这个延迟不含引擎读 binlog 本身的落后：限速快照之后或暂停恢复回放积压时，指标会偏小（见 `kafka-event-formats.md` §7）。
 
 **Zeta 2.3.13 的两个事实**：`job-info.metrics` 把所有数值序列化成 JSON 字符串（`"SourceReceivedCount":"50"`），投影层同时接受字符串与数值；它不返回任何事件时间戳，因此关系型目标无法计算时间型 CDC 延迟。
 
