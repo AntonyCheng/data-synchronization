@@ -1,39 +1,19 @@
-import { LoadingOutlined } from '@ant-design/icons';
 import { ModalForm, ProFormDependency, ProFormDigit, ProFormSelect, ProFormText } from '@ant-design/pro-components';
-import {
-  Alert,
-  AutoComplete,
-  Button,
-  Descriptions,
-  Divider,
-  Form,
-  message,
-  Modal,
-  Radio,
-  Select,
-  Space,
-  Steps,
-  Typography
-} from 'antd';
+import { Alert, AutoComplete, Button, Descriptions, Divider, Form, message, Radio, Select, Space } from 'antd';
 import { useEffect, useState } from 'react';
-import type {
-  ConnectionTestResult,
-  DataSourceCdcPrecheckVO,
-  DataSourceMetadataVO,
-  DataSourceOptionVO
-} from '@/api/sync/data-source/types';
+import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskForm, SyncTaskVO } from '@/api/sync/task/types';
-import {
-  checkDataSourceCdc,
-  createKafkaTopic,
-  getDataSourceMetadata,
-  listDataSourceDatabases,
-  listDataSourceTables,
-  listKafkaTopics,
-  testDataSource
-} from '@/api/sync/data-source';
+import { createKafkaTopic, getDataSourceMetadata } from '@/api/sync/data-source';
 import { addSyncTask, getSyncTask, updateSyncTask } from '@/api/sync/task';
 import ColumnSelector from '@/components/sync/ColumnSelector';
+import {
+  jumpToMissing,
+  SourceProbeResult,
+  useCloseGuard,
+  WizardFooter,
+  WizardSteps
+} from '@/components/sync/SyncWizard';
+import { useSourceProbe, useTargetObjects } from '@/components/sync/useSourceProbe';
 import {
   defaultForm,
   kafkaOutputFormatLabel,
@@ -84,25 +64,15 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
   const [form] = Form.useForm<SyncTaskForm>();
   const [wizardStep, setWizardStep] = useState(0);
   const [submitLoading, setSubmitLoading] = useState(false);
-  // Set by onValuesChange, which fires for user edits but not for the programmatic prefill
-  // of an edit form - isFieldsTouched() is unusable here because each wizard step unmounts
-  // the previous step's controls.
-  const [dirty, setDirty] = useState(false);
-  const [sourceDatabases, setSourceDatabases] = useState<string[]>([]);
-  const [sourceTables, setSourceTables] = useState<string[]>([]);
-  const [sourceDatabase, setSourceDatabase] = useState('');
-  const [targetTables, setTargetTables] = useState<string[]>([]);
-  const [targetTablesLoading, setTargetTablesLoading] = useState(false);
+  // Connection test, CDC precheck, databases and tables of the source, with a live progress phase.
+  const probe = useSourceProbe(dataSources);
+  const { sourceTables, sourceDatabase, cdcPrecheck } = probe;
+  const targets = useTargetObjects(dataSources);
+  const targetTables = targets.names;
+  const targetTablesLoading = targets.loading;
   const [topicMode, setTopicMode] = useState<'EXISTING' | 'CREATE'>('EXISTING');
   const [topicCreateLoading, setTopicCreateLoading] = useState(false);
   const [sourceMetadata, setSourceMetadata] = useState<DataSourceMetadataVO>();
-  const [cdcPrecheck, setCdcPrecheck] = useState<DataSourceCdcPrecheckVO>();
-  const [sourceConnectionTest, setSourceConnectionTest] = useState<ConnectionTestResult>();
-  const [metadataLoading, setMetadataLoading] = useState(false);
-  // What the source probe is doing right now. Shown while it runs, because the probe takes a
-  // couple of seconds and used to be completely silent - the only feedback was an error toast
-  // if you clicked 下一步 too early.
-  const [probePhase, setProbePhase] = useState<string>();
 
   const taskId = task?.taskId;
 
@@ -132,17 +102,12 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
   }, [open, taskId]);
 
   function resetMetadataState() {
-    setSourceDatabases([]);
-    setSourceTables([]);
-    setSourceDatabase('');
+    probe.reset();
     setSourceMetadata(undefined);
-    setCdcPrecheck(undefined);
-    setSourceConnectionTest(undefined);
   }
 
   function resetTargetTables() {
-    setTargetTables([]);
-    setTargetTablesLoading(false);
+    targets.reset();
     setTopicMode('EXISTING');
   }
 
@@ -152,40 +117,9 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
     onClose();
   };
 
-  /** Closing a half-filled wizard throws the work away, so ask first once anything was typed. */
-  const confirmClose = () => {
-    if (!dirty) {
-      close();
-      return;
-    }
-    Modal.confirm({
-      title: '放弃本次填写？',
-      content: '关闭后已填写的内容不会保留。',
-      okText: '放弃',
-      okButtonProps: { danger: true },
-      cancelText: '继续填写',
-      onOk: close
-    });
-  };
+  const { setDirty, confirmClose, modalProps } = useCloseGuard(close);
 
-  const loadTargetTables = async (targetId?: string | number) => {
-    setTargetTables([]);
-    if (!targetId) return;
-    const target = dataSources.find(item => String(item.sourceId) === String(targetId));
-    if (!target) return;
-    setTargetTablesLoading(true);
-    try {
-      if (target.sourceType === 'KAFKA') {
-        const result = await listKafkaTopics(targetId);
-        setTargetTables((result.data || []).map(item => item.topic));
-      } else {
-        const result = await listDataSourceTables(targetId, target.databaseName);
-        setTargetTables(result.data || []);
-      }
-    } finally {
-      setTargetTablesLoading(false);
-    }
-  };
+  const loadTargetTables = targets.load;
 
   const createTopic = async () => {
     const targetId = form.getFieldValue('targetId');
@@ -208,36 +142,13 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
 
   /** Reconnects and re-introspects rather than trusting the stored connection state. */
   const loadSourceMetadata = async (sourceId?: string | number, tableName?: string) => {
-    resetMetadataState();
-    if (!sourceId) return;
-    const source = dataSources.find(item => String(item.sourceId) === String(sourceId));
-    if (!source) return;
-    setMetadataLoading(true);
-    try {
-      setProbePhase('正在测试源端连接…');
-      const connectionResult = await testDataSource(sourceId);
-      setSourceConnectionTest(connectionResult.data);
-      if (!connectionResult.data?.success) return;
-      if (source.sourceType === 'MYSQL') {
-        setProbePhase('正在检查 binlog / CDC 前置条件…');
-        const cdcResult = await checkDataSourceCdc(sourceId);
-        setCdcPrecheck(cdcResult.data);
-      }
-      setProbePhase('正在读取数据库列表…');
-      const databasesResult = await listDataSourceDatabases(sourceId);
-      const databases = databasesResult.data || [];
-      setSourceDatabases(databases);
-      const database = source.databaseName || databases[0] || '';
-      setSourceDatabase(database);
-      if (!database) return;
-      setProbePhase('正在读取表列表…');
-      const tablesResult = await listDataSourceTables(sourceId, database);
-      setSourceTables(tablesResult.data || []);
+    setSourceMetadata(undefined);
+    await probe.probe(sourceId, async ({ sourceId: probedId, database, setPhase }) => {
       if (!tableName) return;
-      setProbePhase('正在读取源表结构…');
+      setPhase('正在读取源表结构…');
       const table = tableName.includes('.') ? tableName.slice(tableName.lastIndexOf('.') + 1) : tableName;
       if (!table) return;
-      const metadataResult = await getDataSourceMetadata(sourceId, database, table);
+      const metadataResult = await getDataSourceMetadata(probedId, database, table);
       setSourceMetadata(metadataResult.data);
       if (!form.getFieldValue('selectedColumns'))
         form.setFieldValue(
@@ -246,19 +157,14 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
         );
       if (!form.getFieldValue('syncKeyColumns'))
         form.setFieldValue('syncKeyColumns', reliableKeyOptions(metadataResult.data)[0]?.value);
-    } finally {
-      setMetadataLoading(false);
-      setProbePhase(undefined);
-    }
+    });
   };
 
   const loadTableMetadata = async (tableName?: string) => {
     setSourceMetadata(undefined);
     const sourceId = form.getFieldValue('sourceId');
     if (!sourceId || !sourceDatabase || !tableName) return;
-    setMetadataLoading(true);
-    setProbePhase('正在读取源表结构…');
-    try {
+    await probe.track('正在读取源表结构…', async () => {
       const result = await getDataSourceMetadata(sourceId, sourceDatabase, tableName);
       setSourceMetadata(result.data);
       form.setFieldValue(
@@ -272,29 +178,20 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
         const targetIsKafka = sourceTypeOf(dataSources, form.getFieldValue('targetId')) === 'KAFKA';
         form.setFieldValue('targetTable', targetIsKafka ? defaultKafkaTopic(sourceDatabase, tableName) : tableName);
       }
-    } finally {
-      setMetadataLoading(false);
-      setProbePhase(undefined);
-    }
+    });
   };
 
   /** Sends the operator to the step that owns {@code field} and highlights it there. */
   const jumpToField = (field: string) => {
     const step = REQUIRED_FIELDS_BY_STEP.findIndex(fields => fields.includes(field));
-    const label = FIELD_LABELS[field] || field;
-    if (step >= 0) setWizardStep(step);
-    message.error(
-      step >= 0 ? `第 ${step + 1} 步「${WIZARD_STEPS[step]}」还缺少必填项：${label}` : `还缺少必填项：${label}`
-    );
-    // The panel for that step has to mount before its field can be scrolled to.
-    window.setTimeout(() => form.scrollToField(field, { behavior: 'smooth', block: 'center' }), 120);
+    jumpToMissing(form, WIZARD_STEPS, setWizardStep, { step, field, label: FIELD_LABELS[field] || field });
   };
 
   const nextWizardStep = async () => {
     const fields = REQUIRED_FIELDS_BY_STEP[wizardStep];
     if (fields?.length) {
       await form.validateFields(fields);
-      if (wizardStep === 0 && !sourceConnectionTest?.success) {
+      if (wizardStep === 0 && !probe.connectionTest?.success) {
         message.error('请先选择可用的 MySQL 源数据源，并等待连接检查通过');
         return;
       }
@@ -373,53 +270,28 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       preserve
       layout="vertical"
       width={760}
-      modalProps={{
-        destroyOnHidden: true,
-        // A 5-step wizard is easy to lose: Esc and a stray mask click used to discard
-        // everything typed so far, because destroyOnHidden tears the form down with it.
-        mask: { closable: false },
-        keyboard: false,
-        onCancel: confirmClose
-      }}
-      onOpenChange={isOpen => {
-        if (!isOpen) confirmClose();
-      }}
+      modalProps={modalProps}
       onValuesChange={() => setDirty(true)}
       onFinish={submitForm}
       onFinishFailed={() => message.error('请先完善当前步骤的必填项')}
       submitter={{
         render: () => (
-          <Space>
-            <Button onClick={confirmClose}>取消</Button>
-            {wizardStep > 0 && <Button onClick={() => setWizardStep(current => current - 1)}>上一步</Button>}
-            {wizardStep < LAST_STEP ? (
-              <Button
-                type="primary"
-                loading={metadataLoading}
-                disabled={metadataLoading}
-                onClick={() => void nextWizardStep()}
-              >
-                {metadataLoading ? '正在探查' : '下一步'}
-              </Button>
-            ) : (
-              <Button type="primary" loading={submitLoading} onClick={() => form.submit()}>
-                {taskId ? '确认保存' : '确认创建'}
-              </Button>
-            )}
-          </Space>
+          <WizardFooter
+            step={wizardStep}
+            lastStep={LAST_STEP}
+            busy={probe.loading}
+            submitting={submitLoading}
+            submitText={taskId ? '确认保存' : '确认创建'}
+            onCancel={confirmClose}
+            onPrev={() => setWizardStep(current => current - 1)}
+            onNext={() => void nextWizardStep()}
+            onSubmit={() => form.submit()}
+          />
         )
       }}
     >
       <ProFormText name="taskId" hidden />
-      <Steps
-        current={wizardStep}
-        size="small"
-        style={{ marginBottom: probePhase ? 12 : 24 }}
-        items={WIZARD_STEPS.map(title => ({ title }))}
-      />
-      {probePhase && (
-        <Alert type="info" showIcon icon={<LoadingOutlined />} title={probePhase} style={{ marginBottom: 16 }} />
-      )}
+      <WizardSteps steps={WIZARD_STEPS} current={wizardStep} probePhase={probe.phase} />
       {wizardStep === 0 && (
         <>
           <Alert
@@ -438,35 +310,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
               onChange: value => void loadSourceMetadata(value as string | number)
             }}
           />
-          {sourceConnectionTest && (
-            <Alert
-              type={sourceConnectionTest.success ? 'success' : 'error'}
-              showIcon
-              message={
-                sourceConnectionTest.success ? `源端连接可用（${sourceConnectionTest.latencyMs} ms）` : '源端连接失败'
-              }
-              description={sourceConnectionTest.message}
-              style={{ marginBottom: 12 }}
-            />
-          )}
-          {cdcPrecheck && (
-            <Alert
-              type={cdcPrecheck.passed ? 'success' : 'warning'}
-              showIcon
-              message={cdcPrecheck.passed ? 'CDC 前置检查通过' : 'CDC 前置检查未通过'}
-              description={cdcPrecheck.message}
-              style={{ marginBottom: 12 }}
-            />
-          )}
-          <Form.Item label="源数据库">
-            <Typography.Text>{sourceDatabase || '选择源数据源后自动读取'}</Typography.Text>
-            {sourceDatabases.length > 1 && (
-              <Typography.Text type="secondary">
-                {' '}
-                已探查 {sourceDatabases.length} 个数据库，当前单表任务使用数据源配置的默认数据库。
-              </Typography.Text>
-            )}
-          </Form.Item>
+          <SourceProbeResult probe={probe} databaseNote="当前单表任务使用数据源配置的默认数据库。" />
           <ProFormDependency name={['sourceId']}>
             {({ sourceId }) => (
               <ProFormSelect
@@ -500,7 +344,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
             showSearch
             rules={[{ required: true, message: '请选择源表' }]}
             fieldProps={{
-              loading: metadataLoading && sourceTables.length === 0,
+              loading: probe.loading && sourceTables.length === 0,
               onChange: value => void loadTableMetadata(value as string)
             }}
           />
