@@ -42,9 +42,11 @@ import java.util.Set;
  * so the operator sees it. On a live group the new tables' jobs are submitted at once, and one the
  * engine refuses is isolated while the others keep going.
  *
- * <p>Runs under the group lock and - like the rest of the group lifecycle, see
- * {@link SyncTaskGroupServiceImpl} - without a transaction of its own. A save runs it inside the
- * save's transaction, but a group being saved is never live, so nothing is submitted there.
+ * <p>The remote half ({@link #plan}, {@link #readmitRejected}) writes nothing. A save of a
+ * whole-database group ({@link SyncTaskGroupServiceImpl}) runs it before its transaction opens and
+ * writes the planned rows itself; a group being saved is never live, so nothing is submitted there.
+ * {@link #discover} runs under the group lock and - like the rest of the group lifecycle - without a
+ * transaction of its own: it plans, then inserts and submits table by table.
  */
 @RequiredArgsConstructor
 @Service
@@ -82,103 +84,147 @@ public class SyncTaskGroupDiscoveryServiceImpl implements ISyncTaskGroupDiscover
         });
     }
 
+    @Override
+    public TablePlan plan(SyncTaskGroup group, List<SyncTaskGroupItem> present) {
+        return plan(group, requireSource(group), requireTarget(group), present);
+    }
+
+    @Override
+    public List<SyncTaskGroupItem> readmitRejected(SyncTaskGroup group, List<SyncTaskGroupItem> items) {
+        DataSource source = requireSource(group);
+        DataSource target = requireTarget(group);
+        List<SyncTaskGroupItem> rechecked = new ArrayList<>();
+        for (SyncTaskGroupItem item : items) {
+            // A table with a job did run; what parked it is not a discovery rule and is not undone here.
+            if (!SyncStatus.FAILED.equals(item.getStatus()) || StringUtils.isNotBlank(item.getEngineJobId())) continue;
+            String rejection = admit(item, source, target);
+            if (rejection == null) {
+                item.setStatus(SyncStatus.PENDING);
+                item.setLastError("");
+            } else {
+                item.setLastError(SyncText.truncateForColumn(rejection));
+            }
+            rechecked.add(item);
+        }
+        return rechecked;
+    }
+
     private SyncTaskGroupOperationResult doDiscover(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (!SyncScope.isDatabase(group.getSyncScope())) {
             throw new ServiceException("仅整库同步任务组支持发现新增表");
         }
-        DataSource source = dataSourceService.requireById(group.getSourceId(), "源");
-        DataSource target = dataSourceService.requireById(group.getTargetId(), "目标");
+        DataSource source = requireSource(group);
+        DataSource target = requireTarget(group);
+        TablePlan plan = plan(group, source, target, itemMapper.selectByGroupId(groupId));
+
+        int started = 0;
+        int failed = plan.rejected();
+        List<String> jobIds = new ArrayList<>();
+        boolean live = GroupStatuses.isLive(group.getStatus());
+        for (SyncTaskGroupItem item : plan.items()) {
+            itemMapper.insert(item);
+            if (!live || SyncStatus.FAILED.equals(item.getStatus())) continue;
+            try {
+                jobIds.add(itemOps.submit(group, item, source, target));
+                started++;
+            } catch (RuntimeException ex) {
+                itemOps.isolate(item, ex.getMessage());
+                failed++;
+            }
+        }
+        int discovered = plan.items().size();
+        if (discovered > 0) {
+            group.setConfigVersion((group.getConfigVersion() == null ? 1 : group.getConfigVersion()) + 1);
+            if (!jobIds.isEmpty()) group.setEngineJobId(appendJobIds(group.getEngineJobId(), jobIds));
+        }
+        String lastError = plan.note(failed);
+        // The periodic pass repeats an unchanged "over the limit" every minute - only write a change.
+        if (discovered > 0 || !lastError.equals(StringUtils.defaultString(group.getLastError()))) {
+            group.setLastError(lastError);
+            groupMapper.updateById(group);
+        }
+        String summary = TablePlan.join(discovered == 0 ? "未发现新增表"
+            : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张", plan.limitNote());
+        return failed > 0 || plan.overLimit() > 0
+            ? SyncTaskGroupOperationResult.partial(group, summary) : SyncTaskGroupOperationResult.of(group, summary);
+    }
+
+    /**
+     * Whole-database discovery used to have no cap at all: a 500-table schema became 500 items,
+     * and on a live group 500 engine jobs, each with its own binlog connection to the customer's
+     * database. The group limit applies to discovered tables like to listed ones; tables already
+     * in the group stay (a group saved before the limit may exceed it).
+     */
+    private TablePlan plan(SyncTaskGroup group, DataSource source, DataSource target, List<SyncTaskGroupItem> present) {
         String database = StringUtils.defaultIfBlank(group.getSourceDatabase(), source.getDatabaseName());
-        Set<String> existing = new HashSet<>();
+        Set<String> known = new HashSet<>();
         // A discovered table follows the schema the operator chose for the group's existing
         // tables (they all share one on a whole-database group), else the target's default.
         String targetSchema = TableNames.defaultSchema(target);
-        for (SyncTaskGroupItem item : itemMapper.selectByGroupId(groupId)) {
-            existing.add(item.getSourceTable().toLowerCase(Locale.ROOT));
+        for (SyncTaskGroupItem item : present) {
+            known.add(item.getSourceTable().toLowerCase(Locale.ROOT));
             if (StringUtils.isNotBlank(item.getTargetSchema())) targetSchema = item.getTargetSchema();
         }
-
-        int discovered = 0;
-        int started = 0;
-        int failed = 0;
-        // Whole-database discovery used to have no cap at all: a 500-table schema became 500
-        // items, and on a live group 500 engine jobs, each with its own binlog connection to the
-        // customer's database. The group limit applies to discovered tables like to listed ones;
-        // tables already in the group stay (a group saved before the limit may exceed it).
         int maxTables = groupProperties.effectiveMaxTables();
-        int capacity = maxTables - existing.size();
+        int capacity = maxTables - known.size();
         int overLimit = 0;
-        List<String> jobIds = new ArrayList<>();
+        List<SyncTaskGroupItem> planned = new ArrayList<>();
         for (String table : metadataService.queryTables(source.getSourceId(), database)) {
-            if (!existing.add(table.toLowerCase(Locale.ROOT))) continue;
-            if (discovered >= capacity) {
+            if (!known.add(table.toLowerCase(Locale.ROOT))) continue;
+            if (planned.size() >= capacity) {
                 overLimit++;
                 continue;
             }
             SyncTaskGroupItem item = new SyncTaskGroupItem();
-            item.setGroupId(groupId);
+            item.setGroupId(group.getGroupId());
             item.setSourceDatabase(database);
             item.setSourceTable(table);
             item.setTargetSchema(targetSchema);
             item.setTargetTable(table);
             item.setDdlPolicy(group.getDdlPolicy());
             item.setStatus(SyncStatus.PENDING);
-            String validationError;
-            try {
-                DataSourceMetadataVo metadata = itemOps.readSourceMetadata(item, source);
-                GroupItemOperations.applySelection(item, metadata);
-                TableSchemaSnapshot.baseline(item, metadata);
-                if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
-                validationError = itemOps.validateDiscoveredItem(source, target, item);
-            } catch (RuntimeException ex) {
-                validationError = ex.getMessage();
-            }
-            if (validationError != null) {
+            String rejection = admit(item, source, target);
+            if (rejection != null) {
                 item.setStatus(SyncStatus.FAILED);
-                item.setLastError(SyncText.truncateForColumn(validationError));
-                failed++;
+                item.setLastError(SyncText.truncateForColumn(rejection));
             }
-            itemMapper.insert(item);
-            discovered++;
-            if (validationError == null && GroupStatuses.isLive(group.getStatus())) {
-                try {
-                    jobIds.add(itemOps.submit(group, item, source, target));
-                    started++;
-                } catch (RuntimeException ex) {
-                    itemOps.isolate(item, ex.getMessage());
-                    failed++;
-                }
-            }
+            planned.add(item);
         }
-        String limitNote = overLimit == 0 ? ""
-            : "已达任务组上限 " + maxTables + " 张，另有 " + overLimit + " 张表未纳入（sync.group.max-tables）";
-        if (discovered > 0) {
-            group.setConfigVersion((group.getConfigVersion() == null ? 1 : group.getConfigVersion()) + 1);
-            if (!jobIds.isEmpty()) group.setEngineJobId(appendJobIds(group.getEngineJobId(), jobIds));
-        }
-        String lastError = joinNotes(failed == 0 ? "" : "新增表发现完成，其中 " + failed + " 张表校验或提交失败，请查看表项错误", limitNote);
-        // The periodic pass repeats an unchanged "over the limit" every minute - only write a change.
-        if (discovered > 0 || !lastError.equals(StringUtils.defaultString(group.getLastError()))) {
-            group.setLastError(lastError);
-            groupMapper.updateById(group);
-        }
-        String summary = joinNotes(discovered == 0 ? "未发现新增表"
-            : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张", limitNote);
-        return failed > 0 || overLimit > 0
-            ? SyncTaskGroupOperationResult.partial(group, summary) : SyncTaskGroupOperationResult.of(group, summary);
+        return new TablePlan(planned, overLimit, maxTables);
     }
 
-    private static String joinNotes(String first, String second) {
-        if (StringUtils.isBlank(first)) return second;
-        if (StringUtils.isBlank(second)) return first;
-        return first + "；" + second;
+    /**
+     * The discovery rules for one table: selection and baseline from the live schema, its topic on
+     * a Kafka target, a usable sync key and a compatible target. Null when the table passes, else
+     * the reason. A new table has no baseline yet, so its selection is simply derived (every column,
+     * the first usable key); a re-checked one that covered its whole table follows it, and an
+     * explicit subset is validated as it is (see {@link GroupItemOperations#followSourceColumns}).
+     */
+    private String admit(SyncTaskGroupItem item, DataSource source, DataSource target) {
+        try {
+            DataSourceMetadataVo metadata = itemOps.readSourceMetadata(item, source);
+            if (!GroupItemOperations.followSourceColumns(item, metadata)) GroupItemOperations.applySelection(item, metadata);
+            TableSchemaSnapshot.baseline(item, metadata);
+            if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
+            return itemOps.validateDiscoveredItem(source, target, item);
+        } catch (RuntimeException ex) {
+            return StringUtils.defaultIfBlank(ex.getMessage(), "新增表校验失败");
+        }
     }
 
     private SyncTaskGroup requireGroup(Long groupId) {
         SyncTaskGroup group = groupMapper.selectById(groupId);
         if (group == null) throw new ServiceException("同步任务组不存在");
         return group;
+    }
+
+    private DataSource requireSource(SyncTaskGroup group) {
+        return dataSourceService.requireById(group.getSourceId(), "源");
+    }
+
+    private DataSource requireTarget(SyncTaskGroup group) {
+        return dataSourceService.requireById(group.getTargetId(), "目标");
     }
 
     private static String appendJobIds(String current, List<String> appended) {
