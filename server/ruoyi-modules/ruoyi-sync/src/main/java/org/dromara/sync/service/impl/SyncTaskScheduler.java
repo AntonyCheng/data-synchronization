@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
@@ -38,7 +39,7 @@ public class SyncTaskScheduler {
     private final ISeaTunnelJobService jobService;
     private final RedissonClient redissonClient;
 
-    @Scheduled(fixedDelayString = "${sync.schedule.interval-ms:15000}", initialDelayString = "${sync.schedule.initial-delay-ms:10000}")
+    @Scheduled(fixedDelayString = "${sync.schedule.interval-ms:15000}", initialDelayString = "${sync.schedule.initial-delay-ms:10000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void triggerDueTasks() {
         LocalDateTime now = LocalDateTime.now();
         List<SyncTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<SyncTask>()

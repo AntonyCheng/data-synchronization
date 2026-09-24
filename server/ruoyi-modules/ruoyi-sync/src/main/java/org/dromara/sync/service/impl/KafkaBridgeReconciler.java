@@ -2,6 +2,7 @@ package org.dromara.sync.service.impl;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.DataSource;
@@ -52,7 +53,7 @@ public class KafkaBridgeReconciler {
     /** Owners whose bridge failed to start on the previous pass, to keep the log quiet while it persists. */
     private final Set<Long> failing = new HashSet<>();
 
-    @Scheduled(fixedDelayString = "${sync.kafka-bridge.reconcile-interval-ms:30000}", initialDelayString = "${sync.kafka-bridge.reconcile-initial-delay-ms:40000}")
+    @Scheduled(fixedDelayString = "${sync.kafka-bridge.reconcile-interval-ms:30000}", initialDelayString = "${sync.kafka-bridge.reconcile-initial-delay-ms:40000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void reconcile() {
         try {
             reconcileOnce();

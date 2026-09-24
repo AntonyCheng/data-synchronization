@@ -12,8 +12,8 @@ import java.util.function.Supplier;
 /**
  * Per-task and per-group mutation locks (Redisson). Every operation that reads a task or
  * group row, talks to the engine and writes the row back runs under the matching lock, so
- * a user action and a background reconcile pass (RuoYi's {@code schedule-pool} is
- * multi-threaded) never interleave their full-row updates.
+ * a user action and a background reconcile pass (the module's scheduler,
+ * {@code SyncSchedulingConfig}, runs passes concurrently) never interleave their full-row updates.
  *
  * <p>Interactive callers wait up to {@link #WAIT_SECONDS}; background passes should test
  * {@link #isTaskBusy} / {@link #isGroupBusy} first and skip a busy row - the next cycle

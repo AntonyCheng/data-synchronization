@@ -10,6 +10,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.constant.SyncStatus;
@@ -670,7 +671,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
      * seconds) stayed stuck showing RUNNING indefinitely unless a user happened to open its
      * detail and click "刷新状态".
      */
-    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}")
+    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void refreshRunningGroupStatus() {
         groupMapper.selectActive().forEach(group -> {
             if (locks.isGroupBusy(group.getGroupId())) return;
@@ -683,7 +684,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     /** Runs only for database-scope groups that explicitly opted into new-table discovery. */
-    @Scheduled(fixedDelayString = "${sync.discovery.interval-ms:60000}", initialDelayString = "${sync.discovery.initial-delay-ms:30000}")
+    @Scheduled(fixedDelayString = "${sync.discovery.interval-ms:60000}", initialDelayString = "${sync.discovery.initial-delay-ms:30000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void discoverDatabaseGroups() {
         groupMapper.selectLiveAutoDiscoverDatabaseGroups().forEach(group -> {
             if (locks.isGroupBusy(group.getGroupId())) return;

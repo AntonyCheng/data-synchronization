@@ -5,6 +5,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.constant.SyncStatus;
@@ -233,7 +234,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
      * RUNNING in the list indefinitely. Poll periodically so platform status doesn't silently
      * drift from engine truth while the process keeps running.
      */
-    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}")
+    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void refreshRunningTaskStatus() {
         syncTaskMapper.selectActive().forEach(task -> {
             // Someone (a user action, the scheduler, or another pass) already holds this task;

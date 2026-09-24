@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.MapstructUtils;
 import org.dromara.sync.config.SyncMetricsProperties;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.domain.SyncMetricsSample;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskGroupItem;
@@ -143,7 +144,7 @@ public class SyncMetricsServiceImpl implements ISyncMetricsService {
         sampleMapper.deleteByGroupId(groupId);
     }
 
-    @Scheduled(fixedDelayString = "${sync.metrics.purge-interval-ms:3600000}", initialDelayString = "${sync.metrics.purge-initial-delay-ms:120000}")
+    @Scheduled(fixedDelayString = "${sync.metrics.purge-interval-ms:3600000}", initialDelayString = "${sync.metrics.purge-initial-delay-ms:120000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void purgeExpired() {
         int days = Math.max(1, properties.getRetentionDays());
         try {

@@ -188,6 +188,12 @@ sync:
     enabled: ${SYNC_ALERTS_ENABLED:true}
     interval-ms: ${SYNC_ALERTS_INTERVAL_MS:30000}
     initial-delay-ms: ${SYNC_ALERTS_INITIAL_DELAY_MS:45000}
+  scheduler:
+    # 以上全部后台轮询（状态对账、调度触发、整库发现、DDL 检查、Kafka 桥接对账、孤儿作业清扫、
+    # 告警、指标清理）跑在 sync 模块自己的调度线程池（线程名 sync-sched-*），不占用 RuoYi 全局
+    # schedule-pool。轮询都是 fixedDelay、不会与自身重叠，默认 9 = 每个轮询一条线程、互不排队；
+    # 调小只会让引擎不可达时卡住的轮询拖慢其余轮询。
+    pool-size: ${SYNC_SCHEDULER_POOL_SIZE:9}
 springdoc:
   api-docs:
     # 是否开启接口文档
