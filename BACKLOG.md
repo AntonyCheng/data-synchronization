@@ -568,11 +568,22 @@ RUNNING）；且核对失败时把 `lastCheckMatched` 置空，而 `updateById` 
 两个 mapper 新增 `recordCheck`，只显式写 `last_check_*` 列（含 null）。端到端 FULL 场景的 COUNT / KEY_RANGE 核对在
 真实库上走通新语句。
 
+### MySQL 源端时区按数据源配置（2026-09-24，子代理）
+
+MySQL-CDC 的 `server-time-zone` 与源端连接时区原先写死为 Asia/Shanghai：本地栈源库为 UTC 时，binlog 阶段的 TIMESTAMP
+整体 +8h（快照阶段不偏移），所有目标都受影响。数据源新增可选「服务器时区」（IANA ID，migration 023），CDC 配置按它生成；
+**留空为兼容模式（Asia/Shanghai），配置与原来逐字节相同，存量 CDC 指纹不变**（测试钉住 9 个存量指纹）；设置或修改后读取
+该数据源的 CDC 任务需重新初始化，且有运行中任务时拒绝修改（与改主机端口同一规则）。连接测试与 CDC 前置检查实测源库
+偏移，不一致时给出「增量阶段 TIMESTAMP 将偏移 N 小时」的非阻断警告和建议时区，表单可一键填入。FULL 源端改为
+`preserveInstants=false`，DATETIME/TIMESTAMP 不再依赖引擎 JVM 时区；FULL 任务可暂停恢复，旧 URL 的指纹仍被接受，
+已暂停的 FULL 任务无需重新初始化。**验证**：真实引擎上兼容模式 binlog TIMESTAMP +8h、设为 UTC 后 PG 与 MySQL 目标
+各阶段均与源端一致；真实后端的连接测试与预检正确识别出源库 +00:00 并建议 UTC；浏览器检查 12/12（字段、检测、一键填入、
+非法缩写被拒、未保存）；合并后完整端到端回归全绿。单测 202 → 218。
+
 ### 仍开放的待办（2026-09-24 收尾）
 
-- **源端时间处理（影响所有目标）**：MySQL-CDC 的 `server-time-zone` 写死为 Asia/Shanghai，源库不在东八区时
-  binlog 阶段的 TIMESTAMP 会偏移（快照阶段不偏移）；应改为按数据源探测/配置时区（会改变 CDC 任务指纹）。
-  FULL 源端经 `java.sql.Time` 读 TIME 丢小数秒；FULL 源端仍依赖引擎 JVM 为 UTC。
+- **TIME(p) 小数秒**：丢失发生在 SeaTunnel 内部（FULL 源端 `Time.toLocalTime`、PG sink 所有模式 `Time.valueOf`），
+  URL 参数无法修复，已写入类型映射文档；如需支持只能等上游或自定义连接器。
 - **Kafka 真实快照信号与延迟**：评估 MySQL-CDC `format = compatible_debezium_json`——可保留 `op=r` 与源端提交时间，
   从而正确标 `SNAPSHOT`、让 `kafka_lag_seconds` 包含引擎读 binlog 的落后（现状在限速快照或暂停恢复回放时偏小）。
   代价：raw topic 编码变化、桥接需适配、现有 Kafka CDC 任务指纹变化需重新初始化。
