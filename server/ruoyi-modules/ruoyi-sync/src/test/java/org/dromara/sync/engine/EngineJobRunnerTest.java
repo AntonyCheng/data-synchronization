@@ -10,6 +10,12 @@ import org.mockito.InOrder;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CountDownLatch;
+import java.util.Map;
+import java.util.LinkedHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -159,6 +165,53 @@ class EngineJobRunnerTest {
         assertEquals("RUNNING", observed.platformStatus());
         assertTrue(observed.checkpointBoundary());
         assertEquals("checkpoint 不存在", observed.checkpointError());
+    }
+
+    /**
+     * A group refresh polls every table's job; on a slow engine each poll can take the whole
+     * request timeout, so they must not run one after another under the group lock. Each stubbed
+     * status call waits until all three are in flight - only a concurrent pollAll gets through.
+     */
+    @Test
+    void pollAllPollsTheJobsConcurrentlyAndKeepsTheirOrder() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            EngineJobRunner parallel = new EngineJobRunner(restClient, bridge, pool);
+            CountDownLatch allInFlight = new CountDownLatch(3);
+            when(restClient.status(anyString())).thenAnswer(invocation -> {
+                allInFlight.countDown();
+                if (!allInFlight.await(5, TimeUnit.SECONDS)) throw new ServiceException("SeaTunnel 接口不可用：polled one at a time");
+                String jobId = invocation.getArgument(0);
+                return new SeaTunnelRestClient.JobSnapshot(jobId, "ds-task-" + jobId, "RUNNING", null, null);
+            });
+            when(restClient.checkpoints(anyString())).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+            Map<Long, String> jobs = new LinkedHashMap<>();
+            jobs.put(3L, "job-3");
+            jobs.put(1L, "job-1");
+            jobs.put(2L, "job-2");
+
+            long started = System.nanoTime();
+            Map<Long, EngineJobRunner.Poll> polls = parallel.pollAll(jobs);
+
+            assertTrue(TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started) < 5, "the polls did not overlap");
+            assertEquals(List.of(3L, 1L, 2L), List.copyOf(polls.keySet()), "keyed and ordered as asked");
+            for (Map.Entry<Long, EngineJobRunner.Poll> entry : polls.entrySet()) {
+                var observed = assertInstanceOf(EngineJobRunner.Poll.Observed.class, entry.getValue());
+                assertEquals("job-" + entry.getKey(), observed.snapshot().jobId());
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void pollAllStillAnswersWhenItsPoolIsAlreadyShutDown() {
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        pool.shutdown();
+        EngineJobRunner closing = new EngineJobRunner(restClient, bridge, pool);
+        mockRunning();
+
+        assertInstanceOf(EngineJobRunner.Poll.Observed.class, closing.pollAll(Map.of(OWNER, "job-1")).get(OWNER));
     }
 
     // ------------------------------------------------------------------ halt / discard / bridge

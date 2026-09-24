@@ -159,6 +159,8 @@ sync:
   engine:
     endpoint: ${SEATUNNEL_ENDPOINT:http://localhost:18080}
     request-timeout: ${SEATUNNEL_REQUEST_TIMEOUT:10s}
+    # 任务组状态刷新时同时轮询的引擎作业数（每张表 2 次 REST 调用）。引擎变慢时串行轮询会让组锁被占住数分钟。
+    poll-parallelism: ${SYNC_ENGINE_POLL_PARALLELISM:4}
     checkpoint-interval-ms: ${SEATUNNEL_CHECKPOINT_INTERVAL_MS:5000}
     read-limit-rows-per-second: ${SEATUNNEL_READ_LIMIT_ROWS_PER_SECOND:1000}
     read-limit-bytes-per-second: ${SEATUNNEL_READ_LIMIT_BYTES_PER_SECOND:10485760}

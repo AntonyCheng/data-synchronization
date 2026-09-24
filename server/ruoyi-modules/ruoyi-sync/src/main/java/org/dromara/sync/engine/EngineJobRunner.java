@@ -1,17 +1,29 @@
 package org.dromara.sync.engine;
 
-import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Runs one platform job - a single-table task, or one table item of a task group - on the engine
@@ -38,8 +50,7 @@ import java.util.concurrent.ConcurrentMap;
  * shared failure counter.
  */
 @Component
-@RequiredArgsConstructor
-public class EngineJobRunner {
+public class EngineJobRunner implements DisposableBean {
 
     /**
      * Consecutive status-poll failures tolerated per job. One failed poll used to fail a job and
@@ -50,9 +61,48 @@ public class EngineJobRunner {
 
     private final SeaTunnelRestClient restClient;
     private final KafkaTaskBridgeService bridge;
+    /** Runs the polls of {@link #pollAll}; {@code ownedPool} when this runner created it. */
+    private final Executor pollExecutor;
+    private final ExecutorService ownedPool;
 
     /** Consecutive failed polls per owner; reset by any answered poll. */
     private final ConcurrentMap<Long, Integer> pollFailureStreak = new ConcurrentHashMap<>();
+
+    /** The application's runner: {@link #pollAll} fans out on its own bounded, daemon pool. */
+    @Autowired
+    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, SeaTunnelProperties properties) {
+        this(restClient, bridge, boundedPool(properties.getPollParallelism()));
+    }
+
+    /** Polls on the calling thread, one after another - deterministic, for tests. */
+    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge) {
+        this(restClient, bridge, Runnable::run);
+    }
+
+    EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, Executor pollExecutor) {
+        this.restClient = restClient;
+        this.bridge = bridge;
+        this.pollExecutor = pollExecutor;
+        this.ownedPool = pollExecutor instanceof ExecutorService pool ? pool : null;
+    }
+
+    private static ExecutorService boundedPool(int parallelism) {
+        int threads = Math.max(1, parallelism);
+        AtomicInteger counter = new AtomicInteger();
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(threads, threads, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
+            Thread thread = new Thread(runnable, "sync-engine-poll-" + counter.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+        // An instance without task groups keeps no threads.
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
+    @Override
+    public void destroy() {
+        if (ownedPool != null) ownedPool.shutdownNow();
+    }
 
     /**
      * What submitting needs besides the config: the task (or a group item projected onto one with
@@ -189,6 +239,29 @@ public class EngineJobRunner {
         /** The engine says the job's recovery state (checkpoint / binlog position) is gone. */
         record Boundary(String error) implements Poll {
         }
+    }
+
+    /**
+     * {@link #poll} for several jobs at once, on a bounded pool ({@code sync.engine.poll-parallelism}),
+     * keyed and ordered as given. A group refresh is two REST calls per table; one after another,
+     * an engine answering slowly (each call up to the request timeout) held the group lock for
+     * minutes, and every operator action on that group waited behind it. The polls are
+     * independent - each owner has its own failure count - so only they run in parallel; the
+     * caller applies the outcomes on its own thread.
+     */
+    public Map<Long, Poll> pollAll(Map<Long, String> jobsByOwner) {
+        Map<Long, CompletableFuture<Poll>> pending = new LinkedHashMap<>();
+        jobsByOwner.forEach((ownerId, jobId) -> {
+            try {
+                pending.put(ownerId, CompletableFuture.supplyAsync(() -> poll(ownerId, jobId), pollExecutor));
+            } catch (RejectedExecutionException shuttingDown) {
+                // The pool is going away with the context; poll inline rather than fail the pass.
+                pending.put(ownerId, CompletableFuture.completedFuture(poll(ownerId, jobId)));
+            }
+        });
+        Map<Long, Poll> result = new LinkedHashMap<>();
+        pending.forEach((ownerId, future) -> result.put(ownerId, future.join()));
+        return result;
     }
 
     public Poll poll(Long ownerId, String jobId) {

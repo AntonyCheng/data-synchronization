@@ -64,6 +64,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -638,7 +639,14 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         List<String> statuses = new ArrayList<>();
         SyncTaskGroupStatus result = new SyncTaskGroupStatus();
         result.setGroupId(groupId);
-        for (SyncTaskGroupItem item : items(groupId)) {
+        List<SyncTaskGroupItem> groupItems = items(groupId);
+        // Every engine poll first, in parallel - the slow part, two REST calls per table. What they
+        // found is applied below on this thread, table by table, exactly as before.
+        Map<Long, String> jobs = new LinkedHashMap<>();
+        groupItems.stream().filter(item -> StringUtils.isNotBlank(item.getEngineJobId()))
+            .forEach(item -> jobs.put(item.getItemId(), item.getEngineJobId()));
+        Map<Long, EngineJobRunner.Poll> polls = runner.pollAll(jobs);
+        for (SyncTaskGroupItem item : groupItems) {
             SyncTaskGroupItemStatus itemStatus = new SyncTaskGroupItemStatus();
             itemStatus.setItemId(item.getItemId());
             itemStatus.setSourceTable(item.getSourceTable());
@@ -647,7 +655,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 itemStatus.setStatus(item.getStatus());
                 statuses.add(item.getStatus());
             } else {
-                EngineJobRunner.Poll poll = runner.poll(item.getItemId(), item.getEngineJobId());
+                EngineJobRunner.Poll poll = polls.get(item.getItemId());
                 if (poll instanceof EngineJobRunner.Poll.Observed observed) {
                     statuses.add(applyObserved(group, item, source, target, kafkaGroup, observed, itemStatus));
                 } else if (poll instanceof EngineJobRunner.Poll.Unreachable unreachable) {

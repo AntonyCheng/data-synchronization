@@ -20,6 +20,14 @@ public class SeaTunnelProperties {
     /** Connect + read timeout for every call to the SeaTunnel REST API. */
     private Duration requestTimeout = Duration.ofSeconds(10);
 
+    /**
+     * How many jobs a group status refresh polls at once ({@code EngineJobRunner.pollAll}). Each
+     * poll is two REST calls, so a 20-table group is 40 calls per pass; on a slow engine every
+     * one of them can take the whole {@link #requestTimeout}, and polled one after another that
+     * held the group lock for minutes.
+     */
+    private int pollParallelism = 4;
+
     /** Checkpoint interval written into generated jobs. */
     private int checkpointIntervalMs = 5000;
 
