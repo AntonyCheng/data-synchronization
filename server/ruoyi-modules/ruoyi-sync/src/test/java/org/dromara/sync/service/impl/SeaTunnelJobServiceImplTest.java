@@ -28,6 +28,7 @@ import org.mockito.InOrder;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -163,6 +164,55 @@ class SeaTunnelJobServiceImplTest {
         assertTrue(task.getLastError().contains("refused"));
     }
 
+    @Test
+    void aFullBridgePoolRefusesAKafkaStartBeforeAnythingIsSubmitted() {
+        SyncTask task = persisted(task("STOPPED", KAFKA_ID));
+        doThrow(new ServiceException("Kafka 桥接容量已满（2/2）：请调大 sync.kafka-bridge.max-workers"))
+            .when(bridge).start(any(), any(), any());
+
+        String refused = assertThrows(ServiceException.class, () -> service.start(TASK_ID)).getMessage();
+
+        assertTrue(refused.contains("sync.kafka-bridge.max-workers"), refused);
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+        assertEquals("STOPPED", task.getStatus());
+        assertNull(task.getLastError());
+    }
+
+    @Test
+    void aFullBridgePoolRefusesAKafkaResumeBeforeTheSavepointIsResubmitted() {
+        SyncTask task = persisted(task("PAUSED", KAFKA_ID));
+        task.setEngineConfigHash(fingerprint(task, kafka));
+        when(restClient.checkpoints("job-1")).thenReturn(new SeaTunnelRestClient.CheckpointSnapshot("7", LocalDateTime.now(), "COMPLETED"));
+        doThrow(new ServiceException("Kafka 桥接容量已满（2/2）：请调大 sync.kafka-bridge.max-workers"))
+            .when(bridge).start(any(), any(), any());
+
+        assertThrows(ServiceException.class, () -> service.resume(TASK_ID));
+
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+        // Like any other refusal before the submit: FAILED keeps the savepoint and stays resumable.
+        assertEquals("FAILED", task.getStatus());
+        assertTrue(task.getLastError().contains("max-workers"));
+    }
+
+    @Test
+    void aFullBridgePoolNeverFailsAKafkaTaskThatAlreadyRunsOnTheEngine() {
+        SyncTask task = persisted(running(KAFKA_ID));
+        when(restClient.status("job-1")).thenReturn(snapshot("RUNNING", null, null));
+        when(restClient.checkpoints("job-1")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+        when(bridge.isRunning(TASK_ID)).thenReturn(false);
+        when(bridge.tryStart(any(), any(), any())).thenReturn(false); // parked: pool full
+        when(taskMapper.selectActive()).thenReturn(List.of(task));
+
+        SeaTunnelJobStatus status = service.refreshStatus(TASK_ID);
+        service.refreshRunningTaskStatus(); // the background pass fails a task on any exception
+
+        assertEquals("RUNNING", status.getStatus());
+        assertEquals("RUNNING", task.getStatus());
+        assertEquals("", task.getLastError());
+        verify(bridge, never()).start(any(), any(), any());
+        verify(bridge, never()).stop(TASK_ID);
+    }
+
     // ------------------------------------------------------------------ refreshStatus
 
     @Test
@@ -243,8 +293,11 @@ class SeaTunnelJobServiceImplTest {
 
         when(restClient.status("job-1")).thenReturn(snapshot("RUNNING", null, null));
         when(bridge.isRunning(TASK_ID)).thenReturn(false);
+        when(bridge.tryStart(any(), any(), any())).thenReturn(true);
         service.refreshStatus(TASK_ID);
-        verify(bridge).start(eq(task), eq(kafka), eq("source_db"));
+        // The heal of a job that already runs never takes the operator path that refuses when full.
+        verify(bridge).tryStart(eq(task), eq(kafka), eq("source_db"));
+        verify(bridge, never()).start(any(), any(), any());
 
         when(restClient.status("job-1")).thenReturn(snapshot("DOING_SAVEPOINT", null, null));
         service.refreshStatus(TASK_ID);

@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTaskGroup;
@@ -73,7 +74,7 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
     }
 
     /** Periodic DDL checks isolate only the changed table and leave healthy tables running. */
-    @Scheduled(fixedDelayString = "${sync.ddl-check.interval-ms:60000}", initialDelayString = "${sync.ddl-check.initial-delay-ms:45000}")
+    @Scheduled(fixedDelayString = "${sync.ddl-check.interval-ms:60000}", initialDelayString = "${sync.ddl-check.initial-delay-ms:45000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void checkRunningGroupDdl() {
         groupMapper.selectLive().forEach(group -> {
             if (locks.isGroupBusy(group.getGroupId())) return;

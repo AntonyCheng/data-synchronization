@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.enums.PushSourceEnum;
 import org.dromara.common.core.enums.PushTypeEnum;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskGroup;
@@ -68,7 +69,7 @@ public class SyncAlertNotifier {
     @Value("${sync.alerts.enabled:true}")
     private boolean enabled = true;
 
-    @Scheduled(fixedDelayString = "${sync.alerts.interval-ms:30000}", initialDelayString = "${sync.alerts.initial-delay-ms:45000}")
+    @Scheduled(fixedDelayString = "${sync.alerts.interval-ms:30000}", initialDelayString = "${sync.alerts.initial-delay-ms:45000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void notifyDueAlerts() {
         try {
             notifyOnce();

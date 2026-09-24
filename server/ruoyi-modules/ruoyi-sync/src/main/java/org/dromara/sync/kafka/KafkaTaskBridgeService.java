@@ -1,10 +1,10 @@
 package org.dromara.sync.kafka;
 
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -13,6 +13,7 @@ import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.KafkaBridgeProperties;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
@@ -25,51 +26,100 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Duration;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Owns the runtime bridge from SeaTunnel's Debezium raw topic to the PRD event topic.
  * Offsets are committed only after the normalized event has received a broker ack.
+ *
+ * <p>Capacity: at most {@code sync.kafka-bridge.max-workers} workers (one thread + one consumer
+ * each) per instance. An owner that already has a worker keeps its slot when the worker is
+ * replaced. When the pool is full:
+ * <ul>
+ *   <li>{@link #start} / {@link #startGroupItem} - an operator is about to submit an engine job -
+ *       throw, so the start is refused before anything is submitted;</li>
+ *   <li>{@link #tryStart} / {@link #tryStartGroupItem} - the owner's engine job already runs
+ *       (reconciler, status-refresh heal, startup recovery) - park the owner and return
+ *       {@code false}. Failing it would not stop the job, and the raw topic keeps its events;
+ *       the bridge catches up from its committed offset once a slot frees. Parked owners are
+ *       served before new operator starts, and the check is made before any AdminClient or
+ *       consumer is created, so retrying every pass costs nothing.</li>
+ * </ul>
  */
 @Slf4j
-@RequiredArgsConstructor
 @Component
 public class KafkaTaskBridgeService {
 
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     /** Bounded by POLL_TIMEOUT plus one commit round-trip; anything longer means the worker is wedged. */
     private static final Duration GRACEFUL_STOP_TIMEOUT = Duration.ofSeconds(5);
+    private static final String MAX_WORKERS_KEY = "sync.kafka-bridge.max-workers";
     private final KafkaEventNormalizer normalizer;
     private final KafkaEventProducer producer;
     private final JsonMapper jsonMapper;
+    private final int maxWorkers;
     private final ConcurrentMap<Long, Worker> workers = new ConcurrentHashMap<>();
-    private final ExecutorService executor = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "sync-kafka-bridge");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /** RUNNING owners refused a worker because the pool was full; they get the next free slots. */
+    private final Set<Long> parked = ConcurrentHashMap.newKeySet();
+    /** Guards "check capacity, then claim a slot" and every change to {@link #parked}. */
+    private final Object admission = new Object();
+    /**
+     * Admission keeps at most maxWorkers workers; the pool size is the hard thread bound. A worker
+     * queues only for the few seconds a stopped predecessor needs to release its thread. Idle
+     * threads time out, so an instance without Kafka tasks holds none.
+     */
+    private final ThreadPoolExecutor executor;
 
-    /** Bridge for a platform task; publish metrics are persisted onto its ds_sync_task row. */
+    public KafkaTaskBridgeService(KafkaEventNormalizer normalizer, KafkaEventProducer producer, JsonMapper jsonMapper,
+                                  KafkaBridgeProperties properties) {
+        this.normalizer = normalizer;
+        this.producer = producer;
+        this.jsonMapper = jsonMapper;
+        this.maxWorkers = Math.max(1, properties.getMaxWorkers());
+        AtomicInteger threads = new AtomicInteger();
+        this.executor = new ThreadPoolExecutor(maxWorkers, maxWorkers, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
+            Thread thread = new Thread(runnable, "sync-kafka-bridge-" + threads.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.executor.allowCoreThreadTimeOut(true);
+    }
+
+    /** Operator start of a platform task; publish metrics are persisted onto its ds_sync_task row. Throws when full. */
     public void start(SyncTask task, DataSource target, String sourceDatabase) {
-        start(task, target, sourceDatabase, true);
+        start(task, target, sourceDatabase, true, true);
     }
 
-    /** Task-group items publish the same event contract but do not map to ds_sync_task metrics. */
+    /** Operator start of a task-group item (no ds_sync_task metrics). Throws when full. */
     public void startGroupItem(SyncTask task, DataSource target, String sourceDatabase) {
-        start(task, target, sourceDatabase, false);
+        start(task, target, sourceDatabase, false, true);
     }
 
-    private void start(SyncTask task, DataSource target, String sourceDatabase, boolean persistTaskMetrics) {
+    /** Bridge for a task whose engine job already runs; {@code false} = parked until a slot frees. */
+    public boolean tryStart(SyncTask task, DataSource target, String sourceDatabase) {
+        return start(task, target, sourceDatabase, true, false);
+    }
+
+    /** Bridge for a group item whose engine job already runs; {@code false} = parked until a slot frees. */
+    public boolean tryStartGroupItem(SyncTask task, DataSource target, String sourceDatabase) {
+        return start(task, target, sourceDatabase, false, false);
+    }
+
+    private boolean start(SyncTask task, DataSource target, String sourceDatabase, boolean persistTaskMetrics,
+                          boolean refuseWhenFull) {
         if (task == null || task.getTaskId() == null) throw new ServiceException("Kafka 桥接任务不能为空");
         if (!DataSourceType.isKafka(target)) {
             throw new ServiceException("Kafka 桥接目标数据源无效");
@@ -80,20 +130,92 @@ public class KafkaTaskBridgeService {
         // Persisted at save time as the fully expanded, real-cased column list; used to
         // undo the Oracle-compat UPPER CASE folding a GoldenDB JDBC snapshot applies.
         List<String> sourceColumns = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
+        Long ownerId = task.getTaskId();
+        // Before the topic precheck: a refused owner costs no AdminClient round trip.
+        if (!admit(ownerId, refuseWhenFull)) return false;
         ensureTopics(task, target);
         KafkaOutputFormat outputFormat = KafkaOutputFormat.parse(task.getKafkaOutputFormat());
-        workers.compute(task.getTaskId(), (taskId, existing) -> {
-            if (existing != null && existing.isRunning()) return existing;
-            if (existing != null) existing.close();
-            Worker worker = new Worker(taskId, KafkaAdminClients.bootstrapServers(target), rawTopic(task), task.getTargetTable(),
-                task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
-            worker.future = executor.submit(worker);
-            return worker;
-        });
+        boolean wasParked;
+        synchronized (admission) {
+            // Again, atomically with the claim: another start may have taken the last slot meanwhile.
+            if (!admit(ownerId, refuseWhenFull)) return false;
+            workers.compute(ownerId, (taskId, existing) -> {
+                if (existing != null && existing.isRunning()) return existing;
+                if (existing != null) existing.close();
+                Worker worker = new Worker(taskId, KafkaAdminClients.bootstrapServers(target), rawTopic(task), task.getTargetTable(),
+                    task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
+                worker.future = executor.submit(worker);
+                return worker;
+            });
+            wasParked = parked.remove(ownerId);
+        }
+        if (wasParked) log.info("kafka bridge got a free slot: owner {} is bridged again", ownerId);
+        return true;
+    }
+
+    /**
+     * True when the owner may hold a worker. When it may not, an operator start is refused with
+     * an exception and a background start parks the owner, logging only the transition.
+     */
+    private boolean admit(Long ownerId, boolean refuseWhenFull) {
+        synchronized (admission) {
+            if (workers.containsKey(ownerId)) return true;
+            // Operator starts leave the slots of parked owners alone: those already run on the engine.
+            int reserved = refuseWhenFull ? parked.size() - (parked.contains(ownerId) ? 1 : 0) : 0;
+            if (workers.size() + reserved < maxWorkers) return true;
+            if (refuseWhenFull) throw new ServiceException(capacityMessage(1));
+            if (parked.add(ownerId)) {
+                log.warn("kafka bridge pool full ({}/{}): owner {} keeps running on the engine without a bridge, "
+                    + "its raw topic buffers the events until a slot frees ({})", workers.size(), maxWorkers, ownerId, MAX_WORKERS_KEY);
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Operator pre-check before starting several owners in one go (a task group resume), so the
+     * whole operation is refused before its first job is submitted instead of failing halfway.
+     */
+    public void requireCapacity(Collection<Long> ownerIds) {
+        synchronized (admission) {
+            long needed = ownerIds.stream().distinct().filter(id -> !workers.containsKey(id)).count();
+            long reserved = parked.stream().filter(id -> !ownerIds.contains(id)).count();
+            if (needed > 0 && workers.size() + reserved + needed > maxWorkers) {
+                throw new ServiceException(capacityMessage(needed));
+            }
+        }
+    }
+
+    private String capacityMessage(long needed) {
+        int used = workers.size();
+        int waiting = parked.size();
+        String usage = needed > 1
+            ? "Kafka 桥接容量不足（已用 " + used + "/" + maxWorkers + "，本次需要 " + needed + " 个"
+            : "Kafka 桥接容量已满（" + used + "/" + maxWorkers;
+        return usage + (waiting > 0 ? "，另有 " + waiting + " 个运行中的任务/表项在排队等待桥接" : "")
+            + "）：每个运行中的 Kafka 任务/表项在每个后端实例上各占用 1 个桥接 worker。请调大 "
+            + MAX_WORKERS_KEY + "，或先停止其他 Kafka 任务后重试";
+    }
+
+    /**
+     * What an operator should see as the last error of an owner: the stored error, prefixed with
+     * a notice while this instance holds the owner parked without a bridge. Read-time only - the
+     * status refresh rewrites last_error every cycle, and the parked state is per instance.
+     */
+    public String decorateLastError(Long ownerId, String lastError) {
+        if (ownerId == null || !parked.contains(ownerId)) return lastError;
+        String notice = "Kafka 桥接等待容量：本实例桥接已满（" + workers.size() + "/" + maxWorkers
+            + "），引擎作业仍在运行、变更暂存在 raw topic 中，腾出空位后自动续传；如需立即恢复请调大 "
+            + MAX_WORKERS_KEY + " 或停止其他 Kafka 任务";
+        return StringUtils.isBlank(lastError) ? notice : notice + "；" + lastError;
     }
 
     public void stop(Long taskId) {
-        Worker worker = workers.remove(taskId);
+        Worker worker;
+        synchronized (admission) {
+            worker = workers.remove(taskId);
+            parked.remove(taskId);
+        }
         if (worker != null) worker.close();
     }
 
@@ -102,9 +224,14 @@ public class KafkaTaskBridgeService {
         return worker != null && worker.isRunning();
     }
 
-    /** Ids (task ids or group item ids) that currently have a worker in this process, live or not. */
+    /**
+     * Ids (task ids or group item ids) this process has a worker for, live or not, or holds
+     * parked waiting for one - everything {@link #stop} should retire once the owner stops.
+     */
     public Set<Long> localOwnerIds() {
-        return Set.copyOf(workers.keySet());
+        Set<Long> owners = new HashSet<>(workers.keySet());
+        owners.addAll(parked);
+        return Set.copyOf(owners);
     }
 
     /**
@@ -124,8 +251,8 @@ public class KafkaTaskBridgeService {
         }
     }
 
-    /** The output topic is user-owned and must exist; only the private raw topic is created here. */
-    private void ensureTopics(SyncTask task, DataSource target) {
+    /** The output topic is user-owned and must exist; only the private raw topic is created here. Package-private for tests. */
+    void ensureTopics(SyncTask task, DataSource target) {
         String bootstrapServers = KafkaAdminClients.bootstrapServers(target);
         String rawTopic = rawTopic(task);
         try (AdminClient admin = AdminClient.create(KafkaAdminClients.adminProperties(bootstrapServers))) {
@@ -174,10 +301,16 @@ public class KafkaTaskBridgeService {
         return "__ds_raw_" + taskId + "_v" + version;
     }
 
+    /** The consumer a worker reads its raw topic with; package-private for tests. */
+    Consumer<String, String> openConsumer(Properties properties) {
+        return new KafkaConsumer<>(properties);
+    }
+
     @PreDestroy
     void close() {
         workers.values().forEach(Worker::close);
         workers.clear();
+        parked.clear();
         executor.shutdownNow();
     }
 
@@ -193,7 +326,7 @@ public class KafkaTaskBridgeService {
         private final boolean persistTaskMetrics;
         private final KafkaOutputFormat outputFormat;
         private final AtomicBoolean running = new AtomicBoolean(true);
-        private volatile KafkaConsumer<String, String> consumer;
+        private volatile Consumer<String, String> consumer;
         private volatile Future<?> future;
         private JsonNode pendingDelete;
 
@@ -224,7 +357,7 @@ public class KafkaTaskBridgeService {
             properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
             properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
             properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-            try (KafkaConsumer<String, String> opened = new KafkaConsumer<>(properties)) {
+            try (Consumer<String, String> opened = openConsumer(properties)) {
                 consumer = opened;
                 opened.subscribe(List.of(rawTopic));
                 while (running.get()) {
@@ -296,7 +429,7 @@ public class KafkaTaskBridgeService {
          */
         private void close() {
             running.set(false);
-            KafkaConsumer<String, String> opened = consumer;
+            Consumer<String, String> opened = consumer;
             if (opened != null) opened.wakeup();
             Future<?> current = future;
             if (current == null) return;

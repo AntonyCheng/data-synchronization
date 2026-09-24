@@ -23,3 +23,11 @@
 ## 运维参数
 
 可通过 `sync.schedule.interval-ms` 和 `sync.schedule.initial-delay-ms` 调整扫描间隔和启动延迟。调度器依赖现有 Redisson/Redis，不触碰业务容器。
+
+### 后台轮询的线程池
+
+调度触发与 sync 模块其余全部后台轮询（任务 / 任务组状态对账、整库发现、DDL 检查、Kafka 桥接对账、孤儿作业清扫、告警、指标清理，共 9 个）都运行在模块自己的调度线程池上（`SyncSchedulingConfig`，线程名 `sync-sched-*`），不再与其他模块共用 RuoYi 的全局 `schedule-pool`（cores + 1 线程）。引擎不可达时，一轮状态对账可能被每次 10 秒的 REST 超时拖住数分钟；隔离之后它最多拖慢 sync 自己的轮询，不会饿死框架和其他模块的定时任务。
+
+- `sync.scheduler.pool-size`（默认 9）：每个轮询都是 `fixedDelay`，不会与自身重叠，所以 9 = 每个轮询一条线程、互不排队，再大也用不上；调小则引擎不可达时卡住的轮询会推迟告警、桥接对账等其余轮询。新增 `@Scheduled` 轮询必须写 `scheduler = SyncSchedulingConfig.SCHEDULER`（`SyncSchedulingConfigTest` 会检查），并相应调大默认值。
+- 停机：应用关闭时先停止触发新一轮，正在执行的一轮允许跑完（受 `spring.lifecycle.timeout-per-shutdown-phase` 约束）后再销毁数据源等 bean，不会在写库中途被中断。
+- `dev-fast`（延迟初始化）下同样生效：`@Scheduled` bean 由 `DevFastLazyInitConfig` 保持 eager，注册定时任务时按 bean 名解析 `syncScheduler`，延迟的调度器 bean 随之被创建。

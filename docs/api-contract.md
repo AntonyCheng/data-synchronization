@@ -95,6 +95,8 @@ CDC 前置检查返回 `passed`、`message`、`serverId`、`gtidMode`、`binlogR
 
 `POST /task/{id}/start` 在提交 SeaTunnel 前服务端强制执行同一套综合校验；校验失败只返回启动错误，不改变草稿/已停止任务状态。只有校验通过且引擎提交成功后，任务才会进入 `RUNNING`。
 
+Kafka 目标的启动 / 恢复 / 重新初始化（单表与任务组、表项）在提交引擎作业之前还要占一个桥接名额（`sync.kafka-bridge.max-workers`，见 [monitoring-and-consistency.md](monitoring-and-consistency.md#桥接容量)）。名额已满时返回业务错误「Kafka 桥接容量已满（64/64）…」或任务组恢复的「Kafka 桥接容量不足（已用 60/64，本次需要 20 个）…」，引擎上不会留下作业。单表任务启动被拒不改变状态；单表任务的恢复与重新初始化被拒与其他提交前失败一样记为 `FAILED`（仍可恢复 / 重新初始化）；任务组恢复、表项恢复与重建被拒时状态不变；多表任务组启动中途被拒时补偿停止已提交的表，整库任务组只隔离被拒的表。已在运行的 Kafka 任务/表项不受名额影响其状态，桥接暂缺时其 `lastError` 在列表与详情中显示「Kafka 桥接等待容量…」。
+
 单表任务创建采用五步向导，具体页面规则和纯增量位点策略见 [`task-creation-wizard.md`](task-creation-wizard.md)。纯增量任务必须先通过 CDC 前置检查；`TIMESTAMP` 使用 Asia/Shanghai 本地时间转换为毫秒 epoch，`SPECIFIC` 的 binlog 位置不得小于 4。
 
 ## SeaTunnel 配置预览

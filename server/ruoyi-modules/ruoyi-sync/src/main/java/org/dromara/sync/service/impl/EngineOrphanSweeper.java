@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskGroup;
@@ -45,7 +46,7 @@ public class EngineOrphanSweeper {
     private final SeaTunnelRestClient restClient;
     private final SyncLocks locks;
 
-    @Scheduled(fixedDelayString = "${sync.orphan-sweep.interval-ms:30000}", initialDelayString = "${sync.orphan-sweep.initial-delay-ms:50000}")
+    @Scheduled(fixedDelayString = "${sync.orphan-sweep.interval-ms:30000}", initialDelayString = "${sync.orphan-sweep.initial-delay-ms:50000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void sweep() {
         try {
             sweepOnce();

@@ -26,6 +26,15 @@ Kafka 目标的桥接 worker 运行在后端进程内。`KafkaBridgeReconciler` 
 
 raw topic 只有一个分区，所以多个实例的 worker 加入同一 consumer group 时只有一个实际消费，其余待命；某实例崩溃后 Kafka 在下一次 rebalance 把分区交给幸存实例，平台不需要额外协调。启动失败（典型是输出 topic 不存在）每个 owner 只告警一次，恢复时再记一条。
 
+### 桥接容量
+
+每个 worker 是一条常驻线程 + 一个 consumer（producer 按 Kafka 集群共享）。单实例上限为 `sync.kafka-bridge.max-workers`（默认 64，约 130 条线程、fetch 缓冲远低于 100 MiB，够 3 个 20 表整库任务组再加若干单表任务）。因为每个实例都为每个运行中的 owner 跑一个 worker（其余待命），这个值实际上就是全集群可同时运行的 Kafka 任务 + 表项数，各实例应配置一致。满额时分两种情况：
+
+- **操作员启动 / 恢复 / 重新初始化**（单表任务、任务组启动与恢复、表项恢复与重建、整库发现新表）：桥接在提交引擎作业之前启动，满额即抛出「Kafka 桥接容量已满（64/64）…请调大 `sync.kafka-bridge.max-workers`，或先停止其他 Kafka 任务后重试」，引擎上不会留下作业。任务组恢复在第一张表重新提交之前整体检查容量（「容量不足（已用 60/64，本次需要 20 个）」），不会恢复到一半。多表任务组启动中途被拒时按原有逻辑补偿停止已提交的表，整库任务组隔离被拒的表、其余照常运行。
+- **已在引擎上运行的 owner**（本对账、状态刷新里的即时修复、重启恢复）：不改状态、不写库。该 owner 被"挂起等待容量"——引擎作业照常运行，事件留在 raw topic，腾出空位后桥接从已提交的 offset 续传。容量检查在创建 AdminClient / consumer 之前完成，所以每轮重试没有成本；日志只在进入和离开挂起时各记一条。挂起的 owner 优先于新的操作员启动拿到空位。
+
+挂起状态对操作员的可见方式：任务列表 / 详情与任务组表项的 `lastError` 在读取时前缀一句「Kafka 桥接等待容量：本实例桥接已满（64/64）…」，桥接一启动即消失。刻意不写入 `last_error` 列：状态刷新每 30 秒会用引擎侧的错误重写该列，一次性写入撑不过一轮；且挂起是单个实例的视角（另一实例可能正在正常消费），不应落到所有实例共享的行上。
+
 ## 状态告警（消息中心）
 
 `SyncAlertNotifier` 每 `sync.alerts.interval-ms`（30 秒）扫描一次：单表任务进入 `FAILED` / `REINITIALIZE_REQUIRED`、任务组进入 `FAILED` / `REINITIALIZE_REQUIRED` / `DEGRADED`、存活任务组（`RUNNING` / `DEGRADED`）内的表项进入 `FAILED` / `DDL_BLOCKED` 时，通过 RuoYi 消息中心（`MessageService.publishAll`：写入 `sys_message` 系统分组 + SSE/WebSocket 推送给所有在线用户）发一条通知，正文为「对象 + 状态 + `last_error`」，`path` 指向任务 / 任务组页面，`data.title = 数据同步告警`，`data.level` 为 `error`（失败、需重新初始化）或 `warning`（降级、结构阻塞），前端据此弹红 / 黄色提示。

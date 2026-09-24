@@ -5,6 +5,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.constant.SyncStatus;
@@ -233,7 +234,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
      * RUNNING in the list indefinitely. Poll periodically so platform status doesn't silently
      * drift from engine truth while the process keeps running.
      */
-    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}")
+    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:20000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void refreshRunningTaskStatus() {
         syncTaskMapper.selectActive().forEach(task -> {
             // Someone (a user action, the scheduler, or another pass) already holds this task;
@@ -412,9 +413,17 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         return task != null && DataSourceType.isKafka(dataSourceMapper.selectById(task.getTargetId()));
     }
 
+    /**
+     * Start / resume / reinitialize call this just before submitting a job (the task is not active
+     * yet), so a full bridge pool refuses them while nothing has been submitted. An active task -
+     * status-refresh heal, startup recovery - already has its engine job: a full pool only parks
+     * its bridge until a slot frees, failing the task would not stop the job.
+     */
     private void startBridge(SyncTask task) {
-        kafkaTaskBridgeService.start(task, dataSourceService.requireUsable(task.getTargetId(), "目标"),
-            dataSourceService.requireUsable(task.getSourceId(), "源").getDatabaseName());
+        DataSource target = dataSourceService.requireUsable(task.getTargetId(), "目标");
+        String sourceDatabase = dataSourceService.requireUsable(task.getSourceId(), "源").getDatabaseName();
+        if (SyncStatus.isActive(task.getStatus())) kafkaTaskBridgeService.tryStart(task, target, sourceDatabase);
+        else kafkaTaskBridgeService.start(task, target, sourceDatabase);
     }
 
     private void prepareResourceProtection(SyncTask task) {

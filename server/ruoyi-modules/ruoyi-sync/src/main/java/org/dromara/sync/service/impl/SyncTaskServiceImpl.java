@@ -23,6 +23,7 @@ import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SyncMetricsSampleVo;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskVo;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskConfigVersionMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
@@ -67,6 +68,7 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     private final IDataSourceMetadataService metadataService;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final ISyncMetricsService metricsService;
+    private final KafkaTaskBridgeService kafkaTaskBridgeService;
     private final SyncLocks locks;
     private final TransactionTemplate transactionTemplate;
 
@@ -79,20 +81,24 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
             .eq(StringUtils.isNotBlank(bo.getStatus()), SyncTask::getStatus, bo.getStatus())
             .orderByDesc(SyncTask::getTaskId);
         Page<SyncTaskVo> page = syncTaskMapper.selectVoPage(pageQuery.build(), wrapper);
-        attachLatestMetrics(page.getRecords());
+        attachRuntimeState(page.getRecords());
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
     @Override
     public SyncTaskVo queryById(Long taskId) {
         SyncTaskVo task = syncTaskMapper.selectVoById(taskId);
-        if (task != null) attachLatestMetrics(List.of(task));
+        if (task != null) attachRuntimeState(List.of(task));
         return task;
     }
 
-    private void attachLatestMetrics(List<SyncTaskVo> tasks) {
+    /** Latest engine metrics, and a notice on a RUNNING Kafka task this instance holds without a bridge. */
+    private void attachRuntimeState(List<SyncTaskVo> tasks) {
         Map<Long, SyncMetricsSampleVo> latest = metricsService.latestForTasks(tasks.stream().map(SyncTaskVo::getTaskId).toList());
-        tasks.forEach(task -> task.setLatestMetrics(latest.get(task.getTaskId())));
+        tasks.forEach(task -> {
+            task.setLatestMetrics(latest.get(task.getTaskId()));
+            task.setLastError(kafkaTaskBridgeService.decorateLastError(task.getTaskId(), task.getLastError()));
+        });
     }
 
     @Override

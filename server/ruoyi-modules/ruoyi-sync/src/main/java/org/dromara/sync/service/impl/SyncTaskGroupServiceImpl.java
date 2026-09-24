@@ -10,6 +10,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.constant.SyncStatus;
@@ -529,6 +530,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             }
             resumable.add(new Resumable(item, generated));
         }
+        if (DataSourceType.isKafka(target)) {
+            // A full bridge pool is a refusal too: one check for every table about to be resubmitted.
+            kafkaTaskBridgeService.requireCapacity(resumable.stream().map(next -> next.item().getItemId()).toList());
+        }
         List<String> failed = new ArrayList<>();
         for (Resumable next : resumable) {
             SyncTaskGroupItem item = next.item();
@@ -778,7 +783,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
      * seconds) stayed stuck showing RUNNING indefinitely unless a user happened to open its
      * detail and click "刷新状态".
      */
-    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}")
+    @Scheduled(fixedDelayString = "${sync.status-refresh.interval-ms:30000}", initialDelayString = "${sync.status-refresh.initial-delay-ms:25000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void refreshRunningGroupStatus() {
         groupMapper.selectActive().forEach(group -> {
             if (locks.isGroupBusy(group.getGroupId())) return;
@@ -791,7 +796,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     /** Runs only for database-scope groups that explicitly opted into new-table discovery. */
-    @Scheduled(fixedDelayString = "${sync.discovery.interval-ms:60000}", initialDelayString = "${sync.discovery.initial-delay-ms:30000}")
+    @Scheduled(fixedDelayString = "${sync.discovery.interval-ms:60000}", initialDelayString = "${sync.discovery.initial-delay-ms:30000}", scheduler = SyncSchedulingConfig.SCHEDULER)
     public void discoverDatabaseGroups() {
         groupMapper.selectLiveAutoDiscoverDatabaseGroups().forEach(group -> {
             if (locks.isGroupBusy(group.getGroupId())) return;
@@ -941,7 +946,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (items == null) items = List.of();
         Map<Long, SyncMetricsSampleVo> latest =
             metricsService.latestForGroupItems(items.stream().map(SyncTaskGroupItemVo::getItemId).toList());
-        items.forEach(item -> item.setLatestMetrics(latest.get(item.getItemId())));
+        items.forEach(item -> {
+            item.setLatestMetrics(latest.get(item.getItemId()));
+            item.setLastError(kafkaTaskBridgeService.decorateLastError(item.getItemId(), item.getLastError()));
+        });
         Map<Long, List<SyncTaskGroupItemVo>> byGroup = items.stream()
             .collect(Collectors.groupingBy(SyncTaskGroupItemVo::getGroupId));
         groups.forEach(group -> group.setItems(byGroup.getOrDefault(group.getGroupId(), List.of())));
@@ -1025,8 +1033,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         itemMapper.updateById(item);
     }
 
+    /** Strict before a submit, parked rather than failed for an active item; see SeaTunnelJobServiceImpl#startBridge. */
     private void startItemBridge(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
-        kafkaTaskBridgeService.startGroupItem(SyncTaskGroupConfigGenerator.toTask(group, item), target, source.getDatabaseName());
+        var task = SyncTaskGroupConfigGenerator.toTask(group, item);
+        if (SyncStatus.isActive(item.getStatus())) kafkaTaskBridgeService.tryStartGroupItem(task, target, source.getDatabaseName());
+        else kafkaTaskBridgeService.startGroupItem(task, target, source.getDatabaseName());
     }
 
     private void refreshItemCheckpoint(SyncTaskGroupItem item) {
