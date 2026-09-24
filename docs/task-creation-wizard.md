@@ -19,7 +19,7 @@
 | 平台选项 | SeaTunnel 配置 | 规则 |
 |---|---|---|
 | 从最新位点开始 | `startup.mode = "latest"` | 不填写额外位点 |
-| 按时间开始 | `startup.mode = "timestamp"`、`startup.timestamp` | 使用源端 Asia/Shanghai 的 `LocalDateTime`，转换为毫秒 epoch；不能晚于当前时间 |
+| 按时间开始 | `startup.mode = "timestamp"`、`startup.timestamp` | 按源数据源的服务器时区（未设置时为 Asia/Shanghai）解释 `LocalDateTime`，转换为毫秒 epoch；不能晚于当前时间 |
 | 指定 binlog 位点 | `startup.mode = "specific"`、`startup.specific-offset.file`、`startup.specific-offset.pos` | 文件名只允许字母、数字、`.`、`_`、`-`；位置必须 `>= 4` |
 
 非纯增量任务会清空这些位点字段并固定为 `LATEST`，避免无效配置残留。保存时服务端会重新校验模式、时间、文件名和位置；前端限制不能替代服务端校验。

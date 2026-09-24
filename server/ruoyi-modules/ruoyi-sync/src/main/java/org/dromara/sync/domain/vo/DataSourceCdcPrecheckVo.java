@@ -19,6 +19,8 @@ public class DataSourceCdcPrecheckVo implements Serializable {
     private String serverId;
     private String gtidMode;
     private String binlogRetention;
+    /** The server's time zone against the data source's (the {@code timezone} check item is derived from it). */
+    private DataSourceTimeZoneVo timeZone;
     private Boolean passed;
     private String message;
     private List<DataSourceCheckItemVo> checks = new ArrayList<>();

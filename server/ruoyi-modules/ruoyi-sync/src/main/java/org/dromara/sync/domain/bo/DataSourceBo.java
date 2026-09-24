@@ -49,6 +49,11 @@ public class DataSourceBo implements Serializable {
     private String password;
 
     private String sslEnabled;
+
+    /** MySQL only: IANA id such as {@code UTC} or {@code Asia/Shanghai}; blank = compatibility mode (Asia/Shanghai). */
+    @Size(max = 64, message = "服务器时区不能超过{max}个字符")
+    private String serverTimeZone;
+
     private String status;
     private String remark;
 }

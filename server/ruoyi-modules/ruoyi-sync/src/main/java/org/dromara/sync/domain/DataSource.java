@@ -32,6 +32,13 @@ public class DataSource extends BaseEntity {
     @EncryptField(algorithm = AlgorithmType.AES)
     private String password;
     private String sslEnabled;
+
+    /**
+     * MySQL only: the IANA zone the server renders {@code TIMESTAMP} in, told to the MySQL-CDC
+     * source as {@code server-time-zone}. Blank = compatibility mode ({@code Asia/Shanghai}),
+     * see {@code SourceTimeZones}.
+     */
+    private String serverTimeZone;
     private String status;
     private String remark;
 }

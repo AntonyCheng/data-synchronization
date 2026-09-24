@@ -12,12 +12,14 @@ import org.dromara.sync.domain.vo.DataSourceCheckItemVo;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceIndexVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
+import org.dromara.sync.domain.vo.DataSourceTimeZoneVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.kafka.KafkaAdminClients;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.support.JdbcUrls;
+import org.dromara.sync.support.SourceTimeZones;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
@@ -30,6 +32,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -415,13 +418,18 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
             boolean replicationPrivilege = hasReplicationPrivilege(connection);
             checks.add(new DataSourceCheckItemVo("replication_privilege", "复制权限", true, replicationPrivilege,
                 replicationPrivilege ? "已检测" : "未检测到", replicationPrivilege ? "具备复制相关权限" : "需要 REPLICATION CLIENT/SLAVE 权限"));
-            String timezone = value(variables, "time_zone");
-            checks.add(new DataSourceCheckItemVo("timezone", "源端时区", false, StringUtils.isNotBlank(timezone), timezone,
-                StringUtils.isBlank(timezone) ? "无法读取源端时区" : "已读取源端时区"));
+            Instant now = Instant.now();
+            SourceTimeZones.Detection detection = SourceTimeZones.read(connection, now);
+            if (detection.display() == null) {
+                // The measuring query failed; the variables read above still name the zone.
+                detection = SourceTimeZones.detect(variables.get("time_zone"), variables.get("system_time_zone"), null, now);
+            }
+            DataSourceTimeZoneVo timeZone = SourceTimeZones.verdict(source, detection, now);
+            result.setTimeZone(timeZone);
+            checks.add(SourceTimeZones.checkItem(timeZone));
             result.setChecks(checks);
-            boolean passed = checks.stream().filter(DataSourceCheckItemVo::getRequired).allMatch(DataSourceCheckItemVo::getPassed);
-            result.setPassed(passed);
-            result.setMessage(passed ? "MySQL binlog CDC 前置检查通过" : "存在必须修复的 MySQL binlog CDC 前置条件");
+            result.setPassed(checks.stream().filter(DataSourceCheckItemVo::getRequired).allMatch(DataSourceCheckItemVo::getPassed));
+            result.setMessage(precheckMessage(checks));
             return result;
         } catch (SQLException ex) {
             result.setPassed(false);
@@ -429,6 +437,20 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
             result.setChecks(List.of(new DataSourceCheckItemVo("connection", "连接检查", true, false, "连接失败", result.getMessage())));
             return result;
         }
+    }
+
+    /**
+     * The precheck summary. A failed optional item does not fail the precheck, but it is named
+     * here: the wizards show only this line, and a time-zone mismatch silently shifts data.
+     */
+    static String precheckMessage(List<DataSourceCheckItemVo> checks) {
+        boolean passed = checks.stream().filter(DataSourceCheckItemVo::getRequired).allMatch(DataSourceCheckItemVo::getPassed);
+        String warnings = checks.stream()
+            .filter(check -> !check.getRequired() && !check.getPassed())
+            .map(DataSourceCheckItemVo::getMessage)
+            .collect(Collectors.joining("；"));
+        String summary = passed ? "MySQL binlog CDC 前置检查通过" : "存在必须修复的 MySQL binlog CDC 前置条件";
+        return warnings.isEmpty() ? summary : summary + "。注意：" + warnings;
     }
 
     private Map<String, DataSourceColumnVo> readColumns(DatabaseMetaData metadata, String catalog, String schema,

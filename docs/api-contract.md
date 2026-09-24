@@ -7,9 +7,10 @@
 | GET | `/data-source/list` | 分页查询数据源 |
 | GET | `/data-source/{id}` | 查询数据源详情（不返回密码） |
 | POST | `/data-source` | 新增数据源 |
-| PUT | `/data-source` | 修改数据源；密码为空时保留原值 |
+| PUT | `/data-source` | 修改数据源；密码为空时保留原值，`serverTimeZone` 省略时保留原值、传空串时清空 |
 | DELETE | `/data-source/{id}` | 删除数据源 |
-| POST | `/data-source/{id}/test` | 测试 JDBC 连接 |
+| POST | `/data-source/{id}/test` | 测试 JDBC 连接；可带请求体覆盖连接字段（空密码保留原值）；MySQL 另返回 `timeZone` |
+| POST | `/data-source/test` | 测试尚未保存的数据源（新增表单）；请求体为完整数据源字段，权限同上 |
 | GET | `/data-source/{id}/databases` | 探查可访问的数据库列表 |
 | GET | `/data-source/{id}/tables?databaseName=...` | 探查指定数据库的表列表 |
 | GET | `/data-source/{id}/metadata?databaseName=...&tableName=...` | 探查表字段、主键、唯一键和字符集 |
@@ -62,7 +63,25 @@
 
 整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。
 
-MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POSTGRESQL`、`MYSQL`、`KAFKA`；单表 `syncMode` 为 `FULL`、`INCREMENTAL` 或 `FULL_CDC`，任务组首版为 `FULL_CDC`；`ddlPolicy` 默认 `FAIL`。`INCREMENTAL` 从提交作业后的最新 binlog 位点开始，不补齐此前历史，目标端必须已有可信基线；关系型 `FULL` 不执行 CDC，完成后进入 `FINISHED`；Kafka 纯 `FULL` 使用有界 JDBC 快照事件。Kafka topic 可在创建向导中选择已有 topic 或主动创建新 topic，平台创建默认 1 分区/1 副本且不覆盖已有 topic。任务表单使用数据源配置的默认数据库，数据库/表探查用于创建前确认和元数据提示；整库任务由表项模型承载。连接测试返回 `success`、`message`、`latencyMs`，任务校验返回 `source`、`target`、`cdcPrecheck`、`targetCompatibility` 和综合 `valid`。
+MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POSTGRESQL`、`MYSQL`、`KAFKA`；单表 `syncMode` 为 `FULL`、`INCREMENTAL` 或 `FULL_CDC`，任务组首版为 `FULL_CDC`；`ddlPolicy` 默认 `FAIL`。`INCREMENTAL` 从提交作业后的最新 binlog 位点开始，不补齐此前历史，目标端必须已有可信基线；关系型 `FULL` 不执行 CDC，完成后进入 `FINISHED`；Kafka 纯 `FULL` 使用有界 JDBC 快照事件。Kafka topic 可在创建向导中选择已有 topic 或主动创建新 topic，平台创建默认 1 分区/1 副本且不覆盖已有 topic。任务表单使用数据源配置的默认数据库，数据库/表探查用于创建前确认和元数据提示；整库任务由表项模型承载。连接测试返回 `success`、`message`、`latencyMs`，MySQL 数据源另返回 `timeZone`（结构见下文“源端服务器时区”）；任务校验返回 `source`、`target`、`cdcPrecheck`、`targetCompatibility` 和综合 `valid`。
+
+## 源端服务器时区
+
+MySQL 数据源可选字段 `serverTimeZone`（`ds_data_source.server_time_zone`，migration 023）：源库渲染 `TIMESTAMP` 所用的 IANA 时区 ID，例如 `UTC`、`Asia/Shanghai`、`Europe/Berlin`，固定偏移用 `Etc/GMT-8`（即 UTC+8）表示。服务端按大小写不敏感匹配并保存规范写法；`CST`、`IST`、`EST` 这类缩写含义不唯一，与 `+08:00`、`GMT+8` 等写法以及未知 ID 一样会被拒绝。非 MySQL 数据源的该字段被置空。
+
+生效方式：MySQL-CDC source 的 `server-time-zone` 和源端连接 URL 的 `serverTimezone` 都取该值；为空即兼容模式，按 `Asia/Shanghai` 生成，与字段出现之前逐字节相同，已有任务的配置指纹不变。纯增量“按时间开始”的启动时间也按该时区换算。FULL 模式的 Jdbc source 不使用该字段。字段设置或修改后，读取该数据源的每个 CDC 任务和 CDC 表项的配置指纹都会改变：已暂停或失败的任务恢复时被拒绝并进入 `REINITIALIZE_REQUIRED`，需重新初始化，因为原 binlog 位点是按旧时区读取的。该字段与主机、端口一样属于连接参数，引用该数据源的任务或任务组运行中（`RUNNING`/`PAUSING`，任务组另含 `DEGRADED`）时不能修改。写出 `Asia/Shanghai` 与留空生成的配置相同，二者之间切换不算修改。
+
+连接测试与 CDC 前置检查返回的 `timeZone`：
+
+| 字段 | 含义 |
+|---|---|
+| `serverTimeZone` | 源库报告的时区，`SYSTEM` 通过 `system_time_zone` 展开，例如 `SYSTEM（UTC）`、`+08:00`；读取失败时为空 |
+| `serverUtcOffset` | 源库当前偏移，由 `NOW()` 与 `UTC_TIMESTAMP()` 实测，例如 `UTC+00:00`；缩写不做解释 |
+| `suggestedTimeZone` | 建议填写的 IANA ID：源库报告的名字本身是合法 IANA ID 时直接采用；否则按偏移推断，`+08:00` 推断为 `Asia/Shanghai`（与兼容模式相同），`0` 推断为 `UTC`，其余整小时偏移推断为 `Etc/GMT∓N`（不含夏令时）；无法推断时为空 |
+| `configuredTimeZone` / `effectiveTimeZone` / `effectiveUtcOffset` | 数据源配置的时区（兼容模式为空串）、实际告诉引擎的时区及其当前偏移 |
+| `matched` | 两个偏移当前是否一致；源库时区无法读取时为空 |
+| `shiftHours` | 生效时区偏移减源库偏移（小时），即增量阶段 `TIMESTAMP` 的偏移量，例如 `8`、`-5.5` |
+| `message` | 结论，例如“增量阶段 TIMESTAMP 将偏移 +8 小时（比源库显示值晚 8 小时）：数据源时区 Asia/Shanghai（兼容模式），当前 UTC+08:00；源库 +00:00，当前 UTC+00:00” |
 
 ## 字段映射与同步键
 
@@ -89,7 +108,7 @@ MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POST
 
 保存、启动和重新初始化均会执行范围校验；缺省值会按保守默认值持久化。`FULL` 模式的 JDBC source 是单连接读取，因此 `sourceConnectionLimit` 只对 MySQL CDC source 写入引擎配置。超过硬上限会被接口拒绝，前端限制仅用于提前反馈，不能替代服务端校验。
 
-CDC 前置检查返回 `passed`、`message`、`serverId`、`gtidMode`、`binlogRetention` 和 `checks`。`checks` 中的硬性项目包括 `log_bin=ON`、`binlog_format=ROW`、`binlog_row_image=FULL`、正数 `server_id` 和复制权限；时区和保留策略作为风险提示返回。检查未通过时，前端不得继续执行任务校验或启动流程。
+CDC 前置检查返回 `passed`、`message`、`serverId`、`gtidMode`、`binlogRetention`、`timeZone` 和 `checks`。`checks` 中的硬性项目包括 `log_bin=ON`、`binlog_format=ROW`、`binlog_row_image=FULL`、正数 `server_id` 和复制权限；保留策略作为风险提示返回。`timezone`（源端时区）是非硬性项目（`required=false`）：数据源生效时区与源库当前偏移一致时通过；不一致或无法读取源库时区时不通过，`message` 写明增量阶段 `TIMESTAMP` 的偏移量，`suggestion` 给出应填写的服务器时区，并提示已有 CDC 任务需重新初始化。非硬性项目不通过不影响 `passed`，但会附在顶层 `message` 的“注意：”之后，向导据此以警告样式展示。硬性项目未通过时，前端不得继续执行任务校验或启动流程。
 
 目标兼容性检查返回目标表是否存在和逐项 `checks`。目标表不存在属于可接受状态，由 SeaTunnel 按源表结构自动建表；目标表已存在时，源字段缺失、字段类型族不兼容、目标主键与源主键不一致、目标额外必填列无默认值均为硬性失败。额外唯一约束等潜在写入风险在后续版本补充为非阻断告警。
 
@@ -97,7 +116,7 @@ CDC 前置检查返回 `passed`、`message`、`serverId`、`gtidMode`、`binlogR
 
 Kafka 目标的启动 / 恢复 / 重新初始化（单表与任务组、表项）在提交引擎作业之前还要占一个桥接名额（`sync.kafka-bridge.max-workers`，见 [monitoring-and-consistency.md](monitoring-and-consistency.md#桥接容量)）。名额已满时返回业务错误「Kafka 桥接容量已满（64/64）…」或任务组恢复的「Kafka 桥接容量不足（已用 60/64，本次需要 20 个）…」，引擎上不会留下作业。单表任务启动被拒不改变状态；单表任务的恢复与重新初始化被拒与其他提交前失败一样记为 `FAILED`（仍可恢复 / 重新初始化）；任务组恢复、表项恢复与重建被拒时状态不变；多表任务组启动中途被拒时补偿停止已提交的表，整库任务组只隔离被拒的表。已在运行的 Kafka 任务/表项不受名额影响其状态，桥接暂缺时其 `lastError` 在列表与详情中显示「Kafka 桥接等待容量…」。
 
-单表任务创建采用五步向导，具体页面规则和纯增量位点策略见 [`task-creation-wizard.md`](task-creation-wizard.md)。纯增量任务必须先通过 CDC 前置检查；`TIMESTAMP` 使用 Asia/Shanghai 本地时间转换为毫秒 epoch，`SPECIFIC` 的 binlog 位置不得小于 4。
+单表任务创建采用五步向导，具体页面规则和纯增量位点策略见 [`task-creation-wizard.md`](task-creation-wizard.md)。纯增量任务必须先通过 CDC 前置检查；`TIMESTAMP` 按源数据源的服务器时区（未设置时为 Asia/Shanghai）把本地时间转换为毫秒 epoch，`SPECIFIC` 的 binlog 位置不得小于 4。
 
 ## SeaTunnel 配置预览
 
