@@ -28,7 +28,6 @@ import org.dromara.sync.support.TableNames;
 import org.dromara.sync.support.TableSchemaSnapshot;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -57,14 +56,18 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
     private final SeaTunnelRestClient restClient;
     private final SyncLocks locks;
 
+    /**
+     * No transaction, for the reasons given on {@link SyncTaskGroupServiceImpl}: a pass pauses
+     * changed tables on the engine as it goes, and rolling back the events and DDL_BLOCKED rows
+     * of tables that really were paused (because a later table failed) left rows saying RUNNING
+     * for jobs that had stopped. Each table's event and status now commit as they happen.
+     */
     @Override
-    @Transactional
     public SyncTaskGroupDdlCheckResult checkDdl(Long groupId) {
         return locks.withGroupLock(groupId, () -> doCheckDdl(groupId));
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult resumeDdlItem(Long groupId, Long itemId) {
         return locks.withGroupLock(groupId, () -> doResumeDdlItem(groupId, itemId));
     }

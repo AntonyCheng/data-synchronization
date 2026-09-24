@@ -11,10 +11,14 @@ import java.util.List;
 
 public interface SyncTaskGroupMapper extends BaseMapperPlus<SyncTaskGroup, SyncTaskGroupVo> {
 
-    /** Groups whose engine state the platform must keep reconciling (RUNNING / PAUSING). */
+    /**
+     * Groups whose engine state the platform must keep reconciling (RUNNING / PAUSING / DEGRADED).
+     * DEGRADED belongs here: its healthy tables are live jobs, and leaving it out meant a table
+     * that failed or finished inside a degraded group was never noticed.
+     */
     default List<SyncTaskGroup> selectActive() {
         return selectList(new LambdaQueryWrapper<SyncTaskGroup>()
-            .in(SyncTaskGroup::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING));
+            .in(SyncTaskGroup::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING, SyncStatus.DEGRADED));
     }
 
     /** Groups that use the data source on either side. */

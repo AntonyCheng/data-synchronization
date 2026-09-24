@@ -74,6 +74,12 @@ public class SyncTask extends BaseEntity {
     private LocalDateTime lastCheckTime;
     private String lastCheckMessage;
     private String lastError;
-    /** Status the alert notifier last raised a notice for ("" when none is open); see SyncAlertNotifier. */
+    /**
+     * Status the alert notifier last raised a notice for ("" when none is open); see SyncAlertNotifier.
+     * Written only by the notifier's own {@code updateAlertedStatus}: every lifecycle path saves the
+     * whole row with {@code updateById}, and a row loaded before the notifier ran would otherwise
+     * write the old value back and get the same transition announced twice.
+     */
+    @TableField(updateStrategy = FieldStrategy.NEVER)
     private String alertedStatus;
 }

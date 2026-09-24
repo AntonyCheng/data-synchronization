@@ -59,6 +59,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -71,12 +72,25 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
  * Multi-table / whole-database release lifecycle. One SeaTunnel job per table item; the
  * group status is an aggregate of its items (see {@link GroupStatuses#aggregate}). DDL drift
  * handling lives in {@link SyncTaskGroupDdlServiceImpl}.
+ *
+ * <p><b>Transactions.</b> The lifecycle methods (start / discover / pause / resume / stop /
+ * refresh / per-item resume and reinitialize) deliberately run <em>without</em> a database
+ * transaction. They talk to the engine, and a rollback cannot un-submit or un-stop a job: under
+ * a transaction a failure half-way left the rows describing a state the engine was no longer in,
+ * while the transaction held a pooled connection and row locks for as long as N serial REST calls
+ * took. Worse, the group lock was released when the method body returned but the transaction
+ * only committed after that, so another instance could take the lock and read pre-commit rows.
+ * Instead each write commits on its own, every refusal is decided before the first engine call,
+ * and each method leaves an honest partial outcome (per-item status + error) when the engine fails
+ * part-way. Edits and deletes, which only touch the database, run in a transaction <em>inside</em>
+ * the group lock ({@link #inLockedTransaction}) so they commit before the lock is released.
  */
 @RequiredArgsConstructor
 @Service
@@ -110,6 +124,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
     private final ISyncMetricsService metricsService;
     private final SyncLocks locks;
+    private final TransactionTemplate transactionTemplate;
 
     private final ConcurrentMap<Long, Integer> itemStatusFailureStreak = new ConcurrentHashMap<>();
 
@@ -145,9 +160,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return true;
     }
 
+    /**
+     * Locked like the lifecycle: without it a start that had already read the group as STOPPED
+     * would go on to submit jobs for items this edit is replacing.
+     */
     @Override
-    @Transactional
     public Boolean updateByBo(SyncTaskGroupBo bo) {
+        return inLockedTransaction(bo.getGroupId(), () -> doUpdate(bo));
+    }
+
+    private Boolean doUpdate(SyncTaskGroupBo bo) {
         SyncTaskGroup current = requireGroup(bo.getGroupId());
         if (current.getStatus() == null || !EDITABLE_STATUSES.contains(current.getStatus())) {
             throw new ServiceException("只有草稿或已停止任务组允许修改");
@@ -160,9 +182,17 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return true;
     }
 
+    /**
+     * Locked for the same reason as edits, with a worse failure mode: a start racing a delete
+     * submits {@code ds-task-<itemId>} jobs whose rows are gone, which nothing - not even
+     * {@link EngineOrphanSweeper} - can ever map back to an owner.
+     */
     @Override
-    @Transactional
     public Boolean deleteById(Long groupId) {
+        return inLockedTransaction(groupId, () -> doDelete(groupId));
+    }
+
+    private Boolean doDelete(Long groupId) {
         SyncTaskGroup current = requireGroup(groupId);
         if (current.getStatus() == null || !DELETABLE_STATUSES.contains(current.getStatus())) {
             throw new ServiceException("运行中的任务组不能删除");
@@ -240,13 +270,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     // ------------------------------------------------------------------ lifecycle
 
     /**
-     * A refused start (validation) is not rolled back on purpose: by then the only writes
-     * are the resource-protection defaults, recovered Kafka topics and the re-derived column
-     * selections - all true statements about the group that the operator needs to see
-     * (e.g. "the target lacks the column the source just gained") when they open validate.
+     * The writes a refused start leaves behind are intentional: the resource-protection
+     * defaults, recovered Kafka topics and the re-derived column selections are all true
+     * statements about the group that the operator needs to see (e.g. "the target lacks the
+     * column the source just gained") when they open validate. Once jobs are being submitted,
+     * a multi-table start is all-or-nothing by compensation (already-submitted jobs are stopped
+     * again), a whole-database start isolates the failing tables - see the class comment for
+     * why neither leans on a rollback.
      */
     @Override
-    @Transactional(noRollbackFor = ServiceException.class)
     public SyncTaskGroupOperationResult start(Long groupId) {
         return locks.withGroupLock(groupId, () -> doStart(groupId));
     }
@@ -351,8 +383,12 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         }
     }
 
+    /**
+     * Each discovered table is inserted before its job is submitted, and stays inserted if a
+     * later table fails: a rolled-back row would have left its already-submitted job with no
+     * owner at all.
+     */
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult discover(Long groupId) {
         return locks.withGroupLock(groupId, () -> doDiscover(groupId));
     }
@@ -426,56 +462,95 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult pause(Long groupId) {
         return locks.withGroupLock(groupId, () -> doPause(groupId));
     }
 
+    /**
+     * A table whose savepoint request fails is parked FAILED with the reason and the others
+     * keep pausing; the job id stays on the row, so the next status refresh still sees that job
+     * if the engine was only briefly unreachable and it is in fact still running.
+     */
     private SyncTaskGroupOperationResult doPause(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (!SyncStatus.RUNNING.equals(group.getStatus())) throw new ServiceException("只有运行中的任务组可以暂停");
         DataSource target = requireTarget(group);
+        List<String> failed = new ArrayList<>();
         for (SyncTaskGroupItem item : items(groupId)) {
-            if (StringUtils.isNotBlank(item.getEngineJobId())) stopItem(item, target, true, SyncStatus.PAUSING);
+            if (StringUtils.isBlank(item.getEngineJobId()) || !SyncStatus.RUNNING.equals(item.getStatus())) continue;
+            try {
+                stopItem(item, target, true, SyncStatus.PAUSING);
+            } catch (RuntimeException ex) {
+                isolateItem(item, "savepoint 暂停请求失败：" + StringUtils.defaultIfBlank(ex.getMessage(), "引擎不可达"));
+                failed.add(item.getSourceTable());
+            }
         }
-        group.setStatus(SyncStatus.PAUSING);
+        // PAUSING while anything is still taking its savepoint, so the status refresh keeps
+        // polling the group and settles the aggregate (PAUSED, or FAILED if a table failed).
+        boolean anyPausing = itemStatuses(groupId).stream().anyMatch(SyncStatus.PAUSING::equals);
+        group.setStatus(anyPausing ? SyncStatus.PAUSING : GroupStatuses.aggregate(itemStatuses(groupId)));
+        group.setLastError(failed.isEmpty() ? "" : SyncText.truncateForColumn("以下表 savepoint 暂停请求失败：" + String.join("、", failed)));
         groupMapper.updateById(group);
-        return SyncTaskGroupOperationResult.of(group, "暂停请求已提交，请刷新状态确认 savepoint");
+        return SyncTaskGroupOperationResult.of(group, failed.isEmpty() ? "暂停请求已提交，请刷新状态确认 savepoint"
+            : "暂停请求已提交，但 " + failed.size() + " 张表的 savepoint 请求失败：" + String.join("、", failed));
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult resume(Long groupId) {
         return locks.withGroupLock(groupId, () -> doResume(groupId));
     }
 
+    /**
+     * Every refusal is decided before the first submit: once one table is running again there
+     * is nothing to roll that back, so a "config changed" on the third table must not be found
+     * after the first two are already live. A table the engine then refuses is parked FAILED with
+     * its savepoint untouched (恢复该表 retries it alone) while the tables that did resume keep
+     * running - the group aggregates to DEGRADED instead of pretending to be RUNNING or PAUSED.
+     */
     private SyncTaskGroupOperationResult doResume(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         if (group.getStatus() == null || !RESUMABLE_STATUSES.contains(group.getStatus())) {
             throw new ServiceException("只有已暂停或失败任务组可以恢复");
         }
-        if (items(groupId).stream().anyMatch(item -> ddlEventMapper.selectLatestOpen(item.getItemId()) != null)) {
+        List<SyncTaskGroupItem> groupItems = items(groupId);
+        if (groupItems.stream().anyMatch(item -> ddlEventMapper.selectLatestOpen(item.getItemId()) != null)) {
             throw new ServiceException("任务组存在待处理的表结构变更，请在结构检查结果中逐表修复并恢复");
         }
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
-        for (SyncTaskGroupItem item : items(groupId)) {
-            if (StringUtils.isBlank(item.getEngineJobId())) continue;
+        record Resumable(SyncTaskGroupItem item, SeaTunnelJobConfigGenerator.GeneratedConfig config) {
+        }
+        List<Resumable> resumable = new ArrayList<>();
+        for (SyncTaskGroupItem item : groupItems) {
+            if (StringUtils.isBlank(item.getEngineJobId()) || hasLiveJob(item)) continue;
             var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
             if (configChanged(item, generated)) {
                 throw new ServiceException("表 " + item.getSourceTable() + " 配置已变化，不能直接恢复");
             }
-            submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
-            item.setStatus(SyncStatus.RUNNING);
-            itemMapper.updateById(item);
+            resumable.add(new Resumable(item, generated));
         }
-        group.setStatus(SyncStatus.RUNNING);
+        List<String> failed = new ArrayList<>();
+        for (Resumable next : resumable) {
+            SyncTaskGroupItem item = next.item();
+            try {
+                submitWithBridge(group, item, source, target, next.config(), item.getEngineJobId(), true);
+                item.setStatus(SyncStatus.RUNNING);
+                item.setLastError("");
+                itemMapper.updateById(item);
+            } catch (RuntimeException ex) {
+                isolateItem(item, "从 savepoint 恢复失败：" + StringUtils.defaultIfBlank(ex.getMessage(), "引擎不可达"));
+                failed.add(item.getSourceTable());
+            }
+        }
+        group.setStatus(GroupStatuses.aggregate(itemStatuses(groupId)));
+        group.setLastError(failed.isEmpty() ? "" : SyncText.truncateForColumn(
+            "以下表从 savepoint 恢复失败，可在表项上单独恢复：" + String.join("、", failed)));
         groupMapper.updateById(group);
-        return SyncTaskGroupOperationResult.of(group, "任务组已从 savepoint 恢复");
+        return SyncTaskGroupOperationResult.of(group, failed.isEmpty() ? "任务组已从 savepoint 恢复"
+            : "已恢复 " + (resumable.size() - failed.size()) + " 张表，" + failed.size() + " 张恢复失败：" + String.join("、", failed));
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult resumeItem(Long groupId, Long itemId) {
         return locks.withGroupLock(groupId, () -> doResumeItem(groupId, itemId));
     }
@@ -491,8 +566,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (configChanged(item, generated)) {
             throw new ServiceException("表 " + item.getSourceTable() + " 的引擎配置已变化，不能直接从原 savepoint 恢复，请创建新配置版本并重新初始化该表");
         }
+        // Read the new baseline before the submit: failing after it would leave a running job
+        // behind a row that still says the table is blocked.
+        DataSourceMetadataVo metadata = readSourceMetadata(item, source);
         submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
-        TableSchemaSnapshot.baseline(item, readSourceMetadata(item, source));
+        TableSchemaSnapshot.baseline(item, metadata);
         item.setStatus(SyncStatus.RUNNING);
         item.setLastError("");
         itemMapper.updateById(item);
@@ -503,7 +581,6 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult reinitializeItem(Long groupId, Long itemId) {
         return locks.withGroupLock(groupId, () -> doReinitializeItem(groupId, itemId));
     }
@@ -520,7 +597,19 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
 
-        // 1. Discard the old job and its recovery state. It may already be gone; that is fine.
+        // 1. Decide whether the rebuild can happen at all BEFORE touching the old job: a refused
+        // rebuild of a DDL_BLOCKED table must leave its savepoint, and so 恢复该表, intact.
+        // The projection is re-derived against the live source schema (see followSourceColumns);
+        // an explicit subset is re-validated as-is. The sync key is never re-chosen here.
+        DataSourceMetadataVo metadata = readSourceMetadata(item, source);
+        boolean widened = followSourceColumns(item, metadata);
+        if (!widened) applySelection(item, metadata);
+        TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
+            item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
+        if (!compatibility.isPassed()) throw new ServiceException("目标表兼容性未通过：" + compatibility.getMessage());
+        if (isDatabaseScope(group) && DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
+
+        // 2. Discard the old job and its recovery state. It may already be gone; that is fine.
         String oldJobId = item.getEngineJobId();
         if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.stop(itemId);
         if (StringUtils.isNotBlank(oldJobId)) {
@@ -531,19 +620,23 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             }
         }
 
-        // 2. Re-derive the projection against the live source schema (see followSourceColumns);
-        // an explicit subset is re-validated as-is. The sync key is never re-chosen here.
-        DataSourceMetadataVo metadata = readSourceMetadata(item, source);
-        boolean widened = followSourceColumns(item, metadata);
-        if (!widened) applySelection(item, metadata);
-        TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-            item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
-        if (!compatibility.isPassed()) throw new ServiceException("目标表兼容性未通过：" + compatibility.getMessage());
-        if (isDatabaseScope(group) && DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
-
         // 3. Fresh baseline, fresh job, no inherited checkpoint.
         TableSchemaSnapshot.baseline(item, metadata);
-        String newJobId = submitItem(group, item, source, target);
+        String newJobId;
+        try {
+            newJobId = submitItem(group, item, source, target);
+        } catch (RuntimeException ex) {
+            // The old job is gone by now, so the row must stop pointing at it: park the table
+            // FAILED with no job and the reason, from where 重新初始化 can simply be retried. If
+            // the submit was in fact accepted, EngineOrphanSweeper adopts it by its job name.
+            itemMapper.detachEngineJob(itemId);
+            item.setEngineJobId(null);
+            isolateItem(item, "重新初始化提交失败：" + StringUtils.defaultIfBlank(ex.getMessage(), "引擎不可达"));
+            group.setEngineJobId(replaceJobId(group.getEngineJobId(), oldJobId, null));
+            group.setStatus(GroupStatuses.aggregate(itemStatuses(groupId)));
+            groupMapper.updateById(group);
+            throw ex;
+        }
         itemMapper.clearCheckpoint(itemId);
         ddlEventMapper.resolveOpen(itemId, "已通过重新初始化该表处理。");
 
@@ -556,24 +649,39 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupOperationResult stop(Long groupId) {
         return locks.withGroupLock(groupId, () -> doStop(groupId));
     }
 
+    /**
+     * Stops every table that may still have a live job and keeps going past one that fails, so a
+     * single unreachable job does not leave its siblings running. A failed table is parked FAILED
+     * with the reason (the group then aggregates to FAILED, which raises an alert); stop can simply
+     * be retried, and tables already STOPPED / FINISHED are skipped on the retry.
+     */
     private SyncTaskGroupOperationResult doStop(Long groupId) {
         SyncTaskGroup group = requireGroup(groupId);
         DataSource target = requireTarget(group);
+        List<String> failed = new ArrayList<>();
         for (SyncTaskGroupItem item : items(groupId)) {
-            if (StringUtils.isNotBlank(item.getEngineJobId())) stopItem(item, target, false, SyncStatus.STOPPED);
+            if (StringUtils.isBlank(item.getEngineJobId())
+                || SyncStatus.STOPPED.equals(item.getStatus()) || SyncStatus.FINISHED.equals(item.getStatus())) continue;
+            try {
+                stopItem(item, target, false, SyncStatus.STOPPED);
+            } catch (RuntimeException ex) {
+                isolateItem(item, "停止失败：" + StringUtils.defaultIfBlank(ex.getMessage(), "引擎不可达"));
+                failed.add(item.getSourceTable());
+            }
         }
-        group.setStatus(SyncStatus.STOPPED);
+        group.setStatus(failed.isEmpty() ? SyncStatus.STOPPED : GroupStatuses.aggregate(itemStatuses(groupId)));
+        group.setLastError(failed.isEmpty() ? "" : SyncText.truncateForColumn(
+            "以下表停止失败，请确认引擎状态后重试停止：" + String.join("、", failed)));
         groupMapper.updateById(group);
-        return SyncTaskGroupOperationResult.of(group, "任务组已停止");
+        return SyncTaskGroupOperationResult.of(group, failed.isEmpty() ? "任务组已停止"
+            : failed.size() + " 张表停止失败，其余已停止：" + String.join("、", failed));
     }
 
     @Override
-    @Transactional
     public SyncTaskGroupStatus refreshStatus(Long groupId) {
         return locks.withGroupLock(groupId, () -> doRefreshStatus(groupId));
     }
@@ -650,7 +758,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         groupMapper.selectActive().forEach(group -> {
             try {
                 SyncTaskGroupStatus status = refreshStatus(group.getGroupId());
-                if (!SyncStatus.RUNNING.equals(status.getStatus())) return;
+                if (!LIVE_STATUSES.contains(status.getStatus())) return;
                 DataSource source = requireSource(group);
                 DataSource target = requireTarget(group);
                 if (!DataSourceType.isKafka(target)) return;
@@ -949,6 +1057,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         items(groupId).forEach(item -> itemStatusFailureStreak.remove(item.getItemId()));
     }
 
+    /**
+     * A database-only mutation of one group: the group lock is taken first and the transaction
+     * runs inside it, so the change is committed before the lock is released and whoever takes
+     * the lock next reads it. (An {@code @Transactional} method wrapping the lock does the
+     * opposite: it commits after the lock is already free.)
+     */
+    private <T> T inLockedTransaction(Long groupId, Supplier<T> action) {
+        return locks.withGroupLock(groupId, () -> transactionTemplate.execute(status -> action.get()));
+    }
+
     private void isolateItem(SyncTaskGroupItem item, String error) {
         item.setStatus(SyncStatus.FAILED);
         item.setLastError(SyncText.truncateForColumn(error));
@@ -1060,7 +1178,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         LinkedHashSet<String> values = new LinkedHashSet<>();
         if (StringUtils.isNotBlank(current)) values.addAll(List.of(current.split(",")));
         if (StringUtils.isNotBlank(oldJobId)) values.remove(oldJobId);
-        values.add(newJobId);
+        if (StringUtils.isNotBlank(newJobId)) values.add(newJobId);
         return String.join(",", values);
     }
 

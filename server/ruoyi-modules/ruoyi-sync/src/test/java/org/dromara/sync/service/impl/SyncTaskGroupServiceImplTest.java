@@ -30,19 +30,27 @@ import org.dromara.sync.support.TableSchemaSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -72,10 +80,14 @@ class SyncTaskGroupServiceImplTest {
     private final KafkaTaskBridgeService bridge = mock(KafkaTaskBridgeService.class);
     private final ISyncMetricsService metrics = mock(ISyncMetricsService.class);
     private final SyncLocks locks = mock(SyncLocks.class);
+    private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 
     private final SyncTaskGroupServiceImpl service = new SyncTaskGroupServiceImpl(groupMapper, itemMapper, ddlEventMapper,
         dataSourceService, metadataService, consistencyService, properties, restClient, new ResourceProtectionPolicy(properties),
-        bridge, metrics, locks);
+        bridge, metrics, locks, new TransactionTemplate(transactionManager));
+
+    /** True only while the fake group lock is held. */
+    private final AtomicBoolean lockHeld = new AtomicBoolean();
 
     private final DataSource mysql = dataSource(MYSQL_ID, "MYSQL", "source_db");
     private final DataSource postgres = dataSource(POSTGRES_ID, "POSTGRESQL", "sink_db");
@@ -85,7 +97,14 @@ class SyncTaskGroupServiceImplTest {
 
     @BeforeEach
     void wireCollaborators() {
-        when(locks.withGroupLock(any(), any())).thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get());
+        when(locks.withGroupLock(any(), any())).thenAnswer(invocation -> {
+            lockHeld.set(true);
+            try {
+                return ((Supplier<?>) invocation.getArgument(1)).get();
+            } finally {
+                lockHeld.set(false);
+            }
+        });
         when(dataSourceService.requireById(eq(MYSQL_ID), anyString())).thenReturn(mysql);
         when(dataSourceService.requireById(eq(POSTGRES_ID), anyString())).thenReturn(postgres);
         when(dataSourceService.requireById(eq(KAFKA_ID), anyString())).thenReturn(kafka);
@@ -329,6 +348,160 @@ class SyncTaskGroupServiceImplTest {
         assertEquals("RUNNING", group.getStatus());
     }
 
+    @Test
+    void resumeDecidesEveryRefusalBeforeTheFirstSubmit() {
+        SyncTaskGroup group = persisted(group("PAUSED", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem first = runningItem(11L, "customers", "job-a");
+        first.setStatus("PAUSED");
+        first.setEngineConfigHash(fingerprint(group, first, postgres));
+        SyncTaskGroupItem second = runningItem(12L, "orders", "job-b");
+        second.setStatus("PAUSED");
+        second.setEngineConfigHash("stale");
+        items.add(first);
+        items.add(second);
+
+        assertTrue(assertThrows(ServiceException.class, () -> service.resume(GROUP_ID)).getMessage().contains("orders"));
+
+        // Nothing was resubmitted, so nothing is running behind rows that still say PAUSED.
+        verify(restClient, never()).submit(anyString(), anyString(), anyString(), anyBoolean());
+        assertEquals("PAUSED", first.getStatus());
+        assertEquals("PAUSED", group.getStatus());
+    }
+
+    @Test
+    void aTableTheEngineRefusesToResumeIsParkedWhileTheOthersKeepRunning() {
+        SyncTaskGroup group = persisted(group("PAUSED", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem first = runningItem(11L, "customers", "job-a");
+        SyncTaskGroupItem second = runningItem(12L, "orders", "job-b");
+        for (SyncTaskGroupItem item : List.of(first, second)) {
+            item.setStatus("PAUSED");
+            item.setEngineConfigHash(fingerprint(group, item, postgres));
+            items.add(item);
+        }
+        when(restClient.submit(anyString(), anyString(), eq("job-a"), eq(true))).thenReturn(new SeaTunnelRestClient.SubmitResult("job-a", "x"));
+        when(restClient.submit(anyString(), anyString(), eq("job-b"), eq(true))).thenThrow(new ServiceException("savepoint 不存在"));
+
+        SyncTaskGroupOperationResult result = service.resume(GROUP_ID);
+
+        assertEquals("RUNNING", first.getStatus());
+        assertEquals("FAILED", second.getStatus());
+        assertEquals("job-b", second.getEngineJobId(), "the savepoint stays addressable for 恢复该表");
+        assertTrue(second.getLastError().contains("savepoint 不存在"));
+        assertEquals("DEGRADED", group.getStatus());
+        assertTrue(result.getMessage().contains("1 张恢复失败"), result.getMessage());
+    }
+
+    @Test
+    void aTableWhoseSavepointRequestFailsIsParkedAndTheGroupKeepsPausing() {
+        SyncTaskGroup group = persisted(group("RUNNING", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem first = runningItem(11L, "customers", "job-a");
+        SyncTaskGroupItem second = runningItem(12L, "orders", "job-b");
+        items.add(first);
+        items.add(second);
+        doThrow(new ServiceException("SeaTunnel 接口不可用：timeout")).when(restClient).stop("job-b", true, false);
+
+        SyncTaskGroupOperationResult result = service.pause(GROUP_ID);
+
+        assertEquals("PAUSING", first.getStatus());
+        assertEquals("FAILED", second.getStatus());
+        // Still PAUSING so the status refresh keeps polling it and settles the aggregate.
+        assertEquals("PAUSING", group.getStatus());
+        assertTrue(group.getLastError().contains("orders"));
+        assertTrue(result.getMessage().contains("orders"));
+    }
+
+    @Test
+    void stopKeepsGoingPastATableTheEngineCannotStop() {
+        SyncTaskGroup group = persisted(group("RUNNING", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem stuck = runningItem(11L, "customers", "job-a");
+        SyncTaskGroupItem healthy = runningItem(12L, "orders", "job-b");
+        items.add(stuck);
+        items.add(healthy);
+        doThrow(new ServiceException("SeaTunnel 接口不可用：timeout")).when(restClient).stop("job-a", false, false);
+
+        SyncTaskGroupOperationResult result = service.stop(GROUP_ID);
+
+        verify(restClient).stop("job-b", false, false);
+        assertEquals("STOPPED", healthy.getStatus());
+        assertEquals("FAILED", stuck.getStatus());
+        assertEquals("job-a", stuck.getEngineJobId(), "kept, so a retried stop still reaches the job");
+        assertEquals("FAILED", group.getStatus());
+        assertTrue(result.getMessage().contains("customers"), result.getMessage());
+    }
+
+    @Test
+    void stopSkipsTablesWhoseJobIsAlreadyOver() {
+        SyncTaskGroup group = persisted(group("RUNNING", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem stopped = runningItem(11L, "customers", "job-a");
+        stopped.setStatus("STOPPED");
+        SyncTaskGroupItem finished = runningItem(12L, "orders", "job-b");
+        finished.setStatus("FINISHED");
+        SyncTaskGroupItem running = runningItem(13L, "invoices", "job-c");
+        items.add(stopped);
+        items.add(finished);
+        items.add(running);
+
+        service.stop(GROUP_ID);
+
+        verify(restClient).stop("job-c", false, false);
+        verify(restClient, never()).stop(eq("job-a"), anyBoolean(), anyBoolean());
+        verify(restClient, never()).stop(eq("job-b"), anyBoolean(), anyBoolean());
+        assertEquals("STOPPED", group.getStatus());
+    }
+
+    @Test
+    void resumeItemReadsTheNewBaselineBeforeSubmitting() {
+        SyncTaskGroup group = persisted(group("DEGRADED", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem blocked = runningItem(11L, "customers", "job-a");
+        blocked.setStatus("DDL_BLOCKED");
+        blocked.setEngineConfigHash(fingerprint(group, blocked, postgres));
+        items.add(blocked);
+        when(itemMapper.selectOneOfGroup(GROUP_ID, 11L)).thenReturn(blocked);
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), eq("customers"))).thenThrow(new ServiceException("连接超时"));
+
+        assertThrows(ServiceException.class, () -> service.resumeItem(GROUP_ID, 11L));
+
+        // Failing after the submit would have left a running job behind a row saying DDL_BLOCKED.
+        verify(restClient, never()).submit(anyString(), anyString(), anyString(), anyBoolean());
+        assertEquals("DDL_BLOCKED", blocked.getStatus());
+    }
+
+    // ------------------------------------------------------------------ transaction boundaries
+
+    /**
+     * The lifecycle talks to the engine, and a rollback cannot un-submit a job; an @Transactional
+     * on any of these would also commit only after the group lock is released. See the class
+     * comment of SyncTaskGroupServiceImpl - this pins the decision so it is not quietly re-added.
+     */
+    @Test
+    void theEngineFacingLifecycleRunsWithoutADatabaseTransaction() throws NoSuchMethodException {
+        for (String name : List.of("start", "discover", "pause", "resume", "stop", "refreshStatus")) {
+            assertFalse(SyncTaskGroupServiceImpl.class.getMethod(name, Long.class).isAnnotationPresent(Transactional.class), name);
+        }
+        for (String name : List.of("resumeItem", "reinitializeItem")) {
+            assertFalse(SyncTaskGroupServiceImpl.class.getMethod(name, Long.class, Long.class).isAnnotationPresent(Transactional.class), name);
+        }
+        assertFalse(SyncTaskGroupDdlServiceImpl.class.getMethod("checkDdl", Long.class).isAnnotationPresent(Transactional.class));
+        assertFalse(SyncTaskGroupDdlServiceImpl.class.getMethod("resumeDdlItem", Long.class, Long.class).isAnnotationPresent(Transactional.class));
+    }
+
+    @Test
+    void aGroupDeleteCommitsWhileItStillHoldsTheGroupLock() {
+        persisted(group("STOPPED", "MULTI_TABLE", POSTGRES_ID));
+        when(groupMapper.deleteById(GROUP_ID)).thenReturn(1);
+        AtomicBoolean committedUnderLock = new AtomicBoolean();
+        doAnswer(invocation -> {
+            committedUnderLock.set(lockHeld.get());
+            return null;
+        }).when(transactionManager).commit(any());
+
+        assertTrue(service.deleteById(GROUP_ID));
+
+        verify(locks).withGroupLock(eq(GROUP_ID), any());
+        verify(transactionManager).commit(any());
+        assertTrue(committedUnderLock.get(), "the transaction must commit before the group lock is released");
+    }
+
     // ------------------------------------------------------------------ table-level reinitialize
 
     @Test
@@ -371,6 +544,30 @@ class SyncTaskGroupServiceImplTest {
         assertTrue(assertThrows(ServiceException.class, () -> service.reinitializeItem(GROUP_ID, 11L)).getMessage().contains("目标表兼容性未通过"));
         assertEquals("id", failed.getSelectedColumns());
         verify(restClient, never()).submit(anyString(), anyString(), any(), eq(false));
+        // Refused before anything destructive: the old job and its savepoint are still there.
+        verify(restClient, never()).stop(anyString(), anyBoolean(), anyBoolean());
+        assertEquals("job-old", failed.getEngineJobId());
+    }
+
+    @Test
+    void aReinitializeWhoseSubmitFailsParksTheTableWithoutItsDestroyedJob() {
+        SyncTaskGroup group = persisted(group("DEGRADED", "MULTI_TABLE", POSTGRES_ID));
+        group.setEngineJobId("job-old,job-other");
+        SyncTaskGroupItem blocked = runningItem(11L, "customers", "job-old");
+        blocked.setStatus("DDL_BLOCKED");
+        items.add(blocked);
+        items.add(runningItem(12L, "orders", "job-other"));
+        when(itemMapper.selectOneOfGroup(GROUP_ID, 11L)).thenReturn(blocked);
+        when(restClient.submit(anyString(), anyString(), isNull(), eq(false))).thenThrow(new ServiceException("SeaTunnel 接口不可用：refused"));
+
+        assertThrows(ServiceException.class, () -> service.reinitializeItem(GROUP_ID, 11L));
+
+        verify(restClient).stop("job-old", false, true);
+        verify(itemMapper).detachEngineJob(11L);
+        assertEquals("FAILED", blocked.getStatus());
+        assertTrue(blocked.getLastError().startsWith("重新初始化提交失败"), blocked.getLastError());
+        assertEquals("job-other", group.getEngineJobId(), "the destroyed job leaves the group's job list");
+        assertEquals("DEGRADED", group.getStatus());
     }
 
     @Test

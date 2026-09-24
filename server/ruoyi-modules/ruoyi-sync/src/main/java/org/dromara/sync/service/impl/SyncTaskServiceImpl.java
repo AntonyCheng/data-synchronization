@@ -31,10 +31,12 @@ import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncMetricsService;
 import org.dromara.sync.service.ISyncTaskService;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
+import org.dromara.sync.support.SyncLocks;
 import org.dromara.sync.support.TableNames;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -42,6 +44,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Synchronization task service implementation.
@@ -64,6 +67,8 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
     private final IDataSourceMetadataService metadataService;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final ISyncMetricsService metricsService;
+    private final SyncLocks locks;
+    private final TransactionTemplate transactionTemplate;
 
     @Override
     public PageResult<SyncTaskVo> queryPageList(SyncTaskBo bo, PageQuery pageQuery) {
@@ -103,9 +108,16 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         return inserted;
     }
 
+    /**
+     * Taken under the task's lifecycle lock, with the transaction inside it: a start that had
+     * already read the task as STOPPED must not go on to submit the config this edit replaces.
+     */
     @Override
-    @Transactional
     public Boolean updateByBo(SyncTaskBo bo) {
+        return inLockedTransaction(bo.getTaskId(), () -> doUpdate(bo));
+    }
+
+    private Boolean doUpdate(SyncTaskBo bo) {
         SyncTask current = syncTaskMapper.selectById(bo.getTaskId());
         if (current == null) throw new ServiceException("同步任务不存在");
         if (current.getStatus() == null || !EDITABLE_STATUSES.contains(current.getStatus())) {
@@ -121,9 +133,16 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         return updated;
     }
 
+    /**
+     * Locked like an edit: a start racing a delete would submit a {@code ds-task-<id>} job whose
+     * row is already gone - a job nothing, not even the orphan sweeper, can map back to an owner.
+     */
     @Override
-    @Transactional
     public Boolean deleteById(Long taskId) {
+        return inLockedTransaction(taskId, () -> doDelete(taskId));
+    }
+
+    private Boolean doDelete(Long taskId) {
         SyncTask current = syncTaskMapper.selectById(taskId);
         if (current == null) return false;
         String status = StringUtils.defaultIfBlank(current.getStatus(), "").trim().toUpperCase(Locale.ROOT);
@@ -136,6 +155,11 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
             metricsService.deleteForTask(taskId);
         }
         return deleted;
+    }
+
+    /** Lock first, transaction inside, so the change is committed before the lock is released. */
+    private <T> T inLockedTransaction(Long taskId, Supplier<T> action) {
+        return locks.withTaskLock(taskId, () -> transactionTemplate.execute(status -> action.get()));
     }
 
     @Override

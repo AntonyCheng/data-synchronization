@@ -55,6 +55,20 @@ public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupIte
             .set(SyncTaskGroupItem::getLastCheckpointStatus, null));
     }
 
+    /**
+     * Forgets the item's engine job (and its checkpoint) after that job was deliberately
+     * destroyed. {@code updateById} skips null fields, so this needs an explicit update.
+     */
+    default int detachEngineJob(Long itemId) {
+        return update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
+            .eq(SyncTaskGroupItem::getItemId, itemId)
+            .set(SyncTaskGroupItem::getEngineJobId, null)
+            .set(SyncTaskGroupItem::getEngineConfigHash, null)
+            .set(SyncTaskGroupItem::getLastCheckpointId, null)
+            .set(SyncTaskGroupItem::getLastCheckpointTime, null)
+            .set(SyncTaskGroupItem::getLastCheckpointStatus, null));
+    }
+
     default int deleteByGroupId(Long groupId) {
         return delete(new LambdaQueryWrapper<SyncTaskGroupItem>().eq(SyncTaskGroupItem::getGroupId, groupId));
     }
