@@ -447,25 +447,63 @@ public final class SeaTunnelJobConfigGenerator {
 
     private static String engineTargetJdbcUrl(DataSource target, SeaTunnelProperties properties) {
         return DataSourceType.isMysql(target)
-            ? engineMysqlJdbcUrl(target, properties) : enginePostgresJdbcUrl(target, properties);
+            ? engineMysqlSinkJdbcUrl(target, properties) : enginePostgresJdbcUrl(target, properties);
     }
 
+    /**
+     * JDBC URL for the MySQL-CDC source. {@code serverTimezone=Asia/Shanghai} is kept for
+     * GoldenDB's ambiguous {@code CST} system zone, and Debezium does not shift
+     * {@code DATETIME}. Every CDC config contains this URL, so changing it changes every CDC
+     * task's fingerprint.
+     */
     private static String engineMysqlJdbcUrl(DataSource source, SeaTunnelProperties properties) {
+        return engineMysqlJdbcUrl(source, properties, "serverTimezone=Asia%2FShanghai");
+    }
+
+    /**
+     * JDBC URL for a MySQL target's {@code Jdbc} sink.
+     *
+     * <p>SeaTunnel carries {@code DATETIME}, {@code TIMESTAMP} and {@code TIME} as zone-less
+     * {@code LocalDateTime}/{@code LocalTime}. Its Jdbc sink binds them as
+     * {@code setTimestamp(Timestamp.valueOf(value))}; for MySQL a {@code TIME} is bound the
+     * same way, dated today. Connector/J 8.0.23+ defaults to {@code preserveInstants=true},
+     * so it reads that {@code Timestamp} as an instant in the engine JVM's zone and renders
+     * it in the connection time zone. The sink used to share the CDC source's URL, whose
+     * {@code serverTimezone=Asia/Shanghai} shifted every value by the Shanghai offset minus
+     * the JVM offset: +8 hours on the UTC engine, in FULL and FULL_CDC alike. PgJDBC renders
+     * in the JVM zone, so the PostgreSQL sink was correct.
+     *
+     * <p>{@code preserveInstants=false} makes the driver render the value in the JVM zone,
+     * which is the zone {@code Timestamp.valueOf} used. The wall clock therefore goes out
+     * unchanged whatever zone the engine runs in, and the URL sets no time zone because
+     * nothing on this connection converts. A {@code TIMESTAMP} target column reads the value
+     * in the target session's {@code time_zone}, just as a PostgreSQL {@code timestamp}
+     * column stores it unchanged. {@code DATE} values were never converted.
+     */
+    private static String engineMysqlSinkJdbcUrl(DataSource target, SeaTunnelProperties properties) {
+        return engineMysqlJdbcUrl(target, properties, "preserveInstants=false");
+    }
+
+    /**
+     * {@code timeZoneOptions} is the one part that differs by role - each role's Javadoc says
+     * why it needs its own.
+     */
+    private static String engineMysqlJdbcUrl(DataSource dataSource, SeaTunnelProperties properties, String timeZoneOptions) {
         // useInformationSchema forces MySQL Connector/J to resolve column metadata (type,
         // precision) from information_schema instead of ResultSetMetaData off a prepared
         // statement. Without it, a plain-query Jdbc source (used by buildFullConfig - the
         // MySQL-CDC connector path is unaffected) can misreport a bounded VARCHAR's
         // precision, and SeaTunnel's auto-DDL then emits an unbounded TEXT/BLOB column -
         // which MySQL then rejects for a table using that column as its key.
-        return "jdbc:mysql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
-            + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
-            + "&allowPublicKeyRetrieval=true&serverTimezone=Asia%2FShanghai&useInformationSchema=true";
+        return "jdbc:mysql://" + properties.resolveEngineEndpoint(dataSource.getHost(), dataSource.getPort()) + '/' + dataSource.getDatabaseName()
+            + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(dataSource.getSslEnabled()))
+            + "&allowPublicKeyRetrieval=true&" + timeZoneOptions + "&useInformationSchema=true";
     }
 
     /**
      * JDBC URL for the FULL-mode {@code Jdbc} source (a plain {@code SELECT}).
      *
-     * <p>The generic {@link #engineMysqlJdbcUrl} carries {@code serverTimezone=Asia/Shanghai}
+     * <p>The CDC source URL ({@link #engineMysqlJdbcUrl(DataSource, SeaTunnelProperties)}) carries {@code serverTimezone=Asia/Shanghai}
      * so Connector/J can resolve GoldenDB's ambiguous {@code CST} system zone. But for a
      * plain-SELECT source the connector reads {@code DATETIME} through the driver's
      * timezone machinery, so a zoneless wall-clock value gets reinterpreted as Shanghai
@@ -482,9 +520,7 @@ public final class SeaTunnelJobConfigGenerator {
      * {@code TZ=UTC}); a non-UTC engine would reintroduce a DATETIME offset here.
      */
     private static String fullJdbcSourceUrl(DataSource source, SeaTunnelProperties properties) {
-        return "jdbc:mysql://" + properties.resolveEngineEndpoint(source.getHost(), source.getPort()) + '/' + source.getDatabaseName()
-            + "?connectTimeout=5000&socketTimeout=5000&useSSL=" + ("1".equals(source.getSslEnabled()))
-            + "&allowPublicKeyRetrieval=true&serverTimezone=UTC&useInformationSchema=true";
+        return engineMysqlJdbcUrl(source, properties, "serverTimezone=UTC");
     }
 
     private static String enginePostgresJdbcUrl(DataSource source, SeaTunnelProperties properties) {

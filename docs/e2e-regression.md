@@ -55,10 +55,9 @@ mvn -q -o -Pdev -pl ruoyi-modules/ruoyi-sync -Dmaven.test.skip=false -Dgroups=e2
 
 ## 已知失败（对应产品缺陷，断言未放宽）
 
-- `SingleTaskFullE2eTest.fullToMysqlKeepsDatetimeWallClock`：MySQL 目标的 DATETIME 整体 +8 小时（FULL 与 FULL_CDC 均如此，PostgreSQL 目标正确）。
 - `EngineStateMappingE2eTest`：引擎 `SCHEDULED` 被映射并持久化为 `FAILED`。采到过渡态时失败，没采到时为 skipped。
 
-缺陷修复后这两项应转绿；在此之前，重构验收以“其余测试全绿、这两项结论不变”为准。
+缺陷修复后对应测试应转绿；在此之前，重构验收以“其余测试全绿、上述结论不变”为准。MySQL 目标 DATETIME +8 小时的缺陷已修复（MySQL sink 改用 `preserveInstants=false`，见 `type-mapping-mysql-postgresql.md`），`fullToMysqlKeepsDatetimeWallClock` 不再列为已知失败。
 
 有意不断言的一处契约出入：MySQL `FULL_CDC`→Kafka 的快照事件 `phase` 实际是 `CDC`。SeaTunnel 的 `DEBEZIUM_JSON` sink 把快照行写成 `op=c`，从不写 `op=r`，而桥接只把 `op=r` 标成 `SNAPSHOT`。`kafka-event-formats.md` 却把这种情况写成 GoldenDB 独有。以哪边为准待产品决定，所以 `KafkaTaskE2eTest` 只要求 `phase` 合法。
 
