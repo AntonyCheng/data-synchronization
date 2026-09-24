@@ -82,6 +82,8 @@ mvn -Pdev -pl ruoyi-modules/ruoyi-sync -am -Dmaven.test.skip=false -Dgroups=dev 
 # single class(es): append -Dtest=SyncTaskSchedulerTest,ResourceProtectionPolicyTest
 ```
 
+Black-box e2e suite against the running `dev.ps1 up -Poc` stack (`@Tag("e2e")`, `-Dgroups=e2e`, never part of the `dev` run): see `docs/e2e-regression.md`.
+
 ### Frontend — manual (run from `web/`)
 
 pnpm 10 / Node ≥ 20.19. Dev server port comes from `web/.env.development`
