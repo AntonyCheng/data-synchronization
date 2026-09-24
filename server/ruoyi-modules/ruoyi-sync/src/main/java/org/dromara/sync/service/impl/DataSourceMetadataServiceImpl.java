@@ -164,8 +164,9 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         result.setCollation(encoding.collation());
 
         Map<String, DataSourceColumnVo> columns = readColumns(metadata, catalog, schema, table, result);
-        result.setPrimaryKeys(readPrimaryKeys(metadata, catalog, schema, table));
-        result.setUniqueKeys(readUniqueKeys(metadata, catalog, schema, table, columns));
+        List<String> primaryKeys = readPrimaryKeys(metadata, catalog, schema, table);
+        result.setPrimaryKeys(primaryKeys);
+        result.setUniqueKeys(readUniqueKeys(metadata, catalog, schema, table, columns, primaryKeys));
         return result;
     }
 
@@ -459,8 +460,14 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         return new ArrayList<>(keys.values());
     }
 
+    /**
+     * Unique indexes other than the primary key's own. JDBC reports the index backing the primary
+     * key as a unique index too (MySQL's {@code PRIMARY}, PostgreSQL's {@code <table>_pkey}), so the
+     * wizards listed the same key twice - "主键（…）" and "唯一键 PRIMARY（…）". The primary key is
+     * already offered from {@code primaryKeys}, read in the same KEY_SEQ order.
+     */
     private List<DataSourceIndexVo> readUniqueKeys(DatabaseMetaData metadata, String catalog, String schema, String table,
-                                                    Map<String, DataSourceColumnVo> columns) throws SQLException {
+                                                    Map<String, DataSourceColumnVo> columns, List<String> primaryKeys) throws SQLException {
         Map<String, DataSourceIndexVo> indexes = new LinkedHashMap<>();
         Map<String, Map<Short, String>> indexColumns = new HashMap<>();
         try (ResultSet resultSet = metadata.getIndexInfo(catalog, schema, table, true, false)) {
@@ -483,7 +490,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
             index.setColumns(names);
             index.setAllNotNull(names.stream().allMatch(column -> !Boolean.TRUE.equals(columns.get(column).getNullable())));
         });
-        return new ArrayList<>(indexes.values());
+        return indexes.values().stream().filter(index -> !index.getColumns().equals(primaryKeys)).collect(Collectors.toList());
     }
 
     /** Charset and collation belong to the database, not the table, so a batch read fetches them once. */
