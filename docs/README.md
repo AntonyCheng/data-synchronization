@@ -39,6 +39,7 @@
 |---|---|
 | [runbook-restart.md](runbook-restart.md) | 平台重启手册 |
 | [runbook-metadata-migration.md](runbook-metadata-migration.md) | 元数据库迁移手册 |
+| [e2e-regression.md](e2e-regression.md) | 端到端回归套件：前置条件、运行命令、各场景钉住的语义与清理 |
 | [git-strategy.md](git-strategy.md) | Git 管理策略 |
 
 ## 启动
