@@ -58,7 +58,7 @@
 | POST | `/group/{groupId}/resume` | 使用表项 savepoint 恢复作业 |
 | POST | `/group/{groupId}/stop` | 停止任务组全部表项作业 |
 
-多表首版限制：支持 MySQL -> PostgreSQL/MySQL/Kafka、`FULL_CDC`，每组最多 20 张表；当前每张表独立 SeaTunnel job，Kafka 表项另有 raw topic -> 标准事件桥接，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式，三种模式对 PostgreSQL、MySQL、Kafka 目标均可用。
+多表首版限制：支持 MySQL -> PostgreSQL/MySQL/Kafka、`FULL_CDC`，每组最多 `sync.group.max-tables` 张表（默认 20，`GET /sync/group/limits` 返回 `{ maxTables }`，权限 `sync:group:list`；整库自动发现同样受此上限约束）；当前每张表独立 SeaTunnel job，Kafka 表项另有 raw topic -> 标准事件桥接，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式，三种模式对 PostgreSQL、MySQL、Kafka 目标均可用。
 
 整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。
 

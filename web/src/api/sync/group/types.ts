@@ -146,3 +146,9 @@ export interface SyncTaskGroupOperationResult {
   /** Went through, but not for every table - the message names the ones the engine refused. */
   partial?: boolean;
 }
+
+/** Server-side limits the group wizard must respect (GET /sync/group/limits). */
+export interface SyncTaskGroupLimits {
+  /** `sync.group.max-tables`: most tables one group may hold, explicit or discovered. */
+  maxTables: number;
+}

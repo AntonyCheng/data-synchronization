@@ -131,7 +131,7 @@ keeps working unmodified. Data, checkpoints and logs live under the gitignored
 
 - **`DataSource`** — connection info + AES-encrypted credential. `MYSQL` only as source; `POSTGRESQL`/`MYSQL`/`KAFKA` as target.
 - **`SyncTask`** — one single-table task; carries `engine_job_id`, schedule state, `config_version`, `last_error`, and (for Kafka) `kafka_*` publish metrics.
-- **`SyncTaskGroup` + `SyncTaskGroupItem`** — multi-table / whole-database (`syncScope` = `MULTI_TABLE` | `DATABASE`), ≤ 20 tables, **one SeaTunnel job per table item**.
+- **`SyncTaskGroup` + `SyncTaskGroupItem`** — multi-table / whole-database (`syncScope` = `MULTI_TABLE` | `DATABASE`), ≤ `sync.group.max-tables` tables (`config.SyncGroupProperties`, default 20, clamped 1..200; enforced on save **and** on whole-database discovery, which fills only the room left and reports the rest; `GET /sync/group/limits` feeds the wizard), **one SeaTunnel job per table item** — so each table is one binlog connection on the source.
 - **`SyncTaskConfigVersion`** — immutable, credential-free config snapshot per create/edit, keyed `(task_id, config_version)`. A checkpoint is bound to the version that produced it.
 
 Table/column metadata is read on demand from source JDBC and **not persisted**.
@@ -145,7 +145,7 @@ Table/column metadata is read on demand from source JDBC and **not persisted**.
 | `kafka` | Kafka-target runtime: `KafkaTaskBridgeService`, `KafkaEventNormalizer`, `KafkaEventSerializer`, `KafkaEventProducer`, `KafkaAdminClients`. |
 | `support` | Pure helpers shared by the services: `JdbcUrls` (platform-side JDBC), `SyncText` (SHA-256 / column-safe truncation / secret redaction), `TableNames`, `SyncColumnSelectionValidator`, `TableSchemaSnapshot` (DDL-drift snapshot + diff), `GroupStatuses` (item→group status aggregation), `TargetTableSwap` (FULL/OVERWRITE stage swap, PostgreSQL + MySQL), `SyncLocks` (the per-task / per-group Redisson locks). |
 | `constant` | `SyncStatus`, `SyncMode`, `SyncScope`, `DataSourceType` — the persisted string vocabularies; use these instead of literals. |
-| `config` | `SeaTunnelProperties` (`sync.engine.*`), `ResourceProtectionPolicy`, `CredentialEncryptionValidator`, `SyncSchedulingConfig` (the module's background-pass scheduler, `sync.scheduler.*`), `KafkaBridgeProperties` (`sync.kafka-bridge.*`). |
+| `config` | `SeaTunnelProperties` (`sync.engine.*`), `ResourceProtectionPolicy`, `CredentialEncryptionValidator`, `SyncSchedulingConfig` (the module's background-pass scheduler, `sync.scheduler.*`), `KafkaBridgeProperties` (`sync.kafka-bridge.*`), `SyncGroupProperties` (`sync.group.*`, the per-group table cap). |
 
 Short wrapper queries live as `default` methods on the mappers (`selectActive()`, `selectByGroupId()`, `selectLatestOpen()`, …), not inline in services. Data-source lookups for in-process use go through `IDataSourceService.requireById` / `requireUsable` (the latter also rejects a relational source with no password configured).
 

@@ -2,6 +2,7 @@ package org.dromara.sync.service.impl;
 
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncGroupProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupItem;
@@ -40,6 +41,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -64,11 +66,13 @@ class SyncTaskGroupDiscoveryServiceImplTest {
     private final KafkaTaskBridgeService bridge = mock(KafkaTaskBridgeService.class);
     private final SyncLocks locks = mock(SyncLocks.class);
     private final SeaTunnelProperties properties = new SeaTunnelProperties();
+    private final SyncGroupProperties groupProperties = new SyncGroupProperties();
 
     // Real item operations and runner over the mocked engine: submitting a new table is pinned end to end.
     private final SyncTaskGroupDiscoveryServiceImpl service = new SyncTaskGroupDiscoveryServiceImpl(groupMapper, itemMapper,
         dataSourceService, metadataService, bridge,
-        new GroupItemOperations(itemMapper, metadataService, properties, new EngineJobRunner(restClient, bridge)), locks);
+        new GroupItemOperations(itemMapper, metadataService, properties, new EngineJobRunner(restClient, bridge)), locks,
+        groupProperties);
 
     private final AtomicBoolean lockHeld = new AtomicBoolean();
     private final DataSource mysql = dataSource(MYSQL_ID, "MYSQL", "source_db");
@@ -190,6 +194,42 @@ class SyncTaskGroupDiscoveryServiceImplTest {
 
         verify(bridge).ensureTopicExists(kafka, "orders");
         assertEquals("PENDING", inserted.get(0).getStatus());
+    }
+
+    /**
+     * Discovery used to have no cap: a 500-table schema became 500 items and, on a live group,
+     * 500 engine jobs - one binlog connection each on the customer's database.
+     */
+    @Test
+    void discoveryStopsAtTheGroupTableLimitAndSaysSo() {
+        groupProperties.setMaxTables(2);
+        SyncTaskGroup group = persisted(group("STOPPED", POSTGRES_ID));
+        items.add(item(11L, "customers"));
+        sourceTables("customers", "orders", "invoices", "payments");
+
+        SyncTaskGroupOperationResult result = service.discover(GROUP_ID);
+
+        assertEquals(List.of("orders"), inserted.stream().map(SyncTaskGroupItem::getSourceTable).toList(),
+            "only the room left under the limit is filled");
+        assertTrue(result.isPartial(), "tables left out are not a plain success");
+        assertTrue(result.getMessage().contains("上限 2 张") && result.getMessage().contains("另有 2 张"), result.getMessage());
+        assertTrue(group.getLastError().contains("sync.group.max-tables"), group.getLastError());
+    }
+
+    @Test
+    void aGroupAlreadyAtTheLimitIsTouchedOnlyWhenTheNoteChanges() {
+        groupProperties.setMaxTables(1);
+        SyncTaskGroup group = persisted(group("RUNNING", POSTGRES_ID));
+        items.add(item(11L, "customers"));
+        sourceTables("customers", "orders", "invoices");
+
+        service.discover(GROUP_ID);
+        service.discover(GROUP_ID);
+
+        verify(itemMapper, never()).insert(any(SyncTaskGroupItem.class));
+        assertEquals(1, group.getConfigVersion(), "nothing was added, so the config did not change");
+        // The periodic pass repeats this every minute; the unchanged note is written once.
+        verify(groupMapper, times(1)).updateById(group);
     }
 
     @Test

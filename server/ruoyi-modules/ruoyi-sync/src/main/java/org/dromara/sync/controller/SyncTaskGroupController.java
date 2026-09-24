@@ -14,6 +14,7 @@ import org.dromara.sync.domain.vo.SyncMetricsSeriesVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
 import org.dromara.sync.domain.vo.SyncTaskGroupDdlCheckResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckResult;
+import org.dromara.sync.domain.vo.SyncTaskGroupLimitsVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
@@ -52,6 +53,13 @@ public class SyncTaskGroupController extends BaseController {
     @GetMapping("/list")
     public R<PageResult<SyncTaskGroupVo>> list(SyncTaskGroupBo bo, PageQuery pageQuery) {
         return R.ok(groupService.queryPageList(bo, pageQuery));
+    }
+
+    /** Limits the create / edit wizard mirrors (the per-group table cap). */
+    @SaCheckPermission("sync:group:list")
+    @GetMapping("/limits")
+    public R<SyncTaskGroupLimitsVo> limits() {
+        return R.ok(groupService.limits());
     }
 
     @SaCheckPermission("sync:group:query")

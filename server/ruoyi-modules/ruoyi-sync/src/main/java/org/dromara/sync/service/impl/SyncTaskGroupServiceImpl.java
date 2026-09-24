@@ -10,6 +10,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncGroupProperties;
 import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncMode;
@@ -28,6 +29,7 @@ import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemStatus;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemValidationVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemVo;
+import org.dromara.sync.domain.vo.SyncTaskGroupLimitsVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
@@ -94,7 +96,6 @@ import java.util.stream.Collectors;
 @Service
 public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
-    private static final int MAX_TABLES_PER_GROUP = 20;
     private static final String DEFAULT_DDL_POLICY = "FAIL";
 
     private static final Set<String> EDITABLE_STATUSES = Set.of(SyncStatus.DRAFT, SyncStatus.STOPPED);
@@ -117,6 +118,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final TransactionTemplate transactionTemplate;
     private final EngineJobRunner runner;
     private final GroupItemOperations itemOps;
+    private final SyncGroupProperties groupProperties;
 
 
     // ------------------------------------------------------------------ CRUD
@@ -196,6 +198,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     // ------------------------------------------------------------------ validation & preview
+
+    @Override
+    public SyncTaskGroupLimitsVo limits() {
+        SyncTaskGroupLimitsVo limits = new SyncTaskGroupLimitsVo();
+        limits.setMaxTables(groupProperties.effectiveMaxTables());
+        return limits;
+    }
 
     @Override
     public SyncTaskGroupValidationResult validate(Long groupId) {
@@ -781,8 +790,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         if (isDatabaseScope(entity) && StringUtils.isBlank(entity.getSourceDatabase())) {
             entity.setSourceDatabase(source.getDatabaseName());
         }
-        if (bo.getItems() != null && bo.getItems().size() > MAX_TABLES_PER_GROUP) {
-            throw new ServiceException("单个任务组最多支持 " + MAX_TABLES_PER_GROUP + " 张表");
+        int maxTables = groupProperties.effectiveMaxTables();
+        if (bo.getItems() != null && bo.getItems().size() > maxTables) {
+            throw new ServiceException("单个任务组最多支持 " + maxTables + " 张表（sync.group.max-tables）");
         }
         resourceProtectionPolicy.applyDefaultsAndValidate(entity);
         return entity;

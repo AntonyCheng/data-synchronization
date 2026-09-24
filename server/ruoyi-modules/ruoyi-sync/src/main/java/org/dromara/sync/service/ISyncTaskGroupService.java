@@ -4,6 +4,7 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
+import org.dromara.sync.domain.vo.SyncTaskGroupLimitsVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
@@ -25,6 +26,9 @@ public interface ISyncTaskGroupService {
     Boolean updateByBo(SyncTaskGroupBo bo);
 
     Boolean deleteById(Long groupId);
+
+    /** Limits the create / edit wizard mirrors; the server enforces them regardless. */
+    SyncTaskGroupLimitsVo limits();
 
     SyncTaskGroupValidationResult validate(Long groupId);
 

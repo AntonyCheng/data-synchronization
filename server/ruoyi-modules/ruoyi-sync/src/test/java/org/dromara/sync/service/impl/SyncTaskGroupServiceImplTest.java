@@ -3,11 +3,13 @@ package org.dromara.sync.service.impl;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.sync.config.ResourceProtectionPolicy;
 import org.dromara.sync.config.SeaTunnelProperties;
+import org.dromara.sync.config.SyncGroupProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupDdlEvent;
 import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
+import org.dromara.sync.domain.bo.SyncTaskGroupItemBo;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
@@ -86,13 +88,14 @@ class SyncTaskGroupServiceImplTest {
     private final ISyncMetricsService metrics = mock(ISyncMetricsService.class);
     private final SyncLocks locks = mock(SyncLocks.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
+    private final SyncGroupProperties groupProperties = new SyncGroupProperties();
 
     // A real runner and real item operations over the mocked engine and bridge: these tests pin the lifecycle end to end.
     private final EngineJobRunner runner = new EngineJobRunner(restClient, bridge);
     private final SyncTaskGroupServiceImpl service = new SyncTaskGroupServiceImpl(groupMapper, itemMapper, ddlEventMapper,
         dataSourceService, metadataService, discoveryService, properties, new ResourceProtectionPolicy(properties),
         bridge, metrics, locks, new TransactionTemplate(transactionManager), runner,
-        new GroupItemOperations(itemMapper, metadataService, properties, runner));
+        new GroupItemOperations(itemMapper, metadataService, properties, runner), groupProperties);
 
     /** True only while the fake group lock is held. */
     private final AtomicBoolean lockHeld = new AtomicBoolean();
@@ -554,6 +557,29 @@ class SyncTaskGroupServiceImplTest {
         transaction.verify(discoveryService).discover(GROUP_ID);
         transaction.verify(transactionManager).commit(any());
         assertEquals(2, group.getConfigVersion());
+    }
+
+    @Test
+    void theTableLimitIsConfigurableAndClampedAndTheWizardSeesTheSameNumber() {
+        groupProperties.setMaxTables(2);
+        SyncTaskGroupBo bo = bo("MULTI_TABLE", POSTGRES_ID);
+        for (String table : List.of("customers", "orders", "invoices")) {
+            SyncTaskGroupItemBo item = new SyncTaskGroupItemBo();
+            item.setSourceTable(table);
+            item.setTargetTable(table);
+            item.setSyncKeyColumns("id");
+            bo.getItems().add(item);
+        }
+
+        String refused = assertThrows(ServiceException.class, () -> service.insertByBo(bo)).getMessage();
+
+        assertTrue(refused.contains("最多支持 2 张表"), refused);
+        verify(groupMapper, never()).insert(any(SyncTaskGroup.class));
+        assertEquals(2, service.limits().getMaxTables());
+        groupProperties.setMaxTables(0);
+        assertEquals(1, service.limits().getMaxTables(), "never below one");
+        groupProperties.setMaxTables(10_000);
+        assertEquals(SyncGroupProperties.MAX_TABLES_CEILING, service.limits().getMaxTables(), "never above the ceiling");
     }
 
     @Test

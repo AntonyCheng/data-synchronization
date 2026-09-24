@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SyncGroupProperties;
 import org.dromara.sync.config.SyncSchedulingConfig;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncScope;
@@ -56,6 +57,7 @@ public class SyncTaskGroupDiscoveryServiceImpl implements ISyncTaskGroupDiscover
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
     private final GroupItemOperations itemOps;
     private final SyncLocks locks;
+    private final SyncGroupProperties groupProperties;
 
     /**
      * Each discovered table is inserted before its job is submitted, and stays inserted if a
@@ -100,9 +102,20 @@ public class SyncTaskGroupDiscoveryServiceImpl implements ISyncTaskGroupDiscover
         int discovered = 0;
         int started = 0;
         int failed = 0;
+        // Whole-database discovery used to have no cap at all: a 500-table schema became 500
+        // items, and on a live group 500 engine jobs, each with its own binlog connection to the
+        // customer's database. The group limit applies to discovered tables like to listed ones;
+        // tables already in the group stay (a group saved before the limit may exceed it).
+        int maxTables = groupProperties.effectiveMaxTables();
+        int capacity = maxTables - existing.size();
+        int overLimit = 0;
         List<String> jobIds = new ArrayList<>();
         for (String table : metadataService.queryTables(source.getSourceId(), database)) {
             if (!existing.add(table.toLowerCase(Locale.ROOT))) continue;
+            if (discovered >= capacity) {
+                overLimit++;
+                continue;
+            }
             SyncTaskGroupItem item = new SyncTaskGroupItem();
             item.setGroupId(groupId);
             item.setSourceDatabase(database);
@@ -138,15 +151,28 @@ public class SyncTaskGroupDiscoveryServiceImpl implements ISyncTaskGroupDiscover
                 }
             }
         }
+        String limitNote = overLimit == 0 ? ""
+            : "已达任务组上限 " + maxTables + " 张，另有 " + overLimit + " 张表未纳入（sync.group.max-tables）";
         if (discovered > 0) {
             group.setConfigVersion((group.getConfigVersion() == null ? 1 : group.getConfigVersion()) + 1);
             if (!jobIds.isEmpty()) group.setEngineJobId(appendJobIds(group.getEngineJobId(), jobIds));
-            group.setLastError(failed == 0 ? "" : "新增表发现完成，其中 " + failed + " 张表校验或提交失败，请查看表项错误");
+        }
+        String lastError = joinNotes(failed == 0 ? "" : "新增表发现完成，其中 " + failed + " 张表校验或提交失败，请查看表项错误", limitNote);
+        // The periodic pass repeats an unchanged "over the limit" every minute - only write a change.
+        if (discovered > 0 || !lastError.equals(StringUtils.defaultString(group.getLastError()))) {
+            group.setLastError(lastError);
             groupMapper.updateById(group);
         }
-        String summary = discovered == 0 ? "未发现新增表"
-            : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张";
-        return failed > 0 ? SyncTaskGroupOperationResult.partial(group, summary) : SyncTaskGroupOperationResult.of(group, summary);
+        String summary = joinNotes(discovered == 0 ? "未发现新增表"
+            : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张", limitNote);
+        return failed > 0 || overLimit > 0
+            ? SyncTaskGroupOperationResult.partial(group, summary) : SyncTaskGroupOperationResult.of(group, summary);
+    }
+
+    private static String joinNotes(String first, String second) {
+        if (StringUtils.isBlank(first)) return second;
+        if (StringUtils.isBlank(second)) return first;
+        return first + "；" + second;
     }
 
     private SyncTaskGroup requireGroup(Long groupId) {

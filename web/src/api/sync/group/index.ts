@@ -6,6 +6,7 @@ import type {
   SyncTaskGroupDataCheckResult,
   SyncTaskGroupDdlCheckResult,
   SyncTaskGroupForm,
+  SyncTaskGroupLimits,
   SyncTaskGroupOperationResult,
   SyncTaskGroupQuery,
   SyncTaskGroupVO,
@@ -14,6 +15,11 @@ import type {
 
 export function listSyncTaskGroups(query?: SyncTaskGroupQuery) {
   return request<R<PageResult<SyncTaskGroupVO>>>({ url: '/sync/group/list', method: 'get', params: query });
+}
+
+/** Limits the create / edit wizard enforces client-side; the server enforces them too. */
+export function getSyncTaskGroupLimits() {
+  return request<R<SyncTaskGroupLimits>>({ url: '/sync/group/limits', method: 'get' });
 }
 
 export function getSyncTaskGroup(id: string | number) {

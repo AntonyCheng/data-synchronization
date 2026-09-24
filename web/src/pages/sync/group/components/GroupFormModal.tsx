@@ -20,7 +20,7 @@ import { useEffect, useState } from 'react';
 import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupForm, SyncTaskGroupItemForm, SyncTaskGroupVO } from '@/api/sync/group/types';
 import { createKafkaTopic, getDataSourceMetadata } from '@/api/sync/data-source';
-import { addSyncTaskGroup, getSyncTaskGroup, updateSyncTaskGroup } from '@/api/sync/group';
+import { addSyncTaskGroup, getSyncTaskGroup, getSyncTaskGroupLimits, updateSyncTaskGroup } from '@/api/sync/group';
 import ColumnSelector from '@/components/sync/ColumnSelector';
 import {
   jumpToMissing,
@@ -37,8 +37,8 @@ import { defaultTargetName } from '@/utils/syncNaming';
 
 const WIZARD_STEPS = ['数据源', '表与字段', '同步方式与限速'];
 const LAST_STEP = WIZARD_STEPS.length - 1;
-/** Mirrors MAX_TABLES_PER_GROUP on the backend. */
-const MAX_TABLES_PER_GROUP = 20;
+/** The backend default of `sync.group.max-tables`, used until GET /sync/group/limits answers. */
+const DEFAULT_MAX_TABLES = 20;
 
 type GroupField = keyof SyncTaskGroupForm;
 type ItemField = 'sourceTable' | 'targetTable' | 'selectedColumns' | 'syncKeyColumns';
@@ -163,6 +163,16 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
   const [tablesToAdd, setTablesToAdd] = useState<string[]>([]);
   const [bulkSchema, setBulkSchema] = useState('');
   const { setDirty, confirmClose, modalProps } = useCloseGuard(onClose);
+  // The table cap is a server setting (sync.group.max-tables); the wizard only mirrors it.
+  const [maxTables, setMaxTables] = useState(DEFAULT_MAX_TABLES);
+  useEffect(() => {
+    if (!open) return;
+    getSyncTaskGroupLimits()
+      .then(res => {
+        if (res.data?.maxTables) setMaxTables(res.data.maxTables);
+      })
+      .catch(() => undefined);
+  }, [open]);
 
   // preserve: each step unmounts the others' controls, and a plain useWatch then reads undefined.
   const syncScope = Form.useWatch('syncScope', { form, preserve: true }) || 'MULTI_TABLE';
@@ -335,7 +345,7 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
   };
 
   const tooManyTables = (values: SyncTaskGroupForm) =>
-    values.syncScope !== 'DATABASE' && (values.items?.length || 0) > MAX_TABLES_PER_GROUP;
+    values.syncScope !== 'DATABASE' && (values.items?.length || 0) > maxTables;
 
   const nextWizardStep = async () => {
     try {
@@ -363,7 +373,7 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
       return;
     }
     if (wizardStep === 1 && tooManyTables(values)) {
-      message.error(`单个任务组最多 ${MAX_TABLES_PER_GROUP} 张表，当前已选 ${values.items?.length} 张，请删除多余的表`);
+      message.error(`单个任务组最多 ${maxTables} 张表，当前已选 ${values.items?.length} 张，请删除多余的表`);
       return;
     }
     setWizardStep(current => Math.min(current + 1, LAST_STEP));
@@ -381,7 +391,7 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
     }
     if (tooManyTables(allValues)) {
       setWizardStep(1);
-      message.error(`单个任务组最多 ${MAX_TABLES_PER_GROUP} 张表，已返回第 2 步「表与字段」，请删除多余的表`);
+      message.error(`单个任务组最多 ${maxTables} 张表，已返回第 2 步「表与字段」，请删除多余的表`);
       return false;
     }
     if (allValues.syncMode === 'INCREMENTAL' && !probe.cdcPrecheck?.passed) {
@@ -504,8 +514,8 @@ export default function GroupFormModal({ open, group, dataSources, onClose, onSa
                   </>
                 )}
               </Space>
-              <Tag color={fields.length > MAX_TABLES_PER_GROUP ? 'error' : fields.length ? 'processing' : 'default'}>
-                已选 {fields.length} / 上限 {MAX_TABLES_PER_GROUP} 张
+              <Tag color={fields.length > maxTables ? 'error' : fields.length ? 'processing' : 'default'}>
+                已选 {fields.length} / 上限 {maxTables} 张
               </Tag>
             </Space>
             {fields.length === 0 && (
