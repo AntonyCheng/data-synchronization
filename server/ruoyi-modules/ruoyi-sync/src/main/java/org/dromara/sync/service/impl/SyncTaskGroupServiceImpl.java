@@ -458,8 +458,9 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             group.setLastError(failed == 0 ? "" : "新增表发现完成，其中 " + failed + " 张表校验或提交失败，请查看表项错误");
             groupMapper.updateById(group);
         }
-        return SyncTaskGroupOperationResult.of(group, discovered == 0 ? "未发现新增表"
-            : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张");
+        String summary = discovered == 0 ? "未发现新增表"
+            : "发现 " + discovered + " 张新表，已启动 " + started + " 张，失败 " + failed + " 张";
+        return failed > 0 ? SyncTaskGroupOperationResult.partial(group, summary) : SyncTaskGroupOperationResult.of(group, summary);
     }
 
     @Override
@@ -492,8 +493,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         group.setStatus(anyPausing ? SyncStatus.PAUSING : GroupStatuses.aggregate(itemStatuses(groupId)));
         group.setLastError(failed.isEmpty() ? "" : SyncText.truncateForColumn("以下表 savepoint 暂停请求失败：" + String.join("、", failed)));
         groupMapper.updateById(group);
-        return SyncTaskGroupOperationResult.of(group, failed.isEmpty() ? "暂停请求已提交，请刷新状态确认 savepoint"
-            : "暂停请求已提交，但 " + failed.size() + " 张表的 savepoint 请求失败：" + String.join("、", failed));
+        if (!failed.isEmpty()) {
+            return SyncTaskGroupOperationResult.partial(group,
+                "暂停请求已提交，但 " + failed.size() + " 张表的 savepoint 请求失败：" + String.join("、", failed));
+        }
+        return SyncTaskGroupOperationResult.of(group, "暂停请求已提交，请刷新状态确认 savepoint");
     }
 
     @Override
@@ -551,8 +555,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         group.setLastError(failed.isEmpty() ? "" : SyncText.truncateForColumn(
             "以下表从 savepoint 恢复失败，可在表项上单独恢复：" + String.join("、", failed)));
         groupMapper.updateById(group);
-        return SyncTaskGroupOperationResult.of(group, failed.isEmpty() ? "任务组已从 savepoint 恢复"
-            : "已恢复 " + (resumable.size() - failed.size()) + " 张表，" + failed.size() + " 张恢复失败：" + String.join("、", failed));
+        if (!failed.isEmpty()) {
+            return SyncTaskGroupOperationResult.partial(group, "已恢复 " + (resumable.size() - failed.size()) + " 张表，"
+                + failed.size() + " 张恢复失败：" + String.join("、", failed));
+        }
+        return SyncTaskGroupOperationResult.of(group, "任务组已从 savepoint 恢复");
     }
 
     @Override
@@ -682,8 +689,10 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         group.setLastError(failed.isEmpty() ? "" : SyncText.truncateForColumn(
             "以下表停止失败，请确认引擎状态后重试停止：" + String.join("、", failed)));
         groupMapper.updateById(group);
-        return SyncTaskGroupOperationResult.of(group, failed.isEmpty() ? "任务组已停止"
-            : failed.size() + " 张表停止失败，其余已停止：" + String.join("、", failed));
+        if (!failed.isEmpty()) {
+            return SyncTaskGroupOperationResult.partial(group, failed.size() + " 张表停止失败，其余已停止：" + String.join("、", failed));
+        }
+        return SyncTaskGroupOperationResult.of(group, "任务组已停止");
     }
 
     @Override

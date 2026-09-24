@@ -12,7 +12,11 @@ import {
 import { Alert, Button, Descriptions, Divider, Input, message, Modal, Space, Tag } from 'antd';
 import { useEffect, useState } from 'react';
 import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
-import type { SyncTaskGroupDataCheckResult, SyncTaskGroupVO } from '@/api/sync/group/types';
+import type {
+  SyncTaskGroupDataCheckResult,
+  SyncTaskGroupOperationResult,
+  SyncTaskGroupVO
+} from '@/api/sync/group/types';
 import {
   checkSyncTaskGroupData,
   checkSyncTaskGroupDdl,
@@ -93,6 +97,17 @@ export default function GroupDetailModal({
     return latest.data;
   };
 
+  /**
+   * A group operation can come back without an exception and still not be a success: a start
+   * that was compensated (group FAILED), tables isolated (DEGRADED), or a pause / resume / stop
+   * the engine refused for some tables (partial). A green toast for those contradicts its own text.
+   */
+  const notifyOutcome = (result: SyncTaskGroupOperationResult) => {
+    if (result.status === 'FAILED') message.error(result.message);
+    else if (result.partial || result.status === 'DEGRADED') message.warning(result.message);
+    else message.success(result.message);
+  };
+
   const operate = async (action: 'start' | 'status' | 'pause' | 'resume' | 'stop') => {
     if (!detail) return;
     const request = {
@@ -106,7 +121,7 @@ export default function GroupDetailModal({
     // console reloads either way - otherwise it keeps offering buttons for a stale status.
     try {
       const result = await request(detail.groupId);
-      message.success(result.data.message);
+      notifyOutcome(result.data);
     } finally {
       await reloadDetail(detail.groupId);
     }
@@ -116,7 +131,7 @@ export default function GroupDetailModal({
     if (!detail) return;
     try {
       const result = await discoverSyncTaskGroupTables(detail.groupId);
-      message.success(result.data.message);
+      notifyOutcome(result.data);
     } finally {
       await reloadDetail(detail.groupId);
     }

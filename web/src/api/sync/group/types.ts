@@ -136,3 +136,13 @@ export interface SyncTaskGroupDataCheckResult {
   consistencyNote: string;
   items: SyncTaskGroupDataCheckItemResult[];
 }
+
+/** What every group lifecycle call returns (start / pause / resume / stop / discover / per-item ops). */
+export interface SyncTaskGroupOperationResult {
+  groupId: string | number;
+  status: string;
+  engineJobIds?: string;
+  message: string;
+  /** Went through, but not for every table - the message names the ones the engine refused. */
+  partial?: boolean;
+}

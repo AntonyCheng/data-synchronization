@@ -390,6 +390,7 @@ class SyncTaskGroupServiceImplTest {
         assertTrue(second.getLastError().contains("savepoint 不存在"));
         assertEquals("DEGRADED", group.getStatus());
         assertTrue(result.getMessage().contains("1 张恢复失败"), result.getMessage());
+        assertTrue(result.isPartial(), "the console must not show a half-failed resume as a success");
     }
 
     @Test
@@ -409,6 +410,7 @@ class SyncTaskGroupServiceImplTest {
         assertEquals("PAUSING", group.getStatus());
         assertTrue(group.getLastError().contains("orders"));
         assertTrue(result.getMessage().contains("orders"));
+        assertTrue(result.isPartial());
     }
 
     @Test
@@ -428,6 +430,7 @@ class SyncTaskGroupServiceImplTest {
         assertEquals("job-a", stuck.getEngineJobId(), "kept, so a retried stop still reaches the job");
         assertEquals("FAILED", group.getStatus());
         assertTrue(result.getMessage().contains("customers"), result.getMessage());
+        assertTrue(result.isPartial());
     }
 
     @Test

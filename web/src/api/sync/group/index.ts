@@ -6,9 +6,10 @@ import type {
   SyncTaskGroupDataCheckResult,
   SyncTaskGroupDdlCheckResult,
   SyncTaskGroupForm,
+  SyncTaskGroupOperationResult,
   SyncTaskGroupQuery,
-  SyncTaskGroupValidationResult,
-  SyncTaskGroupVO
+  SyncTaskGroupVO,
+  SyncTaskGroupValidationResult
 } from './types';
 
 export function listSyncTaskGroups(query?: SyncTaskGroupQuery) {
@@ -40,13 +41,13 @@ export function previewSyncTaskGroupConfig(id: string | number) {
 }
 
 export function startSyncTaskGroup(id: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${id}/start`,
     method: 'post'
   });
 }
 export function discoverSyncTaskGroupTables(id: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${id}/discover`,
     method: 'post'
   });
@@ -58,13 +59,13 @@ export function checkSyncTaskGroupData(id: string | number) {
   return request<R<SyncTaskGroupDataCheckResult>>({ url: `/sync/group/${id}/check`, method: 'post' });
 }
 export function resumeSyncTaskGroupItemAfterDdl(groupId: string | number, itemId: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${groupId}/item/${itemId}/resume-after-ddl`,
     method: 'post'
   });
 }
 export function reinitializeSyncTaskGroupItem(groupId: string | number, itemId: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${groupId}/item/${itemId}/reinitialize`,
     method: 'post'
   });
@@ -77,25 +78,25 @@ export function getSyncTaskGroupItemMetrics(groupId: string | number, itemId: st
   });
 }
 export function refreshSyncTaskGroupStatus(id: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${id}/status`,
     method: 'post'
   });
 }
 export function pauseSyncTaskGroup(id: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${id}/pause`,
     method: 'post'
   });
 }
 export function resumeSyncTaskGroup(id: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${id}/resume`,
     method: 'post'
   });
 }
 export function stopSyncTaskGroup(id: string | number) {
-  return request<R<{ groupId: string | number; status: string; message: string }>>({
+  return request<R<SyncTaskGroupOperationResult>>({
     url: `/sync/group/${id}/stop`,
     method: 'post'
   });
