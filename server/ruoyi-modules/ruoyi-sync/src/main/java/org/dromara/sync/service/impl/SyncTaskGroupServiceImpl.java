@@ -328,7 +328,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         boolean databaseScope = isDatabaseScope(group);
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
-        if (databaseScope && DataSourceType.isKafka(target)) recoverDatabaseKafkaTopics(groupId, source, target);
+        if (databaseScope) readmitDatabaseTables(group, target);
         // Tables that were selected in full keep following the source: a column added since
         // the last baseline joins the projection here, so the validation below checks the
         // target against what will actually be synced. An explicit subset stays as it is.
@@ -1034,24 +1034,29 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     }
 
     /**
-     * A whole-database Kafka group creates one topic per table on discovery. Re-running this
-     * on start recreates a topic that was dropped and clears the isolation on any table that
-     * had been marked FAILED only because its topic did not exist yet.
+     * Before a whole-database group starts: a Kafka group gets back any topic that was dropped
+     * (one per table - the group owns its topic namespace), and every table that was rejected at
+     * discovery and never ran (no usable key, incompatible target, missing topic) is checked again
+     * by the same rule discovery and edits use ({@link ISyncTaskGroupDiscoveryService#readmitRejected}),
+     * so a table the operator has since fixed joins this start. That rule re-derives a whole-table
+     * selection from the live schema; the old start-only path merely re-baselined it, after which
+     * the table no longer counted as selected in full and never picked up an added column. A
+     * table that ran and then failed is not touched here - 重新初始化该表 is its way back.
      */
-    private void recoverDatabaseKafkaTopics(Long groupId, DataSource source, DataSource target) {
-        for (SyncTaskGroupItem item : items(groupId)) {
-            try {
-                kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
-                if (SyncStatus.FAILED.equals(item.getStatus()) && itemOps.validateDiscoveredItem(source, target, item) == null) {
-                    TableSchemaSnapshot.baseline(item, itemOps.readSourceMetadata(item, source));
-                    item.setStatus(SyncStatus.PENDING);
-                    item.setLastError("");
-                    itemMapper.updateById(item);
+    private void readmitDatabaseTables(SyncTaskGroup group, DataSource target) {
+        List<SyncTaskGroupItem> groupItems = items(group.getGroupId());
+        if (DataSourceType.isKafka(target)) {
+            for (SyncTaskGroupItem item : groupItems) {
+                // A table rejected before it ever ran gets its topic from readmitRejected below.
+                if (SyncStatus.FAILED.equals(item.getStatus()) && StringUtils.isBlank(item.getEngineJobId())) continue;
+                try {
+                    kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
+                } catch (RuntimeException ignored) {
+                    // Leave the table as it is; the start loop surfaces the reason per table.
                 }
-            } catch (RuntimeException ignored) {
-                // Leave the table isolated; the start loop surfaces the reason per table.
             }
         }
+        discoveryService.readmitRejected(group, groupItems).forEach(itemMapper::updateById);
     }
 
     // ------------------------------------------------------------------ lookups & small helpers

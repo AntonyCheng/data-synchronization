@@ -769,13 +769,37 @@ class SyncTaskGroupServiceImplTest {
         service.start(GROUP_ID);
 
         verify(bridge).ensureTopicExists(kafka, "customers");
-        verify(bridge).ensureTopicExists(kafka, "audit_log");
+        // Same rule as discovery: a table that cannot sync (no usable key) gets no topic.
+        verify(bridge, never()).ensureTopicExists(kafka, "audit_log");
         assertEquals("RUNNING", missingTopic.getStatus());
         assertEquals("job-100", missingTopic.getEngineJobId());
         assertEquals("FAILED", keyless.getStatus());
-        assertEquals("源表没有可用同步键", keyless.getLastError());
+        // Re-checked, so the reason is today's, not whatever discovery wrote back then.
+        assertTrue(keyless.getLastError().contains("同步键"), keyless.getLastError());
         verify(restClient, times(1)).submit(anyString(), anyString(), isNull(), eq(false));
         assertEquals("DEGRADED", group.getStatus());
+    }
+
+    /**
+     * The old start-only recovery merely re-baselined a re-admitted table, after which a table
+     * selected in full no longer counted as "the whole table" and never picked up a new column.
+     */
+    @Test
+    void aTableReadmittedAtStartStillFollowsTheWholeSourceTable() {
+        persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
+        SyncTaskGroupItem rejected = item(11L, "customers", "FAILED");
+        rejected.setSelectedColumns("id,name");
+        rejected.setSchemaSnapshot(TableSchemaSnapshot.toJson(TableSchemaSnapshot.of(metadata("id", "name"))));
+        rejected.setLastError("目标表存在必须修复的兼容性问题");
+        items.add(rejected);
+        // Fixed since: the target is compatible now, and the source has grown a column.
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), eq("customers"))).thenReturn(metadata("id", "name", "email"));
+
+        service.start(GROUP_ID);
+
+        assertEquals("RUNNING", rejected.getStatus());
+        assertEquals("id,name,email", rejected.getSelectedColumns(), "a whole-table selection follows the source");
+        assertTrue(rejected.getSchemaSnapshot().contains("email"), "baseline taken from the live schema");
     }
 
     @Test
