@@ -48,11 +48,25 @@ function Test-RequiredCommand {
 }
 
 # java -version writes its banner to stderr; run it through cmd so it is captured as output.
+# A newer JDK installer (Oracle's auto-update in particular) puts its own javapath shim at the
+# front of the machine PATH, so `java` can silently become 25 while JAVA_HOME still names a 21.
+# Prefer JAVA_HOME when it is a 21 and put it first on this process's PATH, so java, mvn and
+# every child process agree; the machine-wide PATH is left alone.
 function Assert-Java21 {
+    if ($env:JAVA_HOME) {
+        $homeJava = Join-Path $env:JAVA_HOME 'bin\java.exe'
+        if (Test-Path $homeJava) {
+            $homeVersion = (& cmd.exe /c "`"$homeJava`" -version 2>&1" | Out-String)
+            if ($homeVersion -match 'version "21\.') {
+                $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:PATH
+                return
+            }
+        }
+    }
     Test-RequiredCommand 'java'
     $javaVersion = (& cmd.exe /c 'java -version 2>&1' | Out-String)
     if ($javaVersion -notmatch 'version "21\.') {
-        throw "Java 21 is required. Current java -version output:`n$javaVersion"
+        throw "Java 21 is required (set JAVA_HOME to a JDK 21). Current java -version output:`n$javaVersion"
     }
 }
 
