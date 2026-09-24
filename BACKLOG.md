@@ -87,7 +87,7 @@
 **影响面**：`IDataSourceMetadataService` 需要一个"带连接"的内部重载。**工作量**：方案 1 约 0.5 天。
 **风险**：中（要保证连接异常时逐表隔离的语义不变）。
 
-### [ ] P1-3 生命周期方法在数据库事务内做远程调用
+### [x] P1-3 生命周期方法在数据库事务内做远程调用 — 已完成（见文末）
 
 **问题**：`start / discover / pause / resume / stop / refreshStatus / reinitializeItem` 都标了
 `@Transactional`，而方法体里串行发 N 次 SeaTunnel HTTP（每次上限 10s）+ 若干次客户库 JDBC 探查。
@@ -102,7 +102,7 @@
 **风险**：**高**——这是本清单里最需要测试托底的一项，建议在 P2-3（生命周期抽取）之前或同时做，
 且必须先把状态机单测跑绿。
 
-### [ ] P1-4 状态刷新串行，且 7 个后台轮询挤在共享线程池
+### [~] P1-4 状态刷新串行，且 7 个后台轮询挤在共享线程池 — 第 2 部分（独立调度线程池）已完成，第 1 部分（表项并行刷新）未做
 
 **问题**：
 - `refreshStatus` 对每个表项串行发 2 次 REST（status + checkpoints），20 表 = 40 次往返，每 30 秒一轮；
@@ -155,7 +155,7 @@
 **方案**：后端加一个轻量 `GET /sync/data-source/options`（只返回 id/名称/类型/库名），前端改为
 远程搜索式下拉。**工作量**：0.5 天。**风险**：低。
 
-### [ ] P1-8 Kafka 桥接线程池无上限
+### [x] P1-8 Kafka 桥接线程池无上限 — 已完成（见文末）
 
 **问题**：`Executors.newCachedThreadPool`，每个运行中的 Kafka 任务/表项独占一条线程 + 一个 consumer
 + 一个 producer。100 个 Kafka 任务就是 100 条常驻线程，没有任何上限或背压。
@@ -241,7 +241,7 @@
 
 **工作量**：1.5 天。**风险**：低（提交载荷结构不变，仍是 `items[]`）。
 
-### [ ] UX-7 两个入口的填写范式不一致
+### [x] UX-7 两个入口的填写范式不一致 — 已完成（见文末）
 
 单表是 5 步向导，任务组是单页长表单。同一个产品里两套范式，用户要学两次。建议在 UX-6 之后把
 任务组也对齐成 3 步（数据源 → 表与字段 → 同步方式与限速）。**工作量**：1 天。**风险**：中
@@ -258,13 +258,13 @@
 `SyncColumnSelectionValidator` 是纯函数，补测试几乎零成本，优先做。
 **工作量**：合计 1.5 天。**风险**：无。
 
-### [ ] P2-2 全部是 mock 单测，没有一条集成测试
+### [x] P2-2 全部是 mock 单测，没有一条集成测试 — 已完成（见文末）
 
 97 个单测全部 mock 掉了引擎和数据库，引擎交互只靠人工 e2e 覆盖。建议用 Testcontainers 补一条
 最小链路（MySQL → PG，FULL 模式，起停一次），挂在单独的 profile 上，不进默认构建。
 **工作量**：2 天。**风险**：低（新增，不动现有）。
 
-### [ ] P2-3 任务与任务组的生命周期是两套平行实现
+### [x] P2-3 任务与任务组的生命周期是两套平行实现 — 已完成（见文末）
 
 **问题**：两个服务各自实现 start / pause / resume / stop / refresh / reinitialize，语义相同
 （savepoint 暂停、指纹校验、桥接先起后提交、瞬时不可达容忍 3 次、失败落 FAILED）。
@@ -446,3 +446,83 @@ charset/collation 提到批次级别读一次（它是库级属性，过去每�
 **仍未做**：`checkTargetCompatibility` 内部仍是每次两条新连接（源+目标），只在表结构真变了或首次
 建基线时触发，属低频路径；向导里的连续探查也还没有连接缓存（原清单方案 2），留待后续。
 
+### P1-3 生命周期不再包在数据库事务里（2026-09-24）
+
+任务组的 start / discover / pause / resume / stop / refresh / 逐表恢复 / 逐表重新初始化与 DDL 检查
+全都标了 `@Transactional`，方法体里却串行调用引擎。比"长事务占连接"更严重的两点：组锁在方法体
+返回时就释放、事务却在其后才提交，另一实例拿到锁会读到未提交的行；回滚撤销不了引擎侧动作——
+resume 第二张表指纹不符时回滚，第一张表的作业已经在跑，库里却还是 PAUSED。
+
+现在涉及引擎的生命周期方法一律不开事务：每次落库各自提交，**所有拒绝在第一次引擎调用之前判定**，
+引擎中途失败留下诚实的逐表结果（暂停/恢复/停止部分失败时失败表置 FAILED 并记录原因，其余照常完成；
+逐表重新初始化先校验、后销毁旧作业）。只动数据库的编辑/删除改为"先加锁、锁内 TransactionTemplate"，
+杜绝与并发启动交错（否则启动可能为已删除的行提交出无主作业）。反射测试钉住"引擎侧方法不得带
+`@Transactional`"，时序测试钉住"提交发生在锁内"。顺带修复：DEGRADED 组从不被后台对账；生命周期
+`updateById` 把旧 `alerted_status` 写回导致同一告警发两次（该列改为 `updateStrategy=NEVER`）；
+单表重新初始化同样先销毁后校验；部分失败的组操作在控制台显示为绿色成功提示（新增 `partial` 标记）。
+
+### P1-4（第 2 部分）sync 模块独立调度线程池（2026-09-24，子代理）
+
+模块 9 个 `@Scheduled` 轮询此前全部挤在 RuoYi 全局 `schedule-pool`（cores+1）上，引擎不可达时一轮
+状态对账能被 10 秒超时拖住数分钟，连带饿死其他模块的定时任务。新增 `SyncSchedulingConfig`：
+bean `syncScheduler`、线程 `sync-sched-*`、`sync.scheduler.pool-size` 默认 9（每个 fixedDelay 轮询一条
+线程）。**刻意不用 `ThreadPoolTaskScheduler` bean**：应用里没有任何 `TaskScheduler`，Spring 会把
+"唯一的 TaskScheduler"当成所有模块 `@Scheduled` 的默认调度器；改为 `autowireCandidate=false` 的
+`ScheduledExecutorService`，按 bean 名路由。**验证**：`SyncSchedulingConfigTest` 用真实 Spring 容器
+证明 sync 轮询跑在 `sync-sched-*`、其他模块仍在 `schedule-pool-*`、dev-fast 延迟初始化下照常触发；
+真实后端线程转储确认 `sync-sched-1..9` 存在。
+
+### P1-8 Kafka 桥接 worker 池加上限（2026-09-24，子代理）
+
+`newCachedThreadPool` 换成有界线程池 + 准入控制，`sync.kafka-bridge.max-workers` 默认 64。原方案
+"超限标 FAILED"被推翻：满额时引擎作业是健康的、raw topic 保留数据，判失败既停不掉作业又制造告警。
+操作员路径（启动/恢复/重新初始化等）在提交引擎作业之前拒绝并点名配置项；作业已在运行的 owner
+（对账器、刷新即时修复、重启恢复）被"挂起"：不改状态、不写库、只在进出时各记一条日志，空位出现后
+优先于新启动、从已提交 offset 续传。挂起状态在读取时以 `lastError` 前缀展示。
+
+### UX-7 任务组表单改为三步向导（2026-09-24，子代理）
+
+任务组表单改为与单表同构的三步：数据源（源端探查 + CDC 预检 + 目标 + Kafka 输出格式）→ 表与字段 →
+同步方式与限速（名称、模式、源库保护、提交确认）。两个向导共用新抽出的 `components/sync/SyncWizard`
+与 `useSourceProbe`。顺带修掉 UX-1 留下的两个问题（保存后多弹一个「放弃本次填写？」、点 X 叠出两个
+确认框）以及旧表单的元数据按位置错位、改选源表保留旧字段、DOM id 与列表搜索框冲突。
+**验证**：Playwright 72 项断言全过、0 页面错误。
+
+### P2-2 真实栈黑盒端到端回归套件（2026-09-24，子代理）
+
+`org.dromara.sync.e2e`（`@Tag("e2e")`，`-Dgroups=e2e`，永不进入 dev 回归）只经后端 HTTP 驱动
+`dev.ps1 up -Poc` 起来的真实栈，JDBC 在真实源/目标库造数与断言、Kafka 客户端读真实 topic、
+SeaTunnel REST 交叉核对引擎状态。场景：FULL→PG/MySQL 逐行一致；FULL_CDC 全生命周期（暂停期写入不落
+目标、恢复复用原 jobId 且目标端手工标记行未被覆盖——证明是 savepoint 续跑而非重新快照）；任务组 DDL
+只隔离变更表；Kafka ENVELOPE 事件；引擎启动过渡态映射。撤销日志 + 泄漏检查保证不留残留。
+根 pom 把 surefire `<groups>` 写死为 `${profiles.active}`，`-Dgroups` 原本被静默忽略，已修正接线。
+**它首次运行就钉出三个产品缺陷**：引擎 `SCHEDULED` / `CANCELING` 过渡态落入 default 被判 FAILED
+（已修）；删除任务组残留 DDL 事件（已修）；MySQL 目标 DATETIME 整体 +8 小时（排查中）。
+
+### P2-3 任务与任务组共用一套引擎作业生命周期（2026-09-24）
+
+新增 `engine.EngineJobRunner`，集中持有此前两边各写一遍、且已经分叉的不变量：桥接先于提交、提交
+失败回收桥接（`preflight()` 区分"引擎未参与前被拒绝"与"提交本身失败"）；恢复守卫——配置指纹一致
+**且确有 savepoint**（任务组此前从不检查，无 savepoint 时"从 savepoint 恢复"会静默重新全量，Kafka
+目标整表事件重复）；状态轮询 3 次容忍 + 恢复边界即时判定；停止统一"先引擎后桥接"。两个服务只保留
+各自的状态映射、校验、落库与聚合。随之修正：容量不足导致的恢复被拒不再落 FAILED；运行中作业的桥接
+无法恢复改为记录 `lastError` 而非判失败（修复后从 offset 续传不丢数据）；任务组刷新不再把元数据库/
+指标写入异常计为引擎失败（此前三次后会隔离健康的表）。两个服务的状态机测试改用真实 runner + mock 引擎。
+
+### 本轮真实栈验收（2026-09-24）
+
+以 P1-3 + P1-4(2) + P1-8 + P2-3 + 过渡态修复的完整代码重启后端，跑 P2-2 端到端套件：单表 FULL_CDC 全生命周期
+（savepoint 暂停/恢复续跑/停止）、任务组 DDL 隔离、Kafka 事件信封、FULL→PG、FULL→MySQL 全部通过；唯一失败
+是既有缺陷「MySQL 目标 DATETIME +8 小时」（非回归，排查中）。过渡态探针首轮因引擎 GC 停顿（11 次 young GC
+共 7 秒）提交超时未能执行，重跑 3 次共 12 个采样均未落在过渡窗口（记为 skipped，映射由单测钉住），全程未出现
+过渡态被判 FAILED，提交超时也未留下幽灵作业。真实后端线程转储确认 `sync-sched-1..9` 生效。
+
+### 本轮新增待办
+
+- **P1-4 第 1 部分**：任务组表项状态刷新并行化（`EngineJobRunner.poll` 已无副作用，可直接有界并行）。
+- **P2-7**：`MAX_TABLES_PER_GROUP` 可配置——P1-3 / P1-4(2) 已落地，可以做了。
+- **MySQL 目标 DATETIME +8 小时**：子代理排查中。
+- **编辑整库任务组会按新 id 重建全部已发现表项**：整库模式没有逐表设置，丢失的只是表项 id 与指标历史；
+  可靠修复还需处理失败表项的重新校验，收益小于风险，暂缓。
+- **FULL_CDC→Kafka 的快照事件 `phase` 实际是 `CDC`**：SeaTunnel `DEBEZIUM_JSON` sink 把快照行写成
+  `op=c`、从不写 `op=r`，而 `kafka-event-formats.md` 把这种情况写成 GoldenDB 独有。待产品决定以哪边为准。
