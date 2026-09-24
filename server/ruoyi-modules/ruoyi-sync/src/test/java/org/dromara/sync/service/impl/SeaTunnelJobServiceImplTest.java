@@ -9,6 +9,7 @@ import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SeaTunnelJobStatus;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
+import org.dromara.sync.engine.EngineJobRunner;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
 import org.dromara.sync.engine.SourceColumns;
@@ -73,8 +74,10 @@ class SeaTunnelJobServiceImplTest {
     private final ISyncMetricsService metrics = mock(ISyncMetricsService.class);
     private final JsonMapper json = JsonMapper.builder().build();
 
+    // A real runner over the mocked engine and bridge: these tests pin the lifecycle end to end.
     private final SeaTunnelJobServiceImpl service = new SeaTunnelJobServiceImpl(taskMapper, dataSourceMapper, dataSourceService,
-        metadataService, properties, restClient, syncTaskService, new ResourceProtectionPolicy(properties), locks, bridge, metrics);
+        metadataService, properties, syncTaskService, new ResourceProtectionPolicy(properties), locks, metrics,
+        new EngineJobRunner(restClient, bridge));
 
     private final DataSource mysql = dataSource(MYSQL_ID, "MYSQL", "source_db");
     private final DataSource postgres = dataSource(POSTGRES_ID, "POSTGRESQL", "sink_db");
@@ -186,12 +189,13 @@ class SeaTunnelJobServiceImplTest {
         doThrow(new ServiceException("Kafka 桥接容量已满（2/2）：请调大 sync.kafka-bridge.max-workers"))
             .when(bridge).start(any(), any(), any());
 
-        assertThrows(ServiceException.class, () -> service.resume(TASK_ID));
+        String refused = assertThrows(ServiceException.class, () -> service.resume(TASK_ID)).getMessage();
 
         verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
-        // Like any other refusal before the submit: FAILED keeps the savepoint and stays resumable.
-        assertEquals("FAILED", task.getStatus());
-        assertTrue(task.getLastError().contains("max-workers"));
+        assertTrue(refused.contains("max-workers"), refused);
+        // Nothing reached the engine, so nothing changed: still PAUSED on its savepoint, no
+        // "运行失败" alert, and resume simply works once a slot frees.
+        assertEquals("PAUSED", task.getStatus());
     }
 
     @Test

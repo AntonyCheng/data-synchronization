@@ -14,6 +14,7 @@ import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
+import org.dromara.sync.engine.EngineJobRunner;
 import org.dromara.sync.engine.SeaTunnelRestClient;
 import org.dromara.sync.engine.SourceColumns;
 import org.dromara.sync.engine.SyncTaskGroupConfigGenerator;
@@ -83,9 +84,10 @@ class SyncTaskGroupServiceImplTest {
     private final SyncLocks locks = mock(SyncLocks.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 
+    // A real runner over the mocked engine and bridge: these tests pin the lifecycle end to end.
     private final SyncTaskGroupServiceImpl service = new SyncTaskGroupServiceImpl(groupMapper, itemMapper, ddlEventMapper,
-        dataSourceService, metadataService, consistencyService, properties, restClient, new ResourceProtectionPolicy(properties),
-        bridge, metrics, locks, new TransactionTemplate(transactionManager));
+        dataSourceService, metadataService, consistencyService, properties, new ResourceProtectionPolicy(properties),
+        bridge, metrics, locks, new TransactionTemplate(transactionManager), new EngineJobRunner(restClient, bridge));
 
     /** True only while the fake group lock is held. */
     private final AtomicBoolean lockHeld = new AtomicBoolean();
@@ -119,6 +121,8 @@ class SyncTaskGroupServiceImplTest {
         when(itemMapper.selectByGroupId(GROUP_ID)).thenAnswer(invocation -> new ArrayList<>(items));
         when(restClient.submit(anyString(), anyString(), isNull(), eq(false))).thenAnswer(invocation ->
             new SeaTunnelRestClient.SubmitResult("job-" + (nextJobId++), invocation.getArgument(0)));
+        // Every job has a savepoint unless a test says otherwise (resume refuses without one).
+        when(restClient.checkpoints(anyString())).thenReturn(new SeaTunnelRestClient.CheckpointSnapshot("1", null, "COMPLETED"));
     }
 
     // ------------------------------------------------------------------ start
@@ -366,7 +370,31 @@ class SyncTaskGroupServiceImplTest {
         // Nothing was resubmitted, so nothing is running behind rows that still say PAUSED.
         verify(restClient, never()).submit(anyString(), anyString(), anyString(), anyBoolean());
         assertEquals("PAUSED", first.getStatus());
-        assertEquals("PAUSED", group.getStatus());
+        // The refused table is parked where 重新初始化该表 accepts it (a PAUSED one cannot be rebuilt).
+        assertEquals("FAILED", second.getStatus());
+        assertTrue(second.getLastError().contains("配置已变化"), second.getLastError());
+        assertEquals("FAILED", group.getStatus());
+    }
+
+    /**
+     * The check only the task side used to make: resuming "from a savepoint" the job never took
+     * silently re-snapshots the table, which duplicates every event on a Kafka target.
+     */
+    @Test
+    void aTableWithoutASavepointIsNeverResumedFromOne() {
+        SyncTaskGroup group = persisted(group("FAILED", "MULTI_TABLE", KAFKA_ID));
+        SyncTaskGroupItem failed = runningItem(11L, "customers", "job-a");
+        failed.setStatus("FAILED");
+        failed.setEngineConfigHash(fingerprint(group, failed, kafka));
+        items.add(failed);
+        when(restClient.checkpoints("job-a")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+
+        String refused = assertThrows(ServiceException.class, () -> service.resume(GROUP_ID)).getMessage();
+
+        assertTrue(refused.contains("checkpoint/savepoint"), refused);
+        verify(restClient, never()).submit(anyString(), anyString(), anyString(), anyBoolean());
+        verify(bridge, never()).startGroupItem(any(), any(), any());
+        assertTrue(failed.getLastError().contains("checkpoint/savepoint"));
     }
 
     @Test

@@ -35,9 +35,9 @@ import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
+import org.dromara.sync.engine.EngineJobRunner;
 import org.dromara.sync.engine.EngineJobStates;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
-import org.dromara.sync.engine.SeaTunnelRestClient;
 import org.dromara.sync.engine.SourceColumns;
 import org.dromara.sync.engine.SyncTaskGroupConfigGenerator;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
@@ -71,8 +71,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -110,9 +108,6 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     /** Group states in which table jobs are live on the engine. */
     private static final Set<String> LIVE_STATUSES = Set.of(SyncStatus.RUNNING, SyncStatus.DEGRADED);
 
-    /** Consecutive engine status-poll failures tolerated per item; see the task-side counterpart. */
-    private static final int ITEM_STATUS_FAILURE_TOLERANCE = 3;
-
     private final SyncTaskGroupMapper groupMapper;
     private final SyncTaskGroupItemMapper itemMapper;
     private final SyncTaskGroupDdlEventMapper ddlEventMapper;
@@ -120,14 +115,13 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
     private final IDataSourceMetadataService metadataService;
     private final IDataConsistencyService dataConsistencyService;
     private final SeaTunnelProperties properties;
-    private final SeaTunnelRestClient restClient;
     private final ResourceProtectionPolicy resourceProtectionPolicy;
     private final KafkaTaskBridgeService kafkaTaskBridgeService;
     private final ISyncMetricsService metricsService;
     private final SyncLocks locks;
     private final TransactionTemplate transactionTemplate;
+    private final EngineJobRunner runner;
 
-    private final ConcurrentMap<Long, Integer> itemStatusFailureStreak = new ConcurrentHashMap<>();
 
     // ------------------------------------------------------------------ CRUD
 
@@ -363,8 +357,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             String error = StringUtils.defaultIfBlank(ex.getMessage(), "SeaTunnel 作业提交失败");
             for (SyncTaskGroupItem submittedItem : submittedItems) {
                 try {
-                    restClient.stop(submittedItem.getEngineJobId(), false, false);
-                    if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.stop(submittedItem.getItemId());
+                    runner.halt(submittedItem.getItemId(), DataSourceType.isKafka(target), submittedItem.getEngineJobId(), false);
                     submittedItem.setStatus(SyncStatus.STOPPED);
                 } catch (RuntimeException stopError) {
                     submittedItem.setStatus(SyncStatus.FAILED);
@@ -526,13 +519,26 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         record Resumable(SyncTaskGroupItem item, SeaTunnelJobConfigGenerator.GeneratedConfig config) {
         }
         List<Resumable> resumable = new ArrayList<>();
+        List<String> refused = new ArrayList<>();
         for (SyncTaskGroupItem item : groupItems) {
             if (StringUtils.isBlank(item.getEngineJobId()) || hasLiveJob(item)) continue;
             var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
-            if (configChanged(item, generated)) {
-                throw new ServiceException("表 " + item.getSourceTable() + " 配置已变化，不能直接恢复");
+            String refusal = runner.resumeRefusal(generated, item.getEngineConfigHash(), item.getEngineJobId());
+            if (refusal != null) {
+                // Final for this table's savepoint. Parked FAILED because that is where 重新初始化该表
+                // accepts it - a PAUSED table cannot be rebuilt, which would leave no way forward.
+                isolateItem(item, refusal);
+                refused.add(item.getSourceTable());
+                continue;
             }
             resumable.add(new Resumable(item, generated));
+        }
+        if (!refused.isEmpty()) {
+            group.setStatus(GroupStatuses.aggregate(itemStatuses(groupId)));
+            group.setLastError(SyncText.truncateForColumn("以下表不能从 savepoint 恢复，请逐表重新初始化后再恢复任务组：" + String.join("、", refused)));
+            groupMapper.updateById(group);
+            throw new ServiceException("任务组未恢复：表 " + String.join("、", refused)
+                + " 不能从原 savepoint 恢复（配置已变化或没有可用的 checkpoint/savepoint），请先在表项上重新初始化");
         }
         if (DataSourceType.isKafka(target)) {
             // A full bridge pool is a refusal too: one check for every table about to be resubmitted.
@@ -542,7 +548,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         for (Resumable next : resumable) {
             SyncTaskGroupItem item = next.item();
             try {
-                submitWithBridge(group, item, source, target, next.config(), item.getEngineJobId(), true);
+                runner.resume(itemJob(group, item, source, target), next.config(), item.getEngineJobId());
                 item.setStatus(SyncStatus.RUNNING);
                 item.setLastError("");
                 itemMapper.updateById(item);
@@ -575,13 +581,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource source = requireSource(group);
         DataSource target = requireTarget(group);
         var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
-        if (configChanged(item, generated)) {
-            throw new ServiceException("表 " + item.getSourceTable() + " 的引擎配置已变化，不能直接从原 savepoint 恢复，请创建新配置版本并重新初始化该表");
+        String refusal = runner.resumeRefusal(generated, item.getEngineConfigHash(), item.getEngineJobId());
+        if (refusal != null) {
+            // The table is already parked (DDL_BLOCKED / FAILED), where 重新初始化该表 takes it.
+            throw new ServiceException("表 " + item.getSourceTable() + " 不能从原 savepoint 恢复：" + refusal + "（使用「重新初始化该表」）");
         }
         // Read the new baseline before the submit: failing after it would leave a running job
         // behind a row that still says the table is blocked.
         DataSourceMetadataVo metadata = readSourceMetadata(item, source);
-        submitWithBridge(group, item, source, target, generated, item.getEngineJobId(), true);
+        runner.resume(itemJob(group, item, source, target), generated, item.getEngineJobId());
         TableSchemaSnapshot.baseline(item, metadata);
         item.setStatus(SyncStatus.RUNNING);
         item.setLastError("");
@@ -620,17 +628,11 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
         if (!compatibility.isPassed()) throw new ServiceException("目标表兼容性未通过：" + compatibility.getMessage());
         if (isDatabaseScope(group) && DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
+        runner.requireBridgeCapacity(itemJob(group, item, source, target));
 
         // 2. Discard the old job and its recovery state. It may already be gone; that is fine.
         String oldJobId = item.getEngineJobId();
-        if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.stop(itemId);
-        if (StringUtils.isNotBlank(oldJobId)) {
-            try {
-                restClient.stop(oldJobId, false, true);
-            } catch (ServiceException ignored) {
-                // Nothing to stop or the engine no longer knows the job - the rebuild is still valid.
-            }
-        }
+        runner.discard(itemId, DataSourceType.isKafka(target), oldJobId);
 
         // 3. Fresh baseline, fresh job, no inherited checkpoint.
         TableSchemaSnapshot.baseline(item, metadata);
@@ -705,6 +707,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         DataSource target = requireTarget(group);
         boolean kafkaGroup = DataSourceType.isKafka(target);
         DataSource source = kafkaGroup ? requireSource(group) : null;
+        // Items that are gone with their group are forgotten by the runner on delete; see forgetFailureStreaks.
         List<String> statuses = new ArrayList<>();
         SyncTaskGroupStatus result = new SyncTaskGroupStatus();
         result.setGroupId(groupId);
@@ -717,43 +720,24 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 itemStatus.setStatus(item.getStatus());
                 statuses.add(item.getStatus());
             } else {
-                try {
-                    var snapshot = restClient.status(item.getEngineJobId());
-                    itemStatusFailureStreak.remove(item.getItemId());
-                    String status = EngineJobStates.toPlatformStatus(snapshot.status());
-                    boolean ddlBlocked = ddlEventMapper.selectLatestOpen(item.getItemId()) != null;
-                    item.setStatus(ddlBlocked ? SyncStatus.DDL_BLOCKED : status);
-                    if (kafkaGroup && SyncStatus.RUNNING.equals(status) && !ddlBlocked
-                        && !kafkaTaskBridgeService.isRunning(item.getItemId())) {
-                        // Engine job alive, bridge dead - heal it (mirrors the task-side reconcile).
-                        startItemBridge(group, item, source, target);
-                    }
-                    item.setLastError(SyncText.truncateForColumn(StringUtils.defaultIfBlank(snapshot.errorMessage(), "")));
-                    refreshItemCheckpoint(item);
-                    itemMapper.updateById(item);
-                    itemStatus.setEngineStatus(snapshot.status());
+                EngineJobRunner.Poll poll = runner.poll(item.getItemId(), item.getEngineJobId());
+                if (poll instanceof EngineJobRunner.Poll.Observed observed) {
+                    statuses.add(applyObserved(group, item, source, target, kafkaGroup, observed, itemStatus));
+                } else if (poll instanceof EngineJobRunner.Poll.Unreachable unreachable) {
+                    // Transient engine unreachability - hold the item's last-known status and its
+                    // bridge; only give up after EngineJobRunner.STATUS_FAILURE_TOLERANCE.
                     itemStatus.setStatus(item.getStatus());
-                    itemStatus.setErrorMessage(StringUtils.isBlank(snapshot.errorMessage())
-                        ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
-                    EngineJobStates.applyMetrics(itemStatus, snapshot, group.getSyncMode());
-                    metricsService.recordGroupItem(item, snapshot.status(), itemStatus);
+                    itemStatus.setErrorMessage("SeaTunnel 状态暂不可达（第 " + unreachable.streak() + "/" + EngineJobRunner.STATUS_FAILURE_TOLERANCE
+                        + " 次）：" + SyncText.truncateForColumn(StringUtils.defaultIfBlank(unreachable.error(), "")));
                     statuses.add(item.getStatus());
-                } catch (RuntimeException ex) {
-                    int streak = itemStatusFailureStreak.merge(item.getItemId(), 1, Integer::sum);
-                    if (streak < ITEM_STATUS_FAILURE_TOLERANCE && !EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) {
-                        // Transient engine unreachability - hold the item's last-known status
-                        // and its bridge; only fail it after ITEM_STATUS_FAILURE_TOLERANCE.
-                        itemStatus.setStatus(item.getStatus());
-                        itemStatus.setErrorMessage("SeaTunnel 状态暂不可达（第 " + streak + "/" + ITEM_STATUS_FAILURE_TOLERANCE
-                            + " 次）：" + SyncText.truncateForColumn(StringUtils.defaultIfBlank(ex.getMessage(), "")));
-                        statuses.add(item.getStatus());
-                    } else {
-                        itemStatusFailureStreak.remove(item.getItemId());
-                        isolateItem(item, ex.getMessage());
-                        itemStatus.setStatus(SyncStatus.FAILED);
-                        itemStatus.setErrorMessage(SyncText.truncateForColumn(ex.getMessage()));
-                        statuses.add(SyncStatus.FAILED);
-                    }
+                } else {
+                    // Given up on (Lost) or its recovery state is gone (Boundary): the table is parked.
+                    String error = poll instanceof EngineJobRunner.Poll.Lost lost ? lost.error() : ((EngineJobRunner.Poll.Boundary) poll).error();
+                    if (kafkaGroup) runner.dropBridge(item.getItemId());
+                    isolateItem(item, error);
+                    itemStatus.setStatus(SyncStatus.FAILED);
+                    itemStatus.setErrorMessage(SyncText.truncateForColumn(error));
+                    statuses.add(SyncStatus.FAILED);
                 }
             }
             result.getItems().add(itemStatus);
@@ -764,6 +748,49 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         result.setStatus(aggregate);
         result.setMessage(SyncStatus.FAILED.equals(aggregate) ? "任务组存在失败表项" : "任务组状态已刷新");
         return result;
+    }
+
+    /**
+     * The engine answered for this item: status (an open DDL event keeps it DDL_BLOCKED whatever
+     * the engine says), bridge iff RUNNING, error, checkpoint, metrics. Returns the status to
+     * aggregate. A failure in here is not an engine failure - the metadata database or the
+     * metrics store hiccuped - so it holds the item's last-known status instead of counting
+     * toward giving the job up, and the next pass retries.
+     */
+    private String applyObserved(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target,
+                                 boolean kafkaGroup, EngineJobRunner.Poll.Observed observed, SyncTaskGroupItemStatus itemStatus) {
+        String known = item.getStatus();
+        var snapshot = observed.snapshot();
+        try {
+            boolean ddlBlocked = ddlEventMapper.selectLatestOpen(item.getItemId()) != null;
+            item.setStatus(ddlBlocked ? SyncStatus.DDL_BLOCKED : observed.platformStatus());
+            String bridgeError = null;
+            if (kafkaGroup) {
+                if (SyncStatus.RUNNING.equals(item.getStatus())) bridgeError = runner.healBridge(itemJob(group, item, source, target));
+                else runner.dropBridge(item.getItemId());
+            }
+            item.setLastError(SyncText.truncateForColumn(StringUtils.defaultIfBlank(snapshot.errorMessage(),
+                StringUtils.defaultIfBlank(bridgeError, StringUtils.defaultIfBlank(observed.checkpointError(), "")))));
+            var checkpoint = observed.checkpoint();
+            if (checkpoint.id() != null) {
+                item.setLastCheckpointId(checkpoint.id());
+                item.setLastCheckpointTime(checkpoint.time() == null ? null : checkpoint.time().toString());
+                item.setLastCheckpointStatus(checkpoint.status());
+            }
+            itemMapper.updateById(item);
+            itemStatus.setEngineStatus(snapshot.status());
+            itemStatus.setStatus(item.getStatus());
+            itemStatus.setErrorMessage(StringUtils.isBlank(item.getLastError()) ? null : item.getLastError());
+            EngineJobStates.applyMetrics(itemStatus, snapshot, group.getSyncMode());
+            metricsService.recordGroupItem(item, snapshot.status(), itemStatus);
+            return item.getStatus();
+        } catch (RuntimeException ex) {
+            item.setStatus(known);
+            itemStatus.setEngineStatus(snapshot.status());
+            itemStatus.setStatus(known);
+            itemStatus.setErrorMessage("已读取引擎状态，但未能保存（下一轮重试）：" + SyncText.safeMessage(ex, "未知错误"));
+            return known;
+        }
     }
 
     /** Reconcile persisted group state with SeaTunnel after a platform restart. */
@@ -777,7 +804,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 DataSource target = requireTarget(group);
                 if (!DataSourceType.isKafka(target)) return;
                 for (SyncTaskGroupItem item : items(group.getGroupId())) {
-                    if (SyncStatus.RUNNING.equals(item.getStatus())) startItemBridge(group, item, source, target);
+                    if (SyncStatus.RUNNING.equals(item.getStatus())) runner.healBridge(itemJob(group, item, source, target));
                 }
             } catch (RuntimeException ex) {
                 markGroupFailed(group, ex.getMessage());
@@ -1005,15 +1032,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     /**
      * Submits one table item as its own SeaTunnel job. Returns the engine job id.
-     * <p>For Kafka targets the bridge is started first, mirroring the single-task path:
-     * its topic precheck fails before any engine job exists (no orphan to clean up), and
-     * it creates the single-partition raw topic before the engine can auto-create it with
-     * broker defaults. A failed submit tears the bridge down again.
+     * <p>For Kafka targets {@link EngineJobRunner} starts the bridge first, as on the single-task
+     * path: its topic precheck and capacity check refuse before any engine job exists, and it
+     * creates the single-partition raw topic before the engine can auto-create it with broker
+     * defaults. A failed submit tears the bridge down again.
      */
     private String submitItem(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
         var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
         SeaTunnelJobConfigGenerator.prepareTarget(SyncTaskGroupConfigGenerator.toTask(group, item), source, target, generated, sourceColumns(source));
-        String jobId = submitWithBridge(group, item, source, target, generated, null, false);
+        String jobId = runner.submit(itemJob(group, item, source, target), generated);
         item.setEngineJobId(jobId);
         item.setEngineConfigHash(generated.fingerprint());
         item.setStatus(SyncStatus.RUNNING);
@@ -1022,50 +1049,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return jobId;
     }
 
-    /** Bridge (Kafka only) -> engine submit; the bridge is stopped again if the submit fails. */
-    private String submitWithBridge(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target,
-                                    SeaTunnelJobConfigGenerator.GeneratedConfig generated, String existingJobId, boolean withSavepoint) {
-        boolean kafka = DataSourceType.isKafka(target);
-        if (kafka) startItemBridge(group, item, source, target);
-        try {
-            return restClient.submit(generated.jobName(), generated.config(), existingJobId, withSavepoint).jobId();
-        } catch (RuntimeException ex) {
-            if (kafka) kafkaTaskBridgeService.stop(item.getItemId());
-            throw ex;
-        }
-    }
-
+    /** Engine-first stop / savepoint pause of one table, then its new status. */
     private void stopItem(SyncTaskGroupItem item, DataSource target, boolean withSavepoint, String newStatus) {
-        if (DataSourceType.isKafka(target)) kafkaTaskBridgeService.stop(item.getItemId());
-        restClient.stop(item.getEngineJobId(), withSavepoint, false);
+        runner.halt(item.getItemId(), DataSourceType.isKafka(target), item.getEngineJobId(), withSavepoint);
         item.setStatus(newStatus);
         itemMapper.updateById(item);
     }
 
-    /** Strict before a submit, parked rather than failed for an active item; see SeaTunnelJobServiceImpl#startBridge. */
-    private void startItemBridge(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
-        var task = SyncTaskGroupConfigGenerator.toTask(group, item);
-        if (SyncStatus.isActive(item.getStatus())) kafkaTaskBridgeService.tryStartGroupItem(task, target, source.getDatabaseName());
-        else kafkaTaskBridgeService.startGroupItem(task, target, source.getDatabaseName());
-    }
-
-    private void refreshItemCheckpoint(SyncTaskGroupItem item) {
-        try {
-            var checkpoint = restClient.checkpoints(item.getEngineJobId());
-            if (checkpoint.id() != null) {
-                item.setLastCheckpointId(checkpoint.id());
-                item.setLastCheckpointTime(checkpoint.time() == null ? null : checkpoint.time().toString());
-                item.setLastCheckpointStatus(checkpoint.status());
-            }
-        } catch (RuntimeException checkpointError) {
-            if (StringUtils.isBlank(item.getLastError())) {
-                item.setLastError(SyncText.truncateForColumn(checkpointError.getMessage()));
-            }
-        }
-    }
-
-    private static boolean configChanged(SyncTaskGroupItem item, SeaTunnelJobConfigGenerator.GeneratedConfig generated) {
-        return StringUtils.isNotBlank(item.getEngineConfigHash()) && !generated.matchesFingerprint(item.getEngineConfigHash());
+    /** One table item as the engine job runner sees it: projected onto a task, with the group's endpoints. */
+    private static EngineJobRunner.Job itemJob(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
+        return new EngineJobRunner.Job(SyncTaskGroupConfigGenerator.toTask(group, item), source, target, true);
     }
 
     /**
@@ -1074,7 +1067,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
      * an entry per item that ever existed in this process.
      */
     private void forgetFailureStreaks(Long groupId) {
-        items(groupId).forEach(item -> itemStatusFailureStreak.remove(item.getItemId()));
+        items(groupId).forEach(item -> runner.forget(item.getItemId()));
     }
 
     /**
