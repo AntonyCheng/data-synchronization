@@ -59,7 +59,6 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
@@ -69,6 +68,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -91,7 +91,10 @@ import java.util.stream.Collectors;
  * Instead each write commits on its own, every refusal is decided before the first engine call,
  * and each method leaves an honest partial outcome (per-item status + error) when the engine fails
  * part-way. Edits and deletes, which only touch the database, run in a transaction <em>inside</em>
- * the group lock ({@link #inLockedTransaction}) so they commit before the lock is released.
+ * the group lock ({@link #inLockedTransaction}) so they commit before the lock is released. Saving a
+ * whole-database group does remote work too - listing and reading the customer's source tables,
+ * creating Kafka topics - and does all of it before its transaction opens
+ * ({@link #planDatabaseItems}); the transaction only writes the rows that plan produced.
  */
 @RequiredArgsConstructor
 @Service
@@ -142,38 +145,67 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return result;
     }
 
+    /**
+     * A whole-database group's tables are planned before the transaction opens (see
+     * {@link #planDatabaseItems}); a refused plan - the source database cannot be listed - writes
+     * nothing, and the transaction that follows only writes rows.
+     */
     @Override
-    @Transactional
     public Boolean insertByBo(SyncTaskGroupBo bo) {
         SyncTaskGroup entity = normalize(bo, null);
         entity.setStatus(SyncStatus.DRAFT);
         entity.setConfigVersion(1);
-        groupMapper.insert(entity);
-        replaceItems(entity, bo.getItems());
-        if (isDatabaseScope(entity)) discoveryService.discover(entity.getGroupId());
-        return true;
+        if (!isDatabaseScope(entity)) {
+            return inTransaction(() -> {
+                groupMapper.insert(entity);
+                replaceItems(entity, bo.getItems());
+                return true;
+            });
+        }
+        DatabaseItems planned = planDatabaseItems(entity, bo.getItems(), List.of(), false);
+        entity.setLastError(planned.note());
+        return inTransaction(() -> {
+            groupMapper.insert(entity);
+            writeDatabaseItems(entity, planned);
+            return true;
+        });
     }
 
     /**
      * Locked like the lifecycle: without it a start that had already read the group as STOPPED
-     * would go on to submit jobs for items this edit is replacing.
+     * would go on to submit jobs for items this edit is replacing. The transaction runs inside the
+     * lock (see {@link #inLockedTransaction}); a whole-database group plans its tables in the lock
+     * but before the transaction, so no remote call ever runs while it is open.
      */
     @Override
     public Boolean updateByBo(SyncTaskGroupBo bo) {
-        return inLockedTransaction(bo.getGroupId(), () -> doUpdate(bo));
+        return locks.withGroupLock(bo.getGroupId(), () -> doUpdate(bo));
     }
 
     private Boolean doUpdate(SyncTaskGroupBo bo) {
         SyncTaskGroup current = requireGroup(bo.getGroupId());
+        // Only a group without live jobs is edited: whatever its items are, none of them is running.
         if (current.getStatus() == null || !EDITABLE_STATUSES.contains(current.getStatus())) {
             throw new ServiceException("只有草稿或已停止任务组允许修改");
         }
+        TableScope before = TableScope.of(current);
         SyncTaskGroup entity = normalize(bo, current);
         entity.setConfigVersion(nextConfigVersion(current));
-        groupMapper.updateById(entity);
-        replaceItems(entity, bo.getItems());
-        if (isDatabaseScope(entity)) discoveryService.discover(entity.getGroupId());
-        return true;
+        if (!isDatabaseScope(entity)) {
+            return inTransaction(() -> {
+                groupMapper.updateById(entity);
+                replaceItems(entity, bo.getItems());
+                return true;
+            });
+        }
+        boolean sameTables = before.sameAs(entity, requireSource(entity));
+        DatabaseItems planned = planDatabaseItems(entity, bo.getItems(), items(entity.getGroupId()), sameTables);
+        entity.setLastError(planned.note());
+        return inTransaction(() -> {
+            groupMapper.updateById(entity);
+            writeDatabaseItems(entity, planned);
+            return true;
+        });
     }
 
     /**
@@ -806,17 +838,30 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         return entity;
     }
 
+    /** A multi-table group's save: the operator's tables replace the group's, read and written in the save's transaction. */
     private void replaceItems(SyncTaskGroup group, List<SyncTaskGroupItemBo> itemBos) {
-        forgetFailureStreaks(group.getGroupId());
-        // The events belong to the item ids that are about to disappear.
-        ddlEventMapper.deleteByGroupId(group.getGroupId());
-        itemMapper.deleteByGroupId(group.getGroupId());
+        deleteItems(group.getGroupId());
         if (itemBos == null) return;
-        DataSource source = requireSource(group);
-        DataSource target = requireTarget(group);
+        for (SyncTaskGroupItem item : prepareItems(group, itemBos, requireSource(group), requireTarget(group))) {
+            itemMapper.insert(item);
+        }
+    }
+
+    /** Deletes every item of the group, with the DDL events and poll-failure counters of those item ids. */
+    private void deleteItems(Long groupId) {
+        forgetFailureStreaks(groupId);
+        // The events belong to the item ids that are about to disappear.
+        ddlEventMapper.deleteByGroupId(groupId);
+        itemMapper.deleteByGroupId(groupId);
+    }
+
+    /** The request's tables as new items. Reads each table's schema from the source; writes nothing. */
+    private List<SyncTaskGroupItem> prepareItems(SyncTaskGroup group, List<SyncTaskGroupItemBo> itemBos, DataSource source, DataSource target) {
+        List<SyncTaskGroupItem> prepared = new ArrayList<>();
+        if (itemBos == null) return prepared;
         for (SyncTaskGroupItemBo bo : itemBos) {
             SyncTaskGroupItem item = MapstructUtils.convert(bo, SyncTaskGroupItem.class);
-            // Items are always re-created on save so a stale DDL event never re-attaches to an edited table.
+            // Items the operator lists are always re-created on save so a stale DDL event never re-attaches to an edited table.
             item.setItemId(null);
             item.setGroupId(group.getGroupId());
             item.setTargetSchema(StringUtils.defaultIfBlank(item.getTargetSchema(), TableNames.defaultSchema(target)));
@@ -827,7 +872,89 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             GroupItemOperations.applySelection(item, metadata);
             TableSchemaSnapshot.baseline(item, metadata);
             item.setStatus(SyncStatus.PENDING);
+            prepared.add(item);
+        }
+        return prepared;
+    }
+
+    /**
+     * The remote half of saving a whole-database group, run before its transaction opens: every
+     * JDBC read of the customer's source database and every Kafka AdminClient call happen here, so
+     * the transaction that follows holds a connection only for its own writes. Throws - and the save
+     * writes nothing - when the source database cannot be listed or a listed table cannot be read.
+     *
+     * <p>Which items the group ends up with:
+     * <ul>
+     *   <li>An edit that keeps the source, source database and target ({@code sameTables}) keeps the
+     *   group's items - ids, target schema, metrics history, DDL events, per-table state - and only
+     *   adds the tables that are new, within the table limit. A table rejected before it ever ran is
+     *   checked again and back to PENDING if it now passes (a whole-database start skips FAILED
+     *   tables, and until now the edit's re-creation was what retried them). The group being
+     *   editable, none of the kept items has a live job, so nothing here touches the engine.</li>
+     *   <li>Anything else - a new group, other endpoints (the items belong to the old ones), a group
+     *   that was multi-table - replaces the items: all of the source database's tables, as new
+     *   items.</li>
+     *   <li>A request that lists tables itself (the wizard never does for this scope) gets exactly
+     *   those, re-created like a multi-table group's, plus discovery of the rest.</li>
+     * </ul>
+     */
+    private DatabaseItems planDatabaseItems(SyncTaskGroup group, List<SyncTaskGroupItemBo> itemBos,
+                                            List<SyncTaskGroupItem> current, boolean sameTables) {
+        List<SyncTaskGroupItem> listed = prepareItems(group, itemBos, requireSource(group), requireTarget(group));
+        boolean keep = sameTables && listed.isEmpty();
+        List<SyncTaskGroupItem> present = keep ? current : listed;
+        Map<Long, SyncTaskGroupItem> rewritten = new LinkedHashMap<>();
+        if (keep) {
+            for (SyncTaskGroupItem item : current) {
+                // A whole-database group has no per-table settings: its tables follow the group's DDL policy.
+                if (!Objects.equals(item.getDdlPolicy(), group.getDdlPolicy())) {
+                    item.setDdlPolicy(group.getDdlPolicy());
+                    rewritten.put(item.getItemId(), item);
+                }
+            }
+            discoveryService.readmitRejected(group, current).forEach(item -> rewritten.put(item.getItemId(), item));
+        }
+        ISyncTaskGroupDiscoveryService.TablePlan discovered = discoveryService.plan(group, present);
+        List<SyncTaskGroupItem> inserted = new ArrayList<>(listed);
+        inserted.addAll(discovered.items());
+        long failed = present.stream().filter(item -> SyncStatus.FAILED.equals(item.getStatus())).count() + discovered.rejected();
+        return new DatabaseItems(!keep && !current.isEmpty(), List.copyOf(rewritten.values()), inserted, discovered.note(failed));
+    }
+
+    /** The database half of a whole-database save: writes the planned rows, nothing else. Runs in the save's transaction. */
+    private void writeDatabaseItems(SyncTaskGroup group, DatabaseItems planned) {
+        if (planned.replace()) deleteItems(group.getGroupId());
+        planned.rewritten().forEach(itemMapper::updateById);
+        for (SyncTaskGroupItem item : planned.inserted()) {
+            item.setGroupId(group.getGroupId());
             itemMapper.insert(item);
+        }
+    }
+
+    /**
+     * What a whole-database save writes, worked out by {@link #planDatabaseItems} before its transaction.
+     *
+     * @param replace   the group's current items are deleted first (with their DDL events)
+     * @param rewritten kept items whose row changed (re-checked, or following the group's DDL policy)
+     * @param inserted  new items: the tables the request listed, then the discovered ones
+     * @param note      the group's error note: tables that failed validation, tables the limit left out
+     */
+    private record DatabaseItems(boolean replace, List<SyncTaskGroupItem> rewritten, List<SyncTaskGroupItem> inserted, String note) {
+    }
+
+    /** What a whole-database group's items belong to: the database they are read from and the target they go to. */
+    private record TableScope(String scope, Long sourceId, String sourceDatabase, Long targetId) {
+
+        static TableScope of(SyncTaskGroup group) {
+            return new TableScope(group.getSyncScope(), group.getSourceId(), group.getSourceDatabase(), group.getTargetId());
+        }
+
+        /** Whether the saved group is still a whole-database group reading this database into this target. */
+        boolean sameAs(SyncTaskGroup saved, DataSource source) {
+            // A group saved without a database read its data source's default one.
+            return SyncScope.isDatabase(scope) && SyncScope.isDatabase(saved.getSyncScope())
+                && Objects.equals(sourceId, saved.getSourceId()) && Objects.equals(targetId, saved.getTargetId())
+                && Objects.equals(StringUtils.defaultIfBlank(sourceDatabase, source.getDatabaseName()), saved.getSourceDatabase());
         }
     }
 
@@ -871,8 +998,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
 
     /**
      * Drops the in-memory poll-failure counters of a group's items. Items are re-created with
-     * fresh ids on every save and deleted with the group, so without this the map would keep
-     * an entry per item that ever existed in this process.
+     * fresh ids when a save replaces them and deleted with the group, so without this the map
+     * would keep an entry per item that ever existed in this process.
      */
     private void forgetFailureStreaks(Long groupId) {
         items(groupId).forEach(item -> runner.forget(item.getItemId()));
@@ -885,7 +1012,15 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
      * opposite: it commits after the lock is already free.)
      */
     private <T> T inLockedTransaction(Long groupId, Supplier<T> action) {
-        return locks.withGroupLock(groupId, () -> transactionTemplate.execute(status -> action.get()));
+        return locks.withGroupLock(groupId, () -> inTransaction(action));
+    }
+
+    /**
+     * A save's database writes. A whole-database save does its remote work before opening this
+     * ({@link #planDatabaseItems}); a multi-table save still reads its listed tables' schema inside.
+     */
+    private <T> T inTransaction(Supplier<T> action) {
+        return transactionTemplate.execute(status -> action.get());
     }
 
     private void isolateItem(SyncTaskGroupItem item, String error) {

@@ -278,6 +278,77 @@ class SyncTaskGroupDiscoveryServiceImplTest {
         assertEquals(GROUP_ID, inserted.get(0).getGroupId());
     }
 
+    // ------------------------------------------------------------------ the remote half, on its own
+
+    /**
+     * What a save runs before its transaction: the whole remote half of discovery - the source
+     * listing, each table's schema, the topics - and not a single write, lock or engine call.
+     */
+    @Test
+    void planningDoesAllTheRemoteWorkAndWritesNothing() {
+        groupProperties.setMaxTables(3);
+        SyncTaskGroup unsaved = group("DRAFT", KAFKA_ID);
+        unsaved.setGroupId(null);
+        SyncTaskGroupItem kept = item(11L, "customers");
+        kept.setTargetSchema("sales");
+        sourceTables("customers", "orders", "audit_log", "invoices");
+        DataSourceMetadataVo noKey = metadata("id", "name");
+        noKey.getPrimaryKeys().clear();
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), eq("audit_log"))).thenReturn(noKey);
+
+        var plan = service.plan(unsaved, List.of(kept));
+
+        assertEquals(List.of("orders", "audit_log"), plan.items().stream().map(SyncTaskGroupItem::getSourceTable).toList());
+        SyncTaskGroupItem orders = plan.items().get(0);
+        assertNull(orders.getItemId());
+        assertNull(orders.getGroupId(), "the save fills in the id of the group it creates");
+        assertEquals("PENDING", orders.getStatus());
+        assertEquals("sales", orders.getTargetSchema());
+        assertEquals("id,name", orders.getSelectedColumns());
+        assertTrue(orders.getSchemaSnapshot().contains("\"primaryKeys\":[\"id\"]"));
+        assertEquals("FAILED", plan.items().get(1).getStatus());
+        assertEquals("源表没有可用同步键", plan.items().get(1).getLastError());
+        assertEquals(1, plan.rejected());
+        assertEquals(1, plan.overLimit());
+        assertEquals("新增表发现完成，其中 1 张表校验或提交失败，请查看表项错误；已达任务组上限 3 张，另有 1 张表未纳入（sync.group.max-tables）",
+            plan.note(plan.rejected()));
+        verify(bridge).ensureTopicExists(kafka, "orders");
+        verify(bridge).ensureTopicExists(kafka, "audit_log");
+        verify(itemMapper, never()).insert(any(SyncTaskGroupItem.class));
+        verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
+        verify(groupMapper, never()).updateById(any(SyncTaskGroup.class));
+        verify(locks, never()).withGroupLock(any(), any());
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+    }
+
+    @Test
+    void onlyATableRejectedBeforeItEverRanIsCheckedAgain() {
+        SyncTaskGroup group = group("STOPPED", KAFKA_ID);
+        SyncTaskGroupItem rejected = item(11L, "audit_log");
+        rejected.setStatus("FAILED");
+        rejected.setLastError("Kafka topic 创建失败：audit_log");
+        SyncTaskGroupItem ranAndFailed = item(12L, "orders");
+        ranAndFailed.setStatus("FAILED");
+        ranAndFailed.setEngineJobId("job-9");
+        ranAndFailed.setLastError("SeaTunnel 作业异常退出");
+        SyncTaskGroupItem stopped = item(13L, "customers");
+        stopped.setStatus("STOPPED");
+
+        List<SyncTaskGroupItem> changed = service.readmitRejected(group, List.of(rejected, ranAndFailed, stopped));
+
+        assertEquals(List.of(rejected), changed);
+        assertEquals("PENDING", rejected.getStatus());
+        assertEquals("", rejected.getLastError());
+        assertEquals("id", rejected.getSyncKeyColumns());
+        assertTrue(rejected.getSchemaSnapshot().contains("\"primaryKeys\":[\"id\"]"), "a fresh baseline");
+        verify(bridge).ensureTopicExists(kafka, "audit_log");
+        verify(bridge, never()).ensureTopicExists(kafka, "orders");
+        assertEquals("FAILED", ranAndFailed.getStatus(), "what parked a table that ran is not a discovery rule");
+        assertEquals("SeaTunnel 作业异常退出", ranAndFailed.getLastError());
+        assertEquals("STOPPED", stopped.getStatus());
+        verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     private SyncTaskGroup persisted(SyncTaskGroup group) {

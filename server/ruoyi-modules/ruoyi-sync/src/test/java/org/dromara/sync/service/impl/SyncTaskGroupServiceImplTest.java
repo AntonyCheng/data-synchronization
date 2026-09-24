@@ -28,24 +28,26 @@ import org.dromara.sync.mapper.SyncTaskGroupMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.service.IDataSourceService;
 import org.dromara.sync.service.ISyncMetricsService;
-import org.dromara.sync.service.ISyncTaskGroupDiscoveryService;
 import org.dromara.sync.support.SyncLocks;
 import org.dromara.sync.support.TableSchemaSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.mockito.invocation.Invocation;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -59,6 +61,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -81,7 +84,6 @@ class SyncTaskGroupServiceImplTest {
     private final SyncTaskGroupDdlEventMapper ddlEventMapper = mock(SyncTaskGroupDdlEventMapper.class);
     private final IDataSourceService dataSourceService = mock(IDataSourceService.class);
     private final IDataSourceMetadataService metadataService = mock(IDataSourceMetadataService.class);
-    private final ISyncTaskGroupDiscoveryService discoveryService = mock(ISyncTaskGroupDiscoveryService.class);
     private final SeaTunnelProperties properties = new SeaTunnelProperties();
     private final SeaTunnelRestClient restClient = mock(SeaTunnelRestClient.class);
     private final KafkaTaskBridgeService bridge = mock(KafkaTaskBridgeService.class);
@@ -90,12 +92,15 @@ class SyncTaskGroupServiceImplTest {
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
     private final SyncGroupProperties groupProperties = new SyncGroupProperties();
 
-    // A real runner and real item operations over the mocked engine and bridge: these tests pin the lifecycle end to end.
+    // A real runner, real item operations and real discovery over the mocked engine, bridge and source
+    // metadata: these tests pin the lifecycle - and a whole-database save - end to end.
     private final EngineJobRunner runner = new EngineJobRunner(restClient, bridge);
+    private final GroupItemOperations itemOps = new GroupItemOperations(itemMapper, metadataService, properties, runner);
+    private final SyncTaskGroupDiscoveryServiceImpl discoveryService = new SyncTaskGroupDiscoveryServiceImpl(groupMapper, itemMapper,
+        dataSourceService, metadataService, bridge, itemOps, locks, groupProperties);
     private final SyncTaskGroupServiceImpl service = new SyncTaskGroupServiceImpl(groupMapper, itemMapper, ddlEventMapper,
         dataSourceService, metadataService, discoveryService, properties, new ResourceProtectionPolicy(properties),
-        bridge, metrics, locks, new TransactionTemplate(transactionManager), runner,
-        new GroupItemOperations(itemMapper, metadataService, properties, runner), groupProperties);
+        bridge, metrics, locks, new TransactionTemplate(transactionManager), runner, itemOps, groupProperties);
 
     /** True only while the fake group lock is held. */
     private final AtomicBoolean lockHeld = new AtomicBoolean();
@@ -527,37 +532,20 @@ class SyncTaskGroupServiceImplTest {
         // Discovery submits the jobs of new tables on a live group.
         assertFalse(SyncTaskGroupDiscoveryServiceImpl.class.getMethod("discover", Long.class).isAnnotationPresent(Transactional.class));
         assertFalse(SyncTaskGroupDiscoveryServiceImpl.class.getMethod("discoverDatabaseGroups").isAnnotationPresent(Transactional.class));
+        // A save plans its tables - the customer's database, Kafka - before it opens its own transaction.
+        for (String name : List.of("insertByBo", "updateByBo")) {
+            assertFalse(SyncTaskGroupServiceImpl.class.getMethod(name, SyncTaskGroupBo.class).isAnnotationPresent(Transactional.class), name);
+        }
+        for (String name : List.of("plan", "readmitRejected")) {
+            assertFalse(SyncTaskGroupDiscoveryServiceImpl.class.getMethod(name, SyncTaskGroup.class, List.class).isAnnotationPresent(Transactional.class), name);
+        }
         for (Class<?> type : List.of(SyncTaskGroupServiceImpl.class, SyncTaskGroupDdlServiceImpl.class,
             SyncTaskGroupDiscoveryServiceImpl.class, GroupItemOperations.class)) {
             assertFalse(type.isAnnotationPresent(Transactional.class), type.getSimpleName());
         }
     }
 
-    // ------------------------------------------------------------------ saving a whole-database group
-
-    /**
-     * Saving a whole-database group discovers its tables as part of the save: inside the edit's
-     * transaction, which itself runs inside the group lock, so the discovered items commit with the
-     * edit and before anyone else can take the lock.
-     */
-    @Test
-    void anEditOfAWholeDatabaseGroupDiscoversItsTablesInsideTheLockedTransaction() {
-        SyncTaskGroup group = persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
-        AtomicBoolean discoveredUnderLock = new AtomicBoolean();
-        when(discoveryService.discover(GROUP_ID)).thenAnswer(invocation -> {
-            discoveredUnderLock.set(lockHeld.get());
-            return SyncTaskGroupOperationResult.of(group, "未发现新增表");
-        });
-
-        assertTrue(service.updateByBo(bo("DATABASE", POSTGRES_ID)));
-
-        assertTrue(discoveredUnderLock.get(), "discovery must run while the edit holds the group lock");
-        InOrder transaction = inOrder(transactionManager, discoveryService);
-        transaction.verify(transactionManager).getTransaction(any());
-        transaction.verify(discoveryService).discover(GROUP_ID);
-        transaction.verify(transactionManager).commit(any());
-        assertEquals(2, group.getConfigVersion());
-    }
+    // ------------------------------------------------------------------ saving a group
 
     @Test
     void theTableLimitIsConfigurableAndClampedAndTheWizardSeesTheSameNumber() {
@@ -582,18 +570,180 @@ class SyncTaskGroupServiceImplTest {
         assertEquals(SyncGroupProperties.MAX_TABLES_CEILING, service.limits().getMaxTables(), "never above the ceiling");
     }
 
+    // ------------------------------------------------------------------ saving a whole-database group
+
+    /**
+     * Saving a whole-database group lists the customer's source database, reads every table and,
+     * for a Kafka target, creates the topics - all before the save's transaction opens, so that
+     * transaction never holds a connection across a remote call. It only writes the planned rows,
+     * and an edit's transaction still commits inside the group lock.
+     */
     @Test
-    void creatingAWholeDatabaseGroupDiscoversItsTablesInTheCreateTransaction() throws NoSuchMethodException {
-        when(groupMapper.insert(any(SyncTaskGroup.class))).thenAnswer(invocation -> {
-            SyncTaskGroup created = invocation.getArgument(0);
-            created.setGroupId(GROUP_ID);
-            return 1;
-        });
+    void savingAWholeDatabaseGroupMakesNoRemoteCallWhileItsTransactionIsOpen() {
+        createdGroupsGetTheirId();
+        sourceTables("customers", "orders");
+        List<SyncTaskGroupItem> inserted = recordInserts();
 
-        assertTrue(service.insertByBo(bo("DATABASE", POSTGRES_ID)));
+        assertTrue(service.insertByBo(bo("DATABASE", KAFKA_ID)));
 
-        verify(discoveryService).discover(GROUP_ID);
-        assertTrue(SyncTaskGroupServiceImpl.class.getMethod("insertByBo", SyncTaskGroupBo.class).isAnnotationPresent(Transactional.class));
+        assertEquals(List.of("customers", "orders"), tables(inserted));
+        inserted.forEach(item -> assertEquals(GROUP_ID, item.getGroupId()));
+        verify(bridge).ensureTopicExists(kafka, "customers");
+
+        SyncTaskGroup group = persisted(group("STOPPED", "DATABASE", KAFKA_ID));
+        items.add(item(11L, "customers", "STOPPED"));
+        items.add(item(12L, "orders", "FAILED")); // rejected at discovery: checked again on the edit
+        sourceTables("customers", "orders", "invoices");
+        AtomicBoolean committedUnderLock = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            committedUnderLock.compareAndSet(true, lockHeld.get());
+            return null;
+        }).when(transactionManager).commit(any());
+
+        assertTrue(service.updateByBo(bo("DATABASE", KAFKA_ID)));
+
+        assertEquals(List.of("customers", "orders", "invoices"), tables(inserted));
+        verify(bridge).ensureTopicExists(kafka, "invoices");
+        verify(bridge, times(2)).ensureTopicExists(kafka, "orders");
+        assertEquals(List.of(), remoteCallsInsideTransactions());
+        verify(transactionManager, times(2)).commit(any());
+        assertTrue(committedUnderLock.get(), "the edit's transaction commits before the group lock is released");
+        assertEquals(2, group.getConfigVersion(), "one save, one version");
+    }
+
+    /** Source unreachable: the save is refused as before, and nothing - not even the group row - is written. */
+    @Test
+    void aWholeDatabaseSaveWhoseSourceCannotBeListedWritesNothing() {
+        when(metadataService.queryTables(MYSQL_ID, "source_db")).thenThrow(new ServiceException("源库连接失败"));
+
+        assertThrows(ServiceException.class, () -> service.insertByBo(bo("DATABASE", POSTGRES_ID)));
+        persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
+        items.add(item(11L, "customers", "STOPPED"));
+        assertThrows(ServiceException.class, () -> service.updateByBo(bo("DATABASE", POSTGRES_ID)));
+
+        verify(transactionManager, never()).getTransaction(any());
+        verify(groupMapper, never()).insert(any(SyncTaskGroup.class));
+        verify(groupMapper, never()).updateById(any(SyncTaskGroup.class));
+        verify(itemMapper, never()).insert(any(SyncTaskGroupItem.class));
+        verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
+        verify(itemMapper, never()).deleteByGroupId(anyLong());
+        verify(ddlEventMapper, never()).deleteByGroupId(anyLong());
+    }
+
+    /**
+     * An edit that changes neither the source, its database nor the target - say, a new rate limit -
+     * used to delete every table and re-discover it under a fresh id with the target's default schema,
+     * losing ids, metrics history and state. It now keeps them and only adds tables that are new.
+     */
+    @Test
+    void anEditThatKeepsTheEndpointsKeepsTheTablesAndAddsOnlyNewOnes() {
+        SyncTaskGroup group = persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
+        SyncTaskGroupItem customers = runningItem(11L, "customers", "job-old");
+        customers.setStatus("STOPPED");
+        customers.setTargetSchema("sales");
+        SyncTaskGroupItem orders = item(12L, "orders", "FINISHED");
+        orders.setTargetSchema("sales");
+        items.add(customers);
+        items.add(orders);
+        sourceTables("customers", "Orders", "invoices");
+        List<SyncTaskGroupItem> inserted = recordInserts();
+
+        assertTrue(service.updateByBo(bo("DATABASE", POSTGRES_ID)));
+
+        verify(itemMapper, never()).deleteByGroupId(anyLong());
+        verify(ddlEventMapper, never()).deleteByGroupId(anyLong());
+        assertEquals(List.of("invoices"), tables(inserted), "an existing table is matched case-insensitively");
+        SyncTaskGroupItem invoices = inserted.get(0);
+        assertEquals(GROUP_ID, invoices.getGroupId());
+        assertEquals("sales", invoices.getTargetSchema(), "a new table follows the kept tables' schema");
+        assertEquals("PENDING", invoices.getStatus());
+        // The kept tables are left as they were: not re-read, not rewritten.
+        verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
+        verify(metadataService, never()).queryTableMetadata(anyLong(), anyString(), eq("customers"));
+        assertEquals("STOPPED", customers.getStatus());
+        assertEquals("job-old", customers.getEngineJobId());
+        assertEquals("sales", customers.getTargetSchema());
+        assertEquals(2, group.getConfigVersion());
+        assertEquals("", group.getLastError());
+    }
+
+    /**
+     * A whole-database start skips FAILED tables, and the edit's re-creation used to be what gave
+     * them another chance. A table rejected before it ever ran is now checked again on an edit - as
+     * a whole-database Kafka start already did - and PENDING once it passes.
+     */
+    @Test
+    void anEditReadmitsATableRejectedAtDiscoveryOnceItPasses() {
+        SyncTaskGroup group = persisted(group("DRAFT", "DATABASE", KAFKA_ID));
+        SyncTaskGroupItem nowKeyed = item(11L, "audit_log", "FAILED");
+        nowKeyed.setSyncKeyColumns(null);
+        nowKeyed.setLastError("源表没有可用同步键");
+        SyncTaskGroupItem stillKeyless = item(12L, "events", "FAILED");
+        stillKeyless.setSyncKeyColumns(null);
+        stillKeyless.setLastError("Kafka topic 创建失败：events");
+        items.add(nowKeyed);
+        items.add(stillKeyless);
+        sourceTables("audit_log", "events");
+        DataSourceMetadataVo noKey = metadata("id", "name");
+        noKey.getPrimaryKeys().clear();
+        when(metadataService.queryTableMetadata(eq(MYSQL_ID), anyString(), eq("events"))).thenReturn(noKey);
+        List<SyncTaskGroupItem> inserted = recordInserts();
+
+        assertTrue(service.updateByBo(bo("DATABASE", KAFKA_ID)));
+
+        assertEquals("PENDING", nowKeyed.getStatus());
+        assertEquals("", nowKeyed.getLastError());
+        assertEquals(11L, nowKeyed.getItemId());
+        assertEquals("id", nowKeyed.getSyncKeyColumns(), "the key the table has now");
+        assertTrue(nowKeyed.getSchemaSnapshot().contains("\"primaryKeys\":[\"id\"]"), "a fresh baseline");
+        verify(bridge).ensureTopicExists(kafka, "audit_log");
+        assertEquals("FAILED", stillKeyless.getStatus());
+        assertEquals("源表没有可用同步键", stillKeyless.getLastError(), "the current reason replaces the old one");
+        verify(itemMapper).updateById(nowKeyed);
+        verify(itemMapper).updateById(stillKeyless);
+        assertTrue(inserted.isEmpty());
+        assertTrue(group.getLastError().contains("1 张表校验或提交失败"), group.getLastError());
+    }
+
+    /** The items belong to the old endpoints: another source database (or source, or target) replaces them. */
+    @Test
+    void anEditThatChangesTheEndpointsReplacesTheTables() {
+        persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
+        items.add(item(11L, "customers", "STOPPED"));
+        when(metadataService.queryTables(MYSQL_ID, "archive_db")).thenReturn(List.of("customers", "orders_2019"));
+        List<SyncTaskGroupItem> inserted = recordInserts();
+        SyncTaskGroupBo bo = bo("DATABASE", POSTGRES_ID);
+        bo.setSourceDatabase("archive_db");
+
+        assertTrue(service.updateByBo(bo));
+
+        InOrder transaction = inOrder(transactionManager, ddlEventMapper, itemMapper);
+        transaction.verify(transactionManager).getTransaction(any());
+        transaction.verify(ddlEventMapper).deleteByGroupId(GROUP_ID);
+        transaction.verify(itemMapper).deleteByGroupId(GROUP_ID);
+        transaction.verify(itemMapper, times(2)).insert(any(SyncTaskGroupItem.class));
+        transaction.verify(transactionManager).commit(any());
+        assertEquals(List.of("customers", "orders_2019"), tables(inserted), "customers too: it is another database's table");
+        for (SyncTaskGroupItem item : inserted) {
+            assertNull(item.getItemId());
+            assertEquals("archive_db", item.getSourceDatabase());
+            assertEquals("public", item.getTargetSchema());
+        }
+        assertEquals(List.of(), remoteCallsInsideTransactions());
+    }
+
+    @Test
+    void anEditFillsOnlyTheRoomLeftUnderTheTableLimit() {
+        groupProperties.setMaxTables(2);
+        SyncTaskGroup group = persisted(group("STOPPED", "DATABASE", POSTGRES_ID));
+        items.add(item(11L, "customers", "STOPPED"));
+        sourceTables("customers", "orders", "invoices", "payments");
+        List<SyncTaskGroupItem> inserted = recordInserts();
+
+        assertTrue(service.updateByBo(bo("DATABASE", POSTGRES_ID)));
+
+        assertEquals(List.of("orders"), tables(inserted));
+        assertTrue(group.getLastError().contains("上限 2 张") && group.getLastError().contains("另有 2 张"), group.getLastError());
     }
 
     // ------------------------------------------------------------------ whole-database Kafka topics
@@ -791,6 +941,60 @@ class SyncTaskGroupServiceImplTest {
     }
 
     // ------------------------------------------------------------------ fixtures
+
+    private void createdGroupsGetTheirId() {
+        when(groupMapper.insert(any(SyncTaskGroup.class))).thenAnswer(invocation -> {
+            SyncTaskGroup created = invocation.getArgument(0);
+            created.setGroupId(GROUP_ID);
+            return 1;
+        });
+    }
+
+    private void sourceTables(String... tables) {
+        when(metadataService.queryTables(MYSQL_ID, "source_db")).thenReturn(List.of(tables));
+    }
+
+    /** Every item inserted from now on, in order. */
+    private List<SyncTaskGroupItem> recordInserts() {
+        List<SyncTaskGroupItem> inserted = new ArrayList<>();
+        when(itemMapper.insert(any(SyncTaskGroupItem.class))).thenAnswer(invocation -> {
+            inserted.add(invocation.getArgument(0));
+            return 1;
+        });
+        return inserted;
+    }
+
+    private static List<String> tables(List<SyncTaskGroupItem> items) {
+        return items.stream().map(SyncTaskGroupItem::getSourceTable).toList();
+    }
+
+    /**
+     * Every call on a mock that stands for a remote system - the customer's databases, Kafka, the
+     * engine - made between a transaction's begin and its commit / rollback. Mockito numbers the
+     * invocations of all mocks in one sequence, so the transaction manager's calls bracket the others.
+     */
+    private List<String> remoteCallsInsideTransactions() {
+        List<Invocation> boundaries = mockingDetails(transactionManager).getInvocations().stream()
+            .sorted(Comparator.comparingInt(Invocation::getSequenceNumber)).toList();
+        List<String> inside = new ArrayList<>();
+        for (Object remote : List.of(metadataService, bridge, restClient)) {
+            for (Invocation call : mockingDetails(remote).getInvocations()) {
+                if (insideTransaction(boundaries, call.getSequenceNumber())) inside.add(call.toString());
+            }
+        }
+        return inside;
+    }
+
+    private static boolean insideTransaction(List<Invocation> boundaries, int sequenceNumber) {
+        boolean open = false;
+        for (Invocation boundary : boundaries) {
+            if (boundary.getSequenceNumber() > sequenceNumber) break;
+            String name = boundary.getMethod().getName();
+            if ("getTransaction".equals(name)) open = true;
+            if ("commit".equals(name) || "rollback".equals(name)) open = false;
+        }
+        return open;
+    }
 
     private SyncTaskGroup persisted(SyncTaskGroup group) {
         when(groupMapper.selectById(GROUP_ID)).thenReturn(group);

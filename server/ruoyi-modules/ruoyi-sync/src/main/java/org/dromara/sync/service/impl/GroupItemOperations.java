@@ -81,7 +81,8 @@ class GroupItemOperations {
     /**
      * Null when a table of a whole-database group - picked by discovery, not by the operator - has
      * a usable sync key and a compatible target, otherwise the reason. Discovery inserts a table
-     * that fails this as FAILED; a whole-database Kafka start re-admits one that now passes.
+     * that fails this as FAILED; an edit of the group and a whole-database Kafka start re-admit one
+     * that now passes.
      */
     String validateDiscoveredItem(DataSource source, DataSource target, SyncTaskGroupItem item) {
         try {

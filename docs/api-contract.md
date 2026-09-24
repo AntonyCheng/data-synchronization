@@ -61,7 +61,7 @@
 
 多表首版限制：支持 MySQL -> PostgreSQL/MySQL/Kafka、`FULL_CDC`，每组最多 `sync.group.max-tables` 张表（默认 20，`GET /sync/group/limits` 返回 `{ maxTables }`，权限 `sync:group:list`；整库自动发现同样受此上限约束）；当前每张表独立 SeaTunnel job，Kafka 表项另有 raw topic -> 标准事件桥接，组级接口返回聚合结果，表项状态和错误是排查依据。任务组 `syncScope` 可为 `MULTI_TABLE` 或 `DATABASE`；整库组以 `sourceDatabase` 作为扫描范围，可选择 `autoDiscover` 周期扫描。单表任务支持 `FULL`、`INCREMENTAL` 和 `FULL_CDC` 三种模式，三种模式对 PostgreSQL、MySQL、Kafka 目标均可用。
 
-整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。
+整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。`PUT /group` 编辑整库组时，若源数据源、源库和目标数据源均未变化，则保留已有表项（`itemId`、目标 schema、指标历史不变），只补充新增表，并重新校验运行前就被拒的 `FAILED` 表项（通过则回到 `PENDING`）；任一端点变化则按新端点重建全部表项。源库不可达时保存被拒绝且不写入任何数据。详见 [multi-table.md](multi-table.md#整库任务组的保存先规划后落库)。
 
 MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POSTGRESQL`、`MYSQL`、`KAFKA`；单表 `syncMode` 为 `FULL`、`INCREMENTAL` 或 `FULL_CDC`，任务组首版为 `FULL_CDC`；`ddlPolicy` 默认 `FAIL`。`INCREMENTAL` 从提交作业后的最新 binlog 位点开始，不补齐此前历史，目标端必须已有可信基线；关系型 `FULL` 不执行 CDC，完成后进入 `FINISHED`；Kafka 纯 `FULL` 使用有界 JDBC 快照事件。Kafka topic 可在创建向导中选择已有 topic 或主动创建新 topic，平台创建默认 1 分区/1 副本且不覆盖已有 topic。任务表单使用数据源配置的默认数据库，数据库/表探查用于创建前确认和元数据提示；整库任务由表项模型承载。连接测试返回 `success`、`message`、`latencyMs`，MySQL 数据源另返回 `timeZone`（结构见下文“源端服务器时区”）；任务校验返回 `source`、`target`、`cdcPrecheck`、`targetCompatibility` 和综合 `valid`。
 
