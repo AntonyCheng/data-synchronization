@@ -70,13 +70,10 @@ public class DataConsistencyServiceImpl implements IDataConsistencyService {
         SyncTaskDataCheckRequest options = request == null ? new SyncTaskDataCheckRequest() : request;
         SyncTaskDataCheckResult result = check(source, target, source.getDatabaseName(), task.getSourceTable(), task.getTargetSchema(), task.getTargetTable(), task, options);
         result.setTaskId(taskId);
-        task.setLastCheckSourceRows(result.getSourceRows());
-        task.setLastCheckTargetRows(result.getTargetRows());
-        task.setLastCheckDifference(result.getDifference());
-        task.setLastCheckMatched(result.isSuccess() ? (result.isMatched() ? "1" : "0") : null);
-        task.setLastCheckTime(LocalDateTime.now());
-        task.setLastCheckMessage(result.getMessage());
-        syncTaskMapper.updateById(task);
+        // Only the check columns: the task row read above is minutes old by now (see recordCheck).
+        syncTaskMapper.recordCheck(taskId, result.getSourceRows(), result.getTargetRows(), result.getDifference(),
+            result.isSuccess() ? (result.isMatched() ? "1" : "0") : null, LocalDateTime.now(),
+            SyncText.truncateForColumn(result.getMessage()));
         return result;
     }
 

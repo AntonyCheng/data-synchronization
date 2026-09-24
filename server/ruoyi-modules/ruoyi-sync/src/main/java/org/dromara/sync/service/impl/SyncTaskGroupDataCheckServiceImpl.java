@@ -97,14 +97,11 @@ public class SyncTaskGroupDataCheckServiceImpl implements ISyncTaskGroupDataChec
         return result;
     }
 
+    /** Only the check columns: the item row read before the comparison is stale by now (see recordCheck). */
     private void persistCheck(SyncTaskGroupItem item, SyncTaskGroupDataCheckItemResult result) {
-        item.setLastCheckSourceRows(result.getSourceRows());
-        item.setLastCheckTargetRows(result.getTargetRows());
-        item.setLastCheckDifference(result.getDifference());
-        item.setLastCheckMatched(result.isSuccess() ? (result.isMatched() ? "1" : "0") : null);
-        item.setLastCheckTime(LocalDateTime.now());
-        item.setLastCheckMessage(SyncText.truncateForColumn(result.getMessage()));
-        itemMapper.updateById(item);
+        itemMapper.recordCheck(item.getItemId(), result.getSourceRows(), result.getTargetRows(), result.getDifference(),
+            result.isSuccess() ? (result.isMatched() ? "1" : "0") : null, LocalDateTime.now(),
+            SyncText.truncateForColumn(result.getMessage()));
     }
 
     private SyncTaskGroup requireGroup(Long groupId) {

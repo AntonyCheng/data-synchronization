@@ -20,10 +20,10 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.notNull;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -95,15 +95,13 @@ class SyncTaskGroupDataCheckServiceImplTest {
         assertEquals("public.invoices", failed.getTargetTable());
         assertEquals("数据核对失败：目标库连接超时", failed.getMessage());
 
-        assertEquals("1", matched.getLastCheckMatched());
-        assertEquals("0", mismatched.getLastCheckMatched());
-        assertEquals(3L, mismatched.getLastCheckDifference());
-        assertNull(unreachable.getLastCheckMatched(), "a failed check records no verdict");
-        assertEquals("数据核对失败：目标库连接超时", unreachable.getLastCheckMessage());
-        for (SyncTaskGroupItem item : items) {
-            assertNotNull(item.getLastCheckTime());
-            verify(itemMapper).updateById(item);
-        }
+        // Only the check columns are written - never the whole (by now stale) row.
+        verify(itemMapper).recordCheck(eq(matched.getItemId()), eq(10L), eq(10L), eq(0L), eq("1"), notNull(), anyString());
+        verify(itemMapper).recordCheck(eq(mismatched.getItemId()), eq(10L), eq(7L), eq(3L), eq("0"), notNull(), anyString());
+        // A failed check writes an explicit null verdict, clearing whatever the previous check concluded.
+        verify(itemMapper).recordCheck(eq(unreachable.getItemId()), any(), any(), any(), isNull(), notNull(),
+            eq("数据核对失败：目标库连接超时"));
+        verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
     }
 
     @Test
@@ -134,6 +132,7 @@ class SyncTaskGroupDataCheckServiceImplTest {
         assertTrue(result.getItems().isEmpty());
         verify(consistencyService, never()).check(any(), any(), any(), any(), any(), any());
         verify(itemMapper, never()).updateById(any(SyncTaskGroupItem.class));
+        verify(itemMapper, never()).recordCheck(any(), any(), any(), any(), any(), any(), any());
     }
 
     // ------------------------------------------------------------------ fixtures

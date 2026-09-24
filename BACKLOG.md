@@ -560,6 +560,14 @@ autoDiscover 轮询）拆为 `SyncTaskGroupDiscoveryServiceImpl`（仍在组锁�
 消费端的替代依据（快照整体先于增量、按 key 幂等、装载完成需带外判定），并更正 UPDATE 恒有前像、`sourceEventTime`
 为采集时间而非提交时间。新增 `KafkaTaskBridgeRawEventsTest`（实测 raw 事件驱动真实桥接 worker）。
 
+### 数据核对只写核对列（2026-09-24）
+
+单表与任务组的数据核对都在比对开始前读出整行，比对（`COUNT(*)` / 分段 KEY_RANGE）可能持续数分钟，结束后用
+`updateById` 整行写回——期间状态刷新写入的状态、错误与 checkpoint 被旧快照覆盖（例如已 FAILED 的表项被写回
+RUNNING）；且核对失败时把 `lastCheckMatched` 置空，而 `updateById` 跳过 null，上一次的「一致」结论原样保留。
+两个 mapper 新增 `recordCheck`，只显式写 `last_check_*` 列（含 null）。端到端 FULL 场景的 COUNT / KEY_RANGE 核对在
+真实库上走通新语句。
+
 ### 仍开放的待办（2026-09-24 收尾）
 
 - **源端时间处理（影响所有目标）**：MySQL-CDC 的 `server-time-zone` 写死为 Asia/Shanghai，源库不在东八区时
@@ -568,8 +576,6 @@ autoDiscover 轮询）拆为 `SyncTaskGroupDiscoveryServiceImpl`（仍在组锁�
 - **Kafka 真实快照信号与延迟**：评估 MySQL-CDC `format = compatible_debezium_json`——可保留 `op=r` 与源端提交时间，
   从而正确标 `SNAPSHOT`、让 `kafka_lag_seconds` 包含引擎读 binlog 的落后（现状在限速快照或暂停恢复回放时偏小）。
   代价：raw topic 编码变化、桥接需适配、现有 Kafka CDC 任务指纹变化需重新初始化。
-- **任务组数据核对不持组锁**：`checkData` 以读取时的整行 `updateById` 回写核对结果，长时间 `COUNT(*)` 期间并发刷新
-  写入的状态可能被覆盖。
 - **保存整库 Kafka 任务组时**，发现流程在数据库事务内调用 Kafka AdminClient（建 topic）。
 - **编辑整库任务组会按新 id 重建全部已发现表项**：整库模式没有逐表设置，丢失的只是表项 id 与指标历史；收益小于风险，暂缓。
 

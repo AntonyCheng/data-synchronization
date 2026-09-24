@@ -7,6 +7,7 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.vo.SyncTaskVo;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -60,5 +61,24 @@ public interface SyncTaskMapper extends BaseMapperPlus<SyncTask, SyncTaskVo> {
         return update(null, new LambdaUpdateWrapper<SyncTask>()
             .eq(SyncTask::getTaskId, taskId)
             .set(SyncTask::getOverwriteStageTable, null));
+    }
+
+    /**
+     * Writes the result of a data consistency check - only the {@code last_check_*} columns, and
+     * explicitly (a failed check clears the previous verdict: {@code updateById} would skip the
+     * null and keep showing the old "matched"). A check can run for minutes, and the row it read
+     * at the start is stale by then: a full-row {@code updateById} wrote back the status, error and
+     * checkpoint the status refresh had replaced in the meantime (a FAILED table reverting to RUNNING).
+     */
+    default int recordCheck(Long id, Long sourceRows, Long targetRows, Long difference, String matched,
+                            LocalDateTime checkedAt, String message) {
+        return update(null, new LambdaUpdateWrapper<SyncTask>()
+            .eq(SyncTask::getTaskId, id)
+            .set(SyncTask::getLastCheckSourceRows, sourceRows)
+            .set(SyncTask::getLastCheckTargetRows, targetRows)
+            .set(SyncTask::getLastCheckDifference, difference)
+            .set(SyncTask::getLastCheckMatched, matched)
+            .set(SyncTask::getLastCheckTime, checkedAt)
+            .set(SyncTask::getLastCheckMessage, message));
     }
 }

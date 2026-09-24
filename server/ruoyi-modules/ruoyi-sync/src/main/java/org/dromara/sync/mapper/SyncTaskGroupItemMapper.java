@@ -7,6 +7,7 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTaskGroupItem;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemVo;
 
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
 
@@ -71,5 +72,24 @@ public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupIte
 
     default int deleteByGroupId(Long groupId) {
         return delete(new LambdaQueryWrapper<SyncTaskGroupItem>().eq(SyncTaskGroupItem::getGroupId, groupId));
+    }
+
+    /**
+     * Writes the result of a data consistency check - only the {@code last_check_*} columns, and
+     * explicitly (a failed check clears the previous verdict: {@code updateById} would skip the
+     * null and keep showing the old "matched"). A check can run for minutes, and the row it read
+     * at the start is stale by then: a full-row {@code updateById} wrote back the status, error and
+     * checkpoint the status refresh had replaced in the meantime (a FAILED table reverting to RUNNING).
+     */
+    default int recordCheck(Long id, Long sourceRows, Long targetRows, Long difference, String matched,
+                            LocalDateTime checkedAt, String message) {
+        return update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
+            .eq(SyncTaskGroupItem::getItemId, id)
+            .set(SyncTaskGroupItem::getLastCheckSourceRows, sourceRows)
+            .set(SyncTaskGroupItem::getLastCheckTargetRows, targetRows)
+            .set(SyncTaskGroupItem::getLastCheckDifference, difference)
+            .set(SyncTaskGroupItem::getLastCheckMatched, matched)
+            .set(SyncTaskGroupItem::getLastCheckTime, checkedAt)
+            .set(SyncTaskGroupItem::getLastCheckMessage, message));
     }
 }
