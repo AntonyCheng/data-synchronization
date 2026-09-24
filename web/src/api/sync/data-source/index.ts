@@ -44,6 +44,11 @@ export function testDataSource(id: string | number, data?: DataSourceForm) {
   return request<R<ConnectionTestResult>>({ url: `/sync/data-source/${id}/test`, method: 'post', data });
 }
 
+/** Tests the fields of a data source that is not saved yet (the add form). */
+export function testUnsavedDataSource(data: DataSourceForm) {
+  return request<R<ConnectionTestResult>>({ url: '/sync/data-source/test', method: 'post', data });
+}
+
 export function listDataSourceDatabases(id: string | number) {
   return request<R<string[]>>({ url: `/sync/data-source/${id}/databases`, method: 'get' });
 }

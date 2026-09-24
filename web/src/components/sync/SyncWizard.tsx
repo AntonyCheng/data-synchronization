@@ -85,6 +85,9 @@ export interface SourceProbeResultProps {
 /** The probe's verdict under the source picker: connection, binlog / CDC precheck, database. */
 export function SourceProbeResult({ probe, databaseNote }: SourceProbeResultProps) {
   const { connectionTest, cdcPrecheck, sourceDatabase, sourceDatabases } = probe;
+  // An optional item (e.g. the source time zone) can fail without failing the precheck; the
+  // message names it, and the banner must not look like a clean pass.
+  const precheckWarned = Boolean(cdcPrecheck?.checks?.some(check => !check.required && !check.passed));
   return (
     <>
       {connectionTest && (
@@ -98,9 +101,15 @@ export function SourceProbeResult({ probe, databaseNote }: SourceProbeResultProp
       )}
       {cdcPrecheck && (
         <Alert
-          type={cdcPrecheck.passed ? 'success' : 'warning'}
+          type={cdcPrecheck.passed && !precheckWarned ? 'success' : 'warning'}
           showIcon
-          title={cdcPrecheck.passed ? 'CDC 前置检查通过' : 'CDC 前置检查未通过'}
+          title={
+            !cdcPrecheck.passed
+              ? 'CDC 前置检查未通过'
+              : precheckWarned
+                ? 'CDC 前置检查通过，但有需要注意的提示'
+                : 'CDC 前置检查通过'
+          }
           description={cdcPrecheck.message}
           style={{ marginBottom: 12 }}
         />

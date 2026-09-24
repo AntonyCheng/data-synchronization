@@ -551,7 +551,7 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                       placeholder="例如 2026-08-27T12:30:00"
                       fieldProps={{ type: 'datetime-local' }}
                       rules={[{ required: true, message: '请选择启动时间' }]}
-                      extra="按源端 Asia/Shanghai 时区换算为 SeaTunnel 毫秒时间戳。"
+                      extra="按源数据源的服务器时区（未设置时为 Asia/Shanghai）换算为 SeaTunnel 毫秒时间戳。"
                     />
                   )}
                   {getFieldValue('incrementalStartupMode') === 'SPECIFIC' && (
