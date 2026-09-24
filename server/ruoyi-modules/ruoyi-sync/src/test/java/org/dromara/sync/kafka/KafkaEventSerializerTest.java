@@ -155,9 +155,10 @@ class KafkaEventSerializerTest {
     }
 
     /**
-     * A native-MySQL Debezium "u" event reaches the serializer without a before image
-     * (the normalizer only carries before for DELETE and the merged GoldenDB path).
-     * Each format degrades to the shape its consumers can still read.
+     * A Debezium "u" event reaches the serializer without a before image (the normalizer
+     * only carries before for DELETE and the merged d + c pair). SeaTunnel's Kafka sink never
+     * writes "u", so this is the defensive path. Each format degrades to the shape its
+     * consumers can still read.
      */
     @Test
     void updateWithoutBeforeImageDegradesPerFormat() {

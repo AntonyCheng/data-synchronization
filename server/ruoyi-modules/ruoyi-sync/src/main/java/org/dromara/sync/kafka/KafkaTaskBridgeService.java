@@ -269,8 +269,8 @@ public class KafkaTaskBridgeService {
                 try {
                     // One partition, deliberately. The raw topic is an internal buffer read by
                     // exactly one single-threaded bridge worker, so extra partitions buy no
-                    // throughput - they only cost ordering. A GoldenDB UPDATE arrives as a
-                    // DELETE + INSERT pair (see KafkaEventNormalizer); on a multi-partition
+                    // throughput - they only cost ordering. Every UPDATE arrives as a DELETE +
+                    // CREATE pair (SeaTunnel's DEBEZIUM_JSON sink splits it); on a multi-partition
                     // topic another row's event can interleave between the two halves and the
                     // normalizer then can't merge them back into an op=UPDATE. A single
                     // partition keeps the stream in binlog order so the pair stays adjacent.
@@ -282,7 +282,7 @@ public class KafkaTaskBridgeService {
                 var rawDescription = admin.describeTopics(List.of(rawTopic)).allTopicNames()
                     .get(10, TimeUnit.SECONDS).get(rawTopic);
                 if (rawDescription != null && rawDescription.partitions().size() > 1) {
-                    log.warn("Raw bridge topic {} has {} partitions; GoldenDB UPDATE merge needs a single "
+                    log.warn("Raw bridge topic {} has {} partitions; the UPDATE merge needs a single "
                             + "partition. Delete the topic while the task is stopped and restart to recreate it.",
                         rawTopic, rawDescription.partitions().size());
                 }
@@ -411,6 +411,12 @@ public class KafkaTaskBridgeService {
                 else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
                 return;
             }
+            // MySQL-CDC (FULL_CDC / INCREMENTAL). SeaTunnel 2.3.13 maps a Debezium READ (initial
+            // load) and CREATE (binlog insert) to the same RowKind.INSERT, and its DEBEZIUM_JSON
+            // sink writes only op=c / op=d, never r. An initial-load row is identical to a binlog
+            // insert field by field (ts_ms is the capture time of both, no headers), so it is
+            // published as CDC. op=r is honoured only if an upstream ever sends it. See
+            // docs/kafka-event-formats.md for what consumers rely on instead.
             int snapshotCount = 0;
             while (snapshotCount < rawEvents.size()
                 && "r".equals(rawEvents.get(snapshotCount).path("op").asText())) snapshotCount++;

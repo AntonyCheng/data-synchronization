@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Scenario 4: single-table FULL_CDC into Kafka. SeaTunnel writes a private raw Debezium topic;
  * the platform bridge publishes the normalized ENVELOPE events (docs/kafka-event-formats.md) to
  * the operator's topic, keyed by the sync key. Consumes the real output topic and pins the
- * snapshot INSERTs and the CDC INSERT / UPDATE (with before image) / DELETE events.
+ * initial-load INSERTs (phase CDC) and the CDC INSERT / UPDATE (with before image) / DELETE events.
  */
 @Tag("e2e")
 class KafkaTaskE2eTest extends E2eSupport {
@@ -94,11 +94,10 @@ class KafkaTaskE2eTest extends E2eSupport {
                 Set.of(1L, 2L, 3L).stream().allMatch(id -> events.stream().anyMatch(e -> e.is("INSERT", id))), taskId);
             for (long id = 1; id <= 3; id++) {
                 Event event = first(snapshot, "INSERT", id);
-                // Not pinned to SNAPSHOT: SeaTunnel's DEBEZIUM_JSON sink writes MySQL-CDC snapshot
-                // rows as op=c (never op=r), so the bridge labels them CDC - the same thing
-                // docs/kafka-event-formats.md describes as a GoldenDB-only quirk. Open question
-                // for the product owner; only a valid phase is required here.
-                assertTrue(Set.of("SNAPSHOT", "CDC").contains(text(event.value(), "phase")), "snapshot event phase: " + event);
+                // CDC by contract (docs/kafka-event-formats.md, "phase 的真实含义"): SeaTunnel writes
+                // a MySQL-CDC initial-load row as op=c, identical field for field to a binlog
+                // INSERT, so the platform has no signal to label it SNAPSHOT and does not guess.
+                assertEquals("CDC", text(event.value(), "phase"), "initial-load event phase: " + event);
                 assertEquals(defaultName(id), text(event.value().path("data"), "name"), "snapshot row data: " + event);
                 assertEquals("source_db", text(event.value().path("source"), "database"));
                 assertEquals(table, text(event.value().path("source"), "table"));
@@ -128,6 +127,8 @@ class KafkaTaskE2eTest extends E2eSupport {
             assertEquals("row-2", text(delete.value().path("data"), "name"), "DELETE carries the deleted row: " + delete);
             assertTrue(all.stream().noneMatch(e -> e.is("INSERT", 2) && e.offset() > delete.offset()),
                 "nothing may resurrect the deleted row");
+            assertTrue(all.stream().noneMatch(e -> "SNAPSHOT".equals(text(e.value(), "phase"))),
+                "a FULL_CDC task never publishes SNAPSHOT: " + all);
             log("CDC events consumed");
         }
 
