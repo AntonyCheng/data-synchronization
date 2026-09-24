@@ -359,6 +359,15 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             throw new ServiceException("只有需重新初始化、失败或已停止任务可以重新初始化");
         }
         prepareResourceProtection(task);
+        // Every refusal is decided before the old job is destroyed: a FAILED task can still be
+        // resumed from its savepoint, and a reinitialize that is then refused (target no longer
+        // compatible, source unreachable) used to throw that away and leave the task FAILED for
+        // a reason that had nothing to do with its job. A refusal now changes nothing.
+        var validation = syncTaskService.validate(taskId);
+        if (!validation.isValid()) {
+            throw new ServiceException("重新初始化前校验未通过：" + validation.getMessage());
+        }
+        SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
         boolean kafka = isKafkaTask(task);
         try {
             if (StringUtils.isNotBlank(task.getEngineJobId())) {
@@ -368,11 +377,6 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
                     // The old engine job may already be gone; clearing its recovery state is still valid.
                 }
             }
-            var validation = syncTaskService.validate(taskId);
-            if (!validation.isValid()) {
-                throw new ServiceException("重新初始化前校验未通过：" + validation.getMessage());
-            }
-            SeaTunnelJobConfigGenerator.GeneratedConfig generated = generate(task);
             prepareTarget(task, generated);
             if (kafka) startBridge(task);
             SeaTunnelRestClient.SubmitResult submitted = restClient.submit(generated.jobName(), generated.config(), null, false);

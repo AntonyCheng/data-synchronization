@@ -377,6 +377,22 @@ class SeaTunnelJobServiceImplTest {
     }
 
     @Test
+    void aRefusedReinitializeLeavesTheOldJobAndTheTaskAsTheyWere() {
+        SyncTask task = persisted(task("FAILED", POSTGRES_ID));
+        task.setLastCheckpointId("7");
+        when(syncTaskService.validate(TASK_ID)).thenReturn(validation(false));
+
+        assertTrue(assertThrows(ServiceException.class, () -> service.reinitialize(TASK_ID)).getMessage().contains("校验未通过"));
+
+        // A FAILED task can still resume from job-1's savepoint; a refusal must not destroy it.
+        verify(restClient, never()).stop(anyString(), anyBoolean(), anyBoolean());
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+        assertEquals("FAILED", task.getStatus());
+        assertEquals("job-1", task.getEngineJobId());
+        assertEquals("7", task.getLastCheckpointId());
+    }
+
+    @Test
     void reinitializeHasNoMeaningForIncrementalTasks() {
         SyncTask task = persisted(task("STOPPED", POSTGRES_ID));
         task.setSyncMode("INCREMENTAL");
