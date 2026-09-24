@@ -3,6 +3,7 @@ package org.dromara.sync.mapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
+import org.dromara.sync.constant.SyncScope;
 import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
@@ -56,7 +57,7 @@ public interface SyncTaskGroupMapper extends BaseMapperPlus<SyncTaskGroup, SyncT
     /** Live whole-database groups that opted into automatic new-table discovery. */
     default List<SyncTaskGroup> selectLiveAutoDiscoverDatabaseGroups() {
         return selectList(new LambdaQueryWrapper<SyncTaskGroup>()
-            .eq(SyncTaskGroup::getSyncScope, "DATABASE")
+            .eq(SyncTaskGroup::getSyncScope, SyncScope.DATABASE)
             .eq(SyncTaskGroup::getAutoDiscover, "1")
             .in(SyncTaskGroup::getStatus, SyncStatus.RUNNING, SyncStatus.DEGRADED));
     }

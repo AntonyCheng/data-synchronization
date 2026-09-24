@@ -4,13 +4,16 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.sync.domain.bo.SyncTaskGroupBo;
 import org.dromara.sync.domain.vo.SyncTaskGroupConfigPreview;
-import org.dromara.sync.domain.vo.SyncTaskGroupDataCheckResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupValidationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 
-/** Multi-table / whole-database task group service. */
+/**
+ * Multi-table / whole-database task group service: CRUD, validation / preview and the lifecycle.
+ * DDL drift checks, whole-database table discovery and the row-count check are their own services
+ * ({@link ISyncTaskGroupDdlService}, {@link ISyncTaskGroupDiscoveryService}, {@link ISyncTaskGroupDataCheckService}).
+ */
 public interface ISyncTaskGroupService {
 
     PageResult<SyncTaskGroupVo> queryPageList(SyncTaskGroupBo bo, PageQuery pageQuery);
@@ -28,11 +31,6 @@ public interface ISyncTaskGroupService {
     SyncTaskGroupConfigPreview previewConfig(Long groupId);
 
     SyncTaskGroupOperationResult start(Long groupId);
-
-    /** Discover tables of a database-scope group and isolate new table failures. */
-    SyncTaskGroupOperationResult discover(Long groupId);
-
-    SyncTaskGroupDataCheckResult checkData(Long groupId);
 
     /**
      * Resubmit one table item from its own savepoint (e.g. after a DDL isolation has been

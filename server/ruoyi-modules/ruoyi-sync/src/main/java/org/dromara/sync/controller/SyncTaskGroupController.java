@@ -19,7 +19,9 @@ import org.dromara.sync.domain.vo.SyncTaskGroupVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.service.ISyncMetricsService;
+import org.dromara.sync.service.ISyncTaskGroupDataCheckService;
 import org.dromara.sync.service.ISyncTaskGroupDdlService;
+import org.dromara.sync.service.ISyncTaskGroupDiscoveryService;
 import org.dromara.sync.service.ISyncTaskGroupService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -42,6 +44,8 @@ public class SyncTaskGroupController extends BaseController {
 
     private final ISyncTaskGroupService groupService;
     private final ISyncTaskGroupDdlService ddlService;
+    private final ISyncTaskGroupDiscoveryService discoveryService;
+    private final ISyncTaskGroupDataCheckService dataCheckService;
     private final ISyncMetricsService metricsService;
 
     @SaCheckPermission("sync:group:list")
@@ -105,7 +109,7 @@ public class SyncTaskGroupController extends BaseController {
     @Log(title = "扫描同步任务组新表", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/discover")
     public R<SyncTaskGroupOperationResult> discover(@PathVariable Long groupId) {
-        return R.ok(groupService.discover(groupId));
+        return R.ok(discoveryService.discover(groupId));
     }
 
     @SaCheckPermission("sync:group:ddl-check")
@@ -119,7 +123,7 @@ public class SyncTaskGroupController extends BaseController {
     @Log(title = "同步任务组数据核对", businessType = BusinessType.OTHER)
     @PostMapping("/{groupId}/check")
     public R<SyncTaskGroupDataCheckResult> checkData(@PathVariable Long groupId) {
-        return R.ok(groupService.checkData(groupId));
+        return R.ok(dataCheckService.checkData(groupId));
     }
 
     @SaCheckPermission("sync:group:resume")
