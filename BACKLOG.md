@@ -600,9 +600,25 @@ DDL 事件与状态）只补新表；运行前就被拒的 `FAILED` 表项按发
 后才失败的表仍交给「重新初始化该表」，无法同步的表（无可用键）不再为它建 topic。**验证**：单测 218 → 225；真实后端上新建
 整库组为 v1、改限速后 v2 且 6 个表项 id 全部保留、改目标后按新端点重建；合并后完整端到端回归全绿。
 
-### 仍开放的待办（2026-09-24 收尾）
+### Kafka CDC raw topic 改用 Debezium 原生事件（2026-09-25，子代理 + 收尾）
 
-- **Kafka 真实快照信号与延迟**：评估 MySQL-CDC `format = compatible_debezium_json`——可保留 `op=r` 与源端提交时间，
-  从而正确标 `SNAPSHOT`、让 `kafka_lag_seconds` 包含引擎读 binlog 的落后（现状在限速快照或暂停恢复回放时偏小）。
-  代价：raw topic 编码变化、桥接需适配、现有 Kafka CDC 任务指纹变化需重新初始化。
+MySQL-CDC 源 `format = "compatible_debezium_json"`（value schema 开、`FLOAT` / `TINYINT` 补源类型）+ Kafka sink
+`COMPATIBLE_DEBEZIUM_JSON`：初始装载保留 `op=r`，发布为 `phase=SNAPSHOT`；`sourceEventTime` 取 binlog 事件时间（整秒），
+`kafka_lag_seconds` 因此包含引擎读 binlog 的落后；UPDATE 为一条 `op=u`。新增 `KafkaRawRecordReader` 把 Debezium 编码换算回
+SeaTunnel 行格式时期发布的值（含 Java 8 `Float.toString` 的 `JavaEightFloats`，全部 2^32 位模式比对一致），同时读旧格式记录；
+去掉桥接的跨阶段顺序校验（重启 / 重新初始化后新一轮 `op=r` 接在旧变更之后）。**保真门槛**：本地栈同表同 binlog 并跑新旧
+两套配置，五种输出格式逐条逐字相同（205 条消息、4578 个非空值），录制夹具由 `KafkaRawFormatFidelityTest` 回归。**代价**：
+所有 Kafka CDC 任务指纹变化，暂停后恢复被拒、需重新初始化；raw 记录大 10～15 倍，宽表更早触到字节限速（文档 §9）。
 
+收尾审查时发现并修复一个既有问题：MySQL-CDC 没有列投影，Kafka CDC 任务的变更事件一直发布整行，用户排除的字段照样进了
+目标 topic（`FULL` 模式不受影响）；现在桥接按保存的字段列表裁剪 before / after，raw topic 仍是整行，文档写明其访问控制。
+**验证**：单测 225 → 241；真实栈完整端到端回归全绿（`KafkaTaskE2eTest` 按新契约断言 `SNAPSHOT` 与整秒事件时间）；GoldenDB 与
+本地 MySQL 同表同语句并跑 `FULL_CDC`：快照 `SNAPSHOT`、GoldenDB 的 DELETE + INSERT 合并为带前像的 `UPDATE`、改主键拆成
+DELETE + INSERT、未选字段不发布、保存点暂停恢复后补发，列类型相同时 14 条事件逐字相同。实测记录：GoldenDB 的 Oracle
+兼容模式把 `FLOAT` 建成 `double`、`DATE` 建成 `datetime`；GoldenDB 测试节点时钟慢约 16 分钟，延迟指标相应虚高（需厂商校时）。
+
+### 仍开放的待办（2026-09-25）
+
+- **raw topic 生命周期**：平台从不删除 `__ds_raw_{taskId}_v{n}`——任务删除、配置版本变更、任务组表项删除 / 重建后旧 raw
+  topic 一直留在客户的 Kafka 集群上（数据按 broker 保留期过期，topic 本身不删），且其中是整行（含未选字段）。方案：删除任务 /
+  表项时、以及确认新版本作业已接管后，删除不再有 owner 的 raw topic；需先确认桥接位点已提交完、无 worker 仍在读。

@@ -7,7 +7,7 @@
 - 阶段：`SNAPSHOT` / `CDC` / `MIXED`，由同步模式和引擎状态推导（`EngineJobStates.phaseOf`）：`FULL` 恒为 `SNAPSHOT`，`INCREMENTAL` 恒为 `CDC`；`FULL_CDC` 在引擎启动态（INITIALIZING/CREATED/PENDING/STARTING）为 `SNAPSHOT`，进入 RUNNING 后为 `MIXED`——Zeta 不暴露快照完成信号，平台不假装知道边界。
 - 源端已读取、目标端已提交：行数和字节数；源端和目标端吞吐：引擎自己的 QPS。
 - 积压：源端已读取 − 目标端已提交（不为负），是关系型目标唯一可得的"落后程度"指标。
-- 端到端延迟：仅 Kafka 目标可得，由平台桥接按"`sourceEventTime` → broker ack"计算；关系型目标显示为空，不以请求时间冒充延迟。CDC 任务的 binlog 变更，`sourceEventTime` 是源库写 binlog 事件的时间（精确到秒），所以延迟包含引擎读 binlog 的落后：限速快照之后或暂停恢复回放积压时，指标如实变大。秒级精度使指标可能多出不到 1 秒。初始装载行取快照读取时刻，此时的延迟只反映桥接与 broker。升级前启动、尚未重新初始化的 CDC 作业仍写旧格式，事件时间是引擎采集时刻，其延迟不含引擎的落后（见 `kafka-event-formats.md` §2“事件时间”、§9）。
+- 端到端延迟：仅 Kafka 目标可得，由平台桥接按"`sourceEventTime` → broker ack"计算；关系型目标显示为空，不以请求时间冒充延迟。CDC 任务的 binlog 变更，`sourceEventTime` 是源库写 binlog 事件的时间（精确到秒），所以延迟包含引擎读 binlog 的落后：限速快照之后或暂停恢复回放积压时，指标如实变大。秒级精度使指标可能多出不到 1 秒。事件时间来自源库的时钟、ack 时间来自平台主机的时钟，两者的偏差直接计入延迟（源库时钟快于平台时计为 0）：实测 GoldenDB 测试节点的时钟慢约 16 分钟，其 CDC 任务的延迟因此恒多约 16 分钟。源库与平台主机应做 NTP 同步。初始装载行取快照读取时刻，此时的延迟只反映桥接与 broker。升级前启动、尚未重新初始化的 CDC 作业仍写旧格式，事件时间是引擎采集时刻，其延迟不含引擎的落后（见 `kafka-event-formats.md` §2“事件时间”、§9）。
 
 **Zeta 2.3.13 的两个事实**：`job-info.metrics` 把所有数值序列化成 JSON 字符串（`"SourceReceivedCount":"50"`），投影层同时接受字符串与数值；它不返回任何事件时间戳，因此关系型目标无法计算时间型 CDC 延迟。
 
