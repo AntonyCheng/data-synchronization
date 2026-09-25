@@ -617,8 +617,30 @@ SeaTunnel 行格式时期发布的值（含 Java 8 `Float.toString` 的 `JavaEig
 DELETE + INSERT、未选字段不发布、保存点暂停恢复后补发，列类型相同时 14 条事件逐字相同。实测记录：GoldenDB 的 Oracle
 兼容模式把 `FLOAT` 建成 `double`、`DATE` 建成 `datetime`；GoldenDB 测试节点时钟慢约 16 分钟，延迟指标相应虚高（需厂商校时）。
 
+### raw topic 生命周期，及排查中发现的两个任务组缺陷（2026-09-25，子代理 + 收尾）
+
+**raw topic 清理**：平台创建的每个 `__ds_raw_*` 在桥接启动时登记到 `ds_kafka_raw_topic`（migration 024；启动时已存在的也登记，
+升级前的 raw topic 在其 owner 下次启动桥接时被纳入）。新后台 pass `KafkaRawTopicJanitor`（默认每 5 分钟，Redisson 锁保证单实例
+执行）判断每个登记的 topic 是否仍被使用——owner 存在、仍指向该 Kafka 数据源、按当前版本仍是这个名字；不再使用先标记退役，
+满 `sync.kafka-bridge.raw-topic-retire-grace`（10 分钟）后删除；owner 已删除或改投其他 Kafka 数据源时，一并删除该集群上的
+`ds-task-{id}-bridge` consumer group。删除后登记再观察一个宽限期，被残留客户端重建的 topic 会再删一次；桥接 consumer 设
+`allow.auto.create.topics=false`。**只删登记过的 topic**，同一集群上另一套环境的同名前缀 topic 不受影响。调度池 9 → 10。
+
+排查“版本何时变化”时发现两个既有缺陷，先于清理功能修复（清理的存活判断依赖版本只随编辑变化）：
+
+- **任务组表项读错源库**（4eb7fc0）：整库组可选数据源默认库以外的源库，发现与元数据读取也按该库，但生成作业（MySQL-CDC 库过滤与
+  表名、JDBC 连接、主键 / 字段读取、FULL 预建目标的 `SHOW CREATE TABLE`、Kafka 桥接快照行）和目标兼容性检查一律用默认库：
+  默认库没有同名表时启动失败，有同名表时静默同步了错误的表。改为表项的所有引擎环节走 `SyncTaskGroupConfigGenerator.itemSource`
+  （库名指向表项的数据源副本；默认库的表项配置与指纹逐字不变）。
+- **运行中的发现递增组版本**（d160638）：组版本是 Kafka 表项 raw topic 名与配置指纹的一部分，运行中发现新表会递增它——后端重启后
+  桥接改读新名字的空 topic、数据静默停发，暂停后恢复被拒。真实栈复现（修复前）：发现一张表后 v1→v2，暂停再恢复，原有表与新表均
+  `FAILED` 要求重新初始化、暂停期间的变更未送达；修复后版本保持 v1，两表恢复，变更送达。
+
+**验证**：单测 241 → 261；真实栈——发现修复前后同一脚本对照；非默认库整库组 FULL→MySQL（DDL 克隆、行数核对 3=3，默认库同名诱饵表
+未被同步）、FULL_CDC→PostgreSQL、FULL_CDC→Kafka；清理（15 秒间隔 / 45 秒宽限期）：编辑后 v1 删除而 v2、consumer group、CDC 不受
+影响，删除任务后 v2 与 group 删除，删除整库组后表项 topic 与 group 删除，未登记的 `__ds_raw_*` 保留；两轮完整端到端回归全绿。
+
 ### 仍开放的待办（2026-09-25）
 
-- **raw topic 生命周期**：平台从不删除 `__ds_raw_{taskId}_v{n}`——任务删除、配置版本变更、任务组表项删除 / 重建后旧 raw
-  topic 一直留在客户的 Kafka 集群上（数据按 broker 保留期过期，topic 本身不删），且其中是整行（含未选字段）。方案：删除任务 /
-  表项时、以及确认新版本作业已接管后，删除不再有 owner 的 raw topic；需先确认桥接位点已提交完、无 worker 仍在读。
+无。已知的外部事项：GoldenDB 测试节点时钟慢约 16 分钟（需厂商校时）；升级前已删除的 owner 留下的 raw topic 不在登记表中，
+不会被自动清理（需要时手工删除 `__ds_raw_{已不存在的 id}_v*`）。
