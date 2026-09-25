@@ -134,7 +134,8 @@ public class KafkaTaskBridgeService {
         List<String> keyFields = SyncColumnSelectionValidator.parseColumns(task.getSyncKeyColumns());
         if (keyFields.isEmpty()) throw new ServiceException("Kafka 任务必须配置可靠同步键");
         // Persisted at save time as the fully expanded, real-cased column list; used to
-        // undo the Oracle-compat UPPER CASE folding a GoldenDB JDBC snapshot applies.
+        // undo the Oracle-compat UPPER CASE folding a GoldenDB JDBC snapshot applies, and
+        // to cut CDC records (always the whole row) down to the selection.
         List<String> sourceColumns = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
         String sourceDatabase = source == null ? null : source.getDatabaseName();
         ZoneId sourceZone = sourceZone(source);
@@ -443,7 +444,7 @@ public class KafkaTaskBridgeService {
             int snapshotCount = 0;
             while (snapshotCount < rawEvents.size()
                 && "r".equals(rawEvents.get(snapshotCount).path("op").asText())) snapshotCount++;
-            List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalize(rawEvents, snapshotCount, keyFields);
+            List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalize(rawEvents, snapshotCount, keyFields, sourceColumns);
             if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat);
             else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
         }

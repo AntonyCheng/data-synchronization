@@ -98,6 +98,28 @@ class KafkaEventNormalizerTest {
     }
 
     @Test
+    void publishesOnlyTheSelectedColumnsOfAChangeRecord() {
+        // MySQL-CDC always carries the whole row; an operator who left out `secret` must not see it in Kafka.
+        List<KafkaEventNormalizer.NormalizedEvent> normalized = normalizer.normalize(List.of(
+                event("r", null, "{\"id\":1,\"Name\":\"A\",\"secret\":\"s1\"}", 1000),
+                event("u", "{\"id\":1,\"Name\":\"A\",\"secret\":\"s1\"}", "{\"id\":1,\"Name\":\"B\",\"secret\":\"s2\"}", 2000),
+                event("d", "{\"id\":1,\"Name\":\"B\",\"secret\":\"s2\"}", null, 3000),
+                event("c", null, "{\"id\":1,\"Name\":\"C\",\"secret\":\"s3\"}", 3000),
+                event("u", "{\"id\":1,\"Name\":\"C\",\"secret\":\"s3\"}", "{\"id\":2,\"Name\":\"C\",\"secret\":\"s3\"}", 4000),
+                event("d", "{\"id\":2,\"Name\":\"C\",\"secret\":\"s3\"}", null, 5000)),
+            1, List.of("id"), List.of("ID", "name"));
+
+        assertEquals(List.of("INSERT", "UPDATE", "UPDATE", "DELETE", "INSERT", "DELETE"),
+            normalized.stream().map(KafkaEventNormalizer.NormalizedEvent::op).toList());
+        for (KafkaEventNormalizer.NormalizedEvent event : normalized) {
+            assertEquals("{\"id\":" + event.key().path("id").asInt() + ",\"Name\":\"" + event.data().path("Name").asString() + "\"}",
+                event.data().toString(), "data keeps the selected columns, matched case-insensitively, in row order");
+            assertTrue(event.before() == null || !event.before().has("secret"), "before image: " + event.before());
+        }
+        assertEquals("{\"id\":1,\"Name\":\"A\"}", normalized.get(1).before().toString());
+    }
+
+    @Test
     void preservesCompositeKeyInConfiguredOrder() {
         JsonNode raw = event("c", null, "{\"tenant_id\":10,\"order_no\":1001,\"amount\":88.8}", 1000);
         KafkaEventNormalizer.NormalizedEvent normalized = normalizer.normalize(List.of(raw), 1, List.of("tenant_id", "order_no")).getFirst();

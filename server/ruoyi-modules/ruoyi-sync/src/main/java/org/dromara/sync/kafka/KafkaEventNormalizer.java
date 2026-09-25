@@ -8,8 +8,10 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Converts raw change events into the PRD Kafka event envelope. The input is what
@@ -27,10 +29,23 @@ public class KafkaEventNormalizer {
         this.jsonMapper = jsonMapper;
     }
 
+    /** {@link #normalize(List, int, List, List)} publishing every column of the source rows. */
     public List<NormalizedEvent> normalize(List<JsonNode> rawEvents, int snapshotCount, List<String> keyFields) {
-        if (rawEvents == null || rawEvents.isEmpty()) throw new ServiceException("Kafka 原始事件不能为空");
-        if (snapshotCount < 0 || snapshotCount > rawEvents.size()) throw new ServiceException("Kafka 快照事件数量无效");
+        return normalize(rawEvents, snapshotCount, keyFields, List.of());
+    }
+
+    /**
+     * {@code selectedColumns} is the task's column selection (empty = every column). MySQL-CDC
+     * has no column projection of its own, so a change record always carries the whole row;
+     * the before / after images are cut down to the selection here, before anything is published.
+     */
+    public List<NormalizedEvent> normalize(List<JsonNode> changeEvents, int snapshotCount, List<String> keyFields,
+                                           List<String> selectedColumns) {
+        if (changeEvents == null || changeEvents.isEmpty()) throw new ServiceException("Kafka 原始事件不能为空");
+        if (snapshotCount < 0 || snapshotCount > changeEvents.size()) throw new ServiceException("Kafka 快照事件数量无效");
         if (keyFields == null || keyFields.isEmpty()) throw new ServiceException("Kafka 必须配置可靠同步键");
+        List<JsonNode> rawEvents = selectedColumns == null || selectedColumns.isEmpty()
+            ? changeEvents : project(changeEvents, selectedColumns);
         List<NormalizedEvent> result = new ArrayList<>();
         for (int index = 0; index < rawEvents.size(); index++) {
             JsonNode current = rawEvents.get(index);
@@ -135,6 +150,32 @@ public class KafkaEventNormalizer {
         // Only substitute when every field was accounted for; otherwise keep the
         // original row so an unexpected shape never silently drops columns.
         return remapped && rebuilt.size() == row.size() ? rebuilt : row;
+    }
+
+    /** Copies of the events with {@code before} / {@code after} limited to the selected columns, in row order. */
+    private List<JsonNode> project(List<JsonNode> events, List<String> selectedColumns) {
+        Set<String> selected = new HashSet<>();
+        for (String column : selectedColumns) selected.add(column.toLowerCase(Locale.ROOT));
+        List<JsonNode> projected = new ArrayList<>(events.size());
+        for (JsonNode event : events) {
+            if (!(event instanceof ObjectNode source)) {
+                projected.add(event);
+                continue;
+            }
+            ObjectNode copy = jsonMapper.createObjectNode();
+            copy.setAll(source);
+            for (String image : List.of("before", "after")) {
+                JsonNode row = source.get(image);
+                if (row == null || !row.isObject()) continue;
+                ObjectNode kept = jsonMapper.createObjectNode();
+                for (var entry : row.properties()) {
+                    if (selected.contains(entry.getKey().toLowerCase(Locale.ROOT))) kept.set(entry.getKey(), entry.getValue());
+                }
+                copy.set(image, kept);
+            }
+            projected.add(copy);
+        }
+        return projected;
     }
 
     private ObjectNode key(JsonNode row, List<String> keyFields) {
