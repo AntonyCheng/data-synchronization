@@ -61,8 +61,9 @@ import java.util.stream.Collectors;
  * stopped; a stopped owner started again with the same version reuses the same topic. A topic that
  * stops being live is first marked retired and deleted only after
  * {@code sync.kafka-bridge.raw-topic-retire-grace}: a bridge worker on another instance may still
- * be draining it until that instance's reconciler retires the worker. When the owner itself is
- * gone, its bridge consumer group is deleted with the topic.
+ * be draining it until that instance's reconciler retires the worker. When the owner is gone, or
+ * now targets another data source, its bridge consumer group on this cluster is deleted with the
+ * topic; an owner that only moved to a new version keeps reading with the same group.
  *
  * <p>A deleted topic's row is kept for another grace period so that a topic re-created by a
  * lingering client is deleted again; the bridge's own consumers never auto-create it.
@@ -186,7 +187,7 @@ public class KafkaRawTopicJanitor {
             rawTopicMapper.markDeleted(row.getRawTopicId(), now);
             if (existing.contains(row.getTopicName())) count++;
             log.info("raw topic {} deleted from data source {} (retired since {})", row.getTopicName(), dataSourceId, row.getRetiredTime());
-            if (owners.isGone(row)) orphanedGroups.add(KafkaTaskBridgeService.consumerGroup(row.getOwnerId()));
+            if (!owners.targets(row)) orphanedGroups.add(KafkaTaskBridgeService.consumerGroup(row.getOwnerId()));
         }
         for (KafkaRawTopic row : reappeared) {
             if (!awaitGone(row.getTopicName(), deletions.get(row.getTopicName()), failures)) continue;
@@ -219,7 +220,7 @@ public class KafkaRawTopicJanitor {
             if (result == null) continue;
             try {
                 result.get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                log.info("kafka bridge consumer group {} deleted: its owner no longer exists", group);
+                log.info("kafka bridge consumer group {} deleted: its owner no longer reads from this cluster", group);
             } catch (ExecutionException ex) {
                 if (ex.getCause() instanceof GroupIdNotFoundException) {
                     log.debug("kafka bridge consumer group {} was already gone", group);
@@ -309,6 +310,12 @@ public class KafkaRawTopicJanitor {
 
         private boolean isGone(KafkaRawTopic row) {
             return current(row) == null;
+        }
+
+        /** False once the owner is gone or targets another data source: nothing reads with its group on this one. */
+        private boolean targets(KafkaRawTopic row) {
+            SyncTask owner = current(row);
+            return owner != null && Objects.equals(owner.getTargetId(), row.getDataSourceId());
         }
     }
 }

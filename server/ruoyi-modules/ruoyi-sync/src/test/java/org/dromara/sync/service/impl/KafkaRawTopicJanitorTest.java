@@ -186,12 +186,16 @@ class KafkaRawTopicJanitorTest {
         KafkaRawTopic before = register(KAFKA, "__ds_raw_1_v2", KafkaRawTopic.OWNER_TASK, 1L);
         KafkaRawTopic current = register(OTHER_KAFKA, "__ds_raw_1_v2", KafkaRawTopic.OWNER_TASK, 1L);
         row(before).setRetiredTime(NOW.minusMinutes(11));
+        clusters.get(KAFKA).groups.add("ds-task-1-bridge");
+        clusters.get(OTHER_KAFKA).groups.add("ds-task-1-bridge");
 
         assertEquals(1, janitor.cleanOnce(NOW));
 
         assertFalse(clusters.get(KAFKA).topics.contains("__ds_raw_1_v2"));
         assertTrue(clusters.get(OTHER_KAFKA).topics.contains("__ds_raw_1_v2"));
         assertNull(row(current).getRetiredTime());
+        assertFalse(clusters.get(KAFKA).groups.contains("ds-task-1-bridge"), "nothing reads with it on the old cluster any more");
+        assertTrue(clusters.get(OTHER_KAFKA).groups.contains("ds-task-1-bridge"), "the owner reads the new cluster with it");
     }
 
     @Test
