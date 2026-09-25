@@ -187,6 +187,12 @@ sync:
     # 每个实例上各占 1 个，因此它也就是全集群可同时运行的 Kafka 任务+表项数，各实例应配置一致。
     # 满额时：启动/恢复在提交引擎作业前被拒绝；已在引擎上运行的任务不会被判失败，只是等空位后补桥接。
     max-workers: ${SYNC_KAFKA_BRIDGE_MAX_WORKERS:64}
+    # 清理不再使用的 raw topic（__ds_raw_{id}_v{版本}）：任务/表项已删除、编辑后版本已更新、目标已换到
+    # 别的数据源。只删平台登记过的 topic（ds_kafka_raw_topic），同一时刻只有一个实例执行。
+    raw-topic-cleanup-interval-ms: ${SYNC_KAFKA_BRIDGE_RAW_TOPIC_CLEANUP_INTERVAL_MS:300000}
+    # 发现 raw topic 不再被使用后，再等这么久才删除（其他实例上的桥接 worker 可能还在读，30 秒内会被对账停掉）；
+    # 删除后登记再保留同样时长，期间 topic 若被残留客户端重新建出会再删一次。
+    raw-topic-retire-grace: ${SYNC_KAFKA_BRIDGE_RAW_TOPIC_RETIRE_GRACE:10m}
   orphan-sweep:
     # 提交超时会丢失应答，但引擎通常已接单。作业名确定性（ds-task-<id>），据此把引擎上
     # 仍在运行、平台却没有 jobId 的作业重新接管，避免"幽灵作业"与重复提交双写。
@@ -199,11 +205,11 @@ sync:
     interval-ms: ${SYNC_ALERTS_INTERVAL_MS:30000}
     initial-delay-ms: ${SYNC_ALERTS_INITIAL_DELAY_MS:45000}
   scheduler:
-    # 以上全部后台轮询（状态对账、调度触发、整库发现、DDL 检查、Kafka 桥接对账、孤儿作业清扫、
-    # 告警、指标清理）跑在 sync 模块自己的调度线程池（线程名 sync-sched-*），不占用 RuoYi 全局
-    # schedule-pool。轮询都是 fixedDelay、不会与自身重叠，默认 9 = 每个轮询一条线程、互不排队；
+    # 以上全部后台轮询（状态对账、调度触发、整库发现、DDL 检查、Kafka 桥接对账、raw topic 清理、
+    # 孤儿作业清扫、告警、指标清理）跑在 sync 模块自己的调度线程池（线程名 sync-sched-*），不占用 RuoYi 全局
+    # schedule-pool。轮询都是 fixedDelay、不会与自身重叠，默认 10 = 每个轮询一条线程、互不排队；
     # 调小只会让引擎不可达时卡住的轮询拖慢其余轮询。
-    pool-size: ${SYNC_SCHEDULER_POOL_SIZE:9}
+    pool-size: ${SYNC_SCHEDULER_POOL_SIZE:10}
 springdoc:
   api-docs:
     # 是否开启接口文档

@@ -17,7 +17,9 @@ import org.dromara.sync.config.KafkaBridgeProperties;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
+import org.dromara.sync.domain.KafkaRawTopic;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.mapper.KafkaRawTopicMapper;
 import org.dromara.sync.support.SourceTimeZones;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
@@ -27,6 +29,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Collection;
 import java.util.HashSet;
@@ -60,11 +63,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       served before new operator starts, and the check is made before any AdminClient or
  *       consumer is created, so retrying every pass costs nothing.</li>
  * </ul>
+ *
+ * <p>Every start registers the owner's raw topic in {@code ds_kafka_raw_topic}, the list
+ * {@code KafkaRawTopicJanitor} deletes superseded raw topics from.
  */
 @Slf4j
 @Component
 public class KafkaTaskBridgeService {
 
+    public static final String RAW_TOPIC_PREFIX = "__ds_raw_";
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     /** Bounded by POLL_TIMEOUT plus one commit round-trip; anything longer means the worker is wedged. */
     private static final Duration GRACEFUL_STOP_TIMEOUT = Duration.ofSeconds(5);
@@ -72,6 +79,7 @@ public class KafkaTaskBridgeService {
     private final KafkaEventNormalizer normalizer;
     private final KafkaEventProducer producer;
     private final JsonMapper jsonMapper;
+    private final KafkaRawTopicMapper rawTopicMapper;
     private final int maxWorkers;
     private final ConcurrentMap<Long, Worker> workers = new ConcurrentHashMap<>();
     /** RUNNING owners refused a worker because the pool was full; they get the next free slots. */
@@ -86,10 +94,11 @@ public class KafkaTaskBridgeService {
     private final ThreadPoolExecutor executor;
 
     public KafkaTaskBridgeService(KafkaEventNormalizer normalizer, KafkaEventProducer producer, JsonMapper jsonMapper,
-                                  KafkaBridgeProperties properties) {
+                                  KafkaBridgeProperties properties, KafkaRawTopicMapper rawTopicMapper) {
         this.normalizer = normalizer;
         this.producer = producer;
         this.jsonMapper = jsonMapper;
+        this.rawTopicMapper = rawTopicMapper;
         this.maxWorkers = Math.max(1, properties.getMaxWorkers());
         AtomicInteger threads = new AtomicInteger();
         this.executor = new ThreadPoolExecutor(maxWorkers, maxWorkers, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
@@ -142,7 +151,7 @@ public class KafkaTaskBridgeService {
         Long ownerId = task.getTaskId();
         // Before the topic precheck: a refused owner costs no AdminClient round trip.
         if (!admit(ownerId, refuseWhenFull)) return false;
-        ensureTopics(task, target);
+        ensureTopics(task, target, persistTaskMetrics ? KafkaRawTopic.OWNER_TASK : KafkaRawTopic.OWNER_GROUP_ITEM);
         KafkaOutputFormat outputFormat = KafkaOutputFormat.parse(task.getKafkaOutputFormat());
         boolean wasParked;
         synchronized (admission) {
@@ -270,11 +279,15 @@ public class KafkaTaskBridgeService {
         }
     }
 
-    /** The output topic is user-owned and must exist; only the private raw topic is created here. Package-private for tests. */
-    void ensureTopics(SyncTask task, DataSource target) {
+    /**
+     * The output topic is user-owned and must exist; only the private raw topic is created here,
+     * and then registered for cleanup - also when it already existed, so raw topics from before the
+     * registry are adopted the next time their owner's bridge starts. Package-private for tests.
+     */
+    void ensureTopics(SyncTask task, DataSource target, String ownerType) {
         String bootstrapServers = KafkaAdminClients.bootstrapServers(target);
         String rawTopic = rawTopic(task);
-        try (AdminClient admin = AdminClient.create(KafkaAdminClients.adminProperties(bootstrapServers))) {
+        try (AdminClient admin = openAdmin(bootstrapServers)) {
             Set<String> knownTopics = admin.listTopics().names().get(10, TimeUnit.SECONDS);
             if (!knownTopics.contains(task.getTargetTable())) {
                 throw new ServiceException("Kafka 目标 topic 不存在或当前凭证无查看权限：" + task.getTargetTable());
@@ -312,13 +325,49 @@ public class KafkaTaskBridgeService {
         } catch (Exception ex) {
             throw new ServiceException("Kafka topic 预检查失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
         }
+        registerRawTopic(task, target, rawTopic, ownerType);
+    }
+
+    /**
+     * Best effort: a registration that fails only postpones the cleanup of this topic, and the
+     * owner's next bridge (re)start registers it again - not worth refusing a start over.
+     */
+    private void registerRawTopic(SyncTask task, DataSource target, String rawTopic, String ownerType) {
+        try {
+            KafkaRawTopic row = new KafkaRawTopic();
+            row.setDataSourceId(target.getSourceId());
+            row.setTopicName(rawTopic);
+            row.setOwnerType(ownerType);
+            row.setOwnerId(task.getTaskId());
+            row.setConfigVersion(configVersion(task));
+            row.setCreateTime(LocalDateTime.now());
+            if (rawTopicMapper.registerIfAbsent(row)) {
+                log.info("raw topic {} registered for cleanup ({} {})", rawTopic, ownerType, task.getTaskId());
+            }
+        } catch (RuntimeException ex) {
+            log.warn("raw topic {} could not be registered for cleanup, retried on the next bridge start: {}",
+                rawTopic, ex.getMessage());
+        }
     }
 
     /** Private, versioned raw Debezium topic the engine writes and this bridge consumes. */
     public static String rawTopic(SyncTask task) {
         long taskId = task == null || task.getTaskId() == null ? 0L : task.getTaskId();
-        int version = task == null || task.getConfigVersion() == null ? 1 : task.getConfigVersion();
-        return "__ds_raw_" + taskId + "_v" + version;
+        return RAW_TOPIC_PREFIX + taskId + "_v" + configVersion(task);
+    }
+
+    private static int configVersion(SyncTask task) {
+        return task == null || task.getConfigVersion() == null ? 1 : task.getConfigVersion();
+    }
+
+    /** The consumer group every instance's worker for one owner (task id or group item id) joins. */
+    public static String consumerGroup(Long ownerId) {
+        return "ds-task-" + ownerId + "-bridge";
+    }
+
+    /** Package-private for tests. */
+    AdminClient openAdmin(String bootstrapServers) {
+        return AdminClient.create(KafkaAdminClients.adminProperties(bootstrapServers));
     }
 
     /** The consumer a worker reads its raw topic with; package-private for tests. */
@@ -375,9 +424,12 @@ public class KafkaTaskBridgeService {
         public void run() {
             Properties properties = new Properties();
             properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-            properties.put(ConsumerConfig.GROUP_ID_CONFIG, "ds-task-" + taskId + "-bridge");
+            properties.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup(taskId));
             properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
             properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+            // ensureTopics created the topic before this worker started; a worker still subscribed
+            // after the janitor deleted it must not bring it back on a broker that auto-creates topics.
+            properties.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
             properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
             properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
             try (Consumer<String, String> opened = openConsumer(properties)) {

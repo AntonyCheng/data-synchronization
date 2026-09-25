@@ -18,6 +18,9 @@ import java.util.function.Supplier;
  * <p>Interactive callers wait up to {@link #WAIT_SECONDS}; background passes should test
  * {@link #isTaskBusy} / {@link #isGroupBusy} first and skip a busy row - the next cycle
  * picks it up. Leases are watchdog-renewed for as long as the holding thread works.
+ *
+ * <p>{@link #runIfFree} is for a pass that must not run on two instances at once (the Kafka raw-topic
+ * cleanup): it never waits.
  */
 @Component
 @RequiredArgsConstructor
@@ -26,6 +29,8 @@ public class SyncLocks {
     /** Shared with {@code SyncTaskScheduler}, which takes it around a scheduled start. */
     public static final String TASK_LOCK_PREFIX = "sync:task:start:";
     public static final String GROUP_LOCK_PREFIX = "sync:group:lock:";
+    /** Held by the one instance running the Kafka raw-topic cleanup pass. */
+    public static final String RAW_TOPIC_CLEANUP_LOCK = "sync:kafka:raw-topic-cleanup";
     private static final long WAIT_SECONDS = 10;
 
     private final RedissonClient redissonClient;
@@ -44,6 +49,27 @@ public class SyncLocks {
 
     public boolean isGroupBusy(Long groupId) {
         return redissonClient.getLock(GROUP_LOCK_PREFIX + groupId).isLocked();
+    }
+
+    /**
+     * For a background pass that one instance at a time should run: runs {@code action} under the
+     * lock, or returns {@code false} at once when another instance holds it - no waiting, the
+     * next cycle tries again.
+     */
+    public boolean runIfFree(String key, Runnable action) {
+        RLock lock = redissonClient.getLock(key);
+        boolean acquired = false;
+        try {
+            acquired = lock.tryLock(0, -1, TimeUnit.SECONDS);
+            if (!acquired) return false;
+            action.run();
+            return true;
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            return false;
+        } finally {
+            if (acquired && lock.isHeldByCurrentThread()) lock.unlock();
+        }
     }
 
     private <T> T locked(String key, String busyMessage, Supplier<T> action) {
