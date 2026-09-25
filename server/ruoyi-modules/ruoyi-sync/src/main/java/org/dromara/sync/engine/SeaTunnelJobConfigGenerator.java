@@ -50,6 +50,13 @@ public final class SeaTunnelJobConfigGenerator {
     static final String LEGACY_FULL_SOURCE_TIME_OPTIONS = "serverTimezone=UTC";
 
     /**
+     * Debezium's {@code datatype.propagate.source.type} for Kafka CDC jobs: regular expressions over
+     * {@code database.table.TYPE}, matched whole and case-insensitively. {@code [.]} stands for the
+     * dot so the HOCON string needs no escaping.
+     */
+    static final String PROPAGATED_SOURCE_TYPES = ".+[.]TINYINT,.+[.]FLOAT( UNSIGNED)?( ZEROFILL)?";
+
+    /**
      * Job names are deterministic so a job can always be traced back to the row that owns it -
      * see EngineOrphanSweeper, which relies on it to re-attach jobs after a lost submit answer.
      * A group's table item is projected onto a SyncTask carrying the item id, so items share
@@ -178,22 +185,43 @@ public final class SeaTunnelJobConfigGenerator {
         return needsProjection ? insertProjection(builder.toString(), sourceOutput, projectedOutput, selectedColumns) : builder.toString();
     }
 
+    /**
+     * FULL_CDC / INCREMENTAL into Kafka: the engine writes Debezium's own change events to the private
+     * raw topic and the platform bridge publishes them (see {@code KafkaRawRecordReader}).
+     *
+     * <p>{@code format = "compatible_debezium_json"} hands each record through as Kafka Connect's
+     * JSON. SeaTunnel's row format ({@code DEBEZIUM_JSON} sink) would lose two things: it maps
+     * Debezium's READ (initial load) and CREATE to the same row kind, so an initial-load row could
+     * not be told from a binlog insert, and it stamps every row with the time the engine captured
+     * it rather than {@code source.ts_ms}. The value schema stays on because the values are in
+     * Debezium's encoding (a DATETIME is epoch millis, a DATE epoch days) and the bridge needs the
+     * logical type of each column to convert them; the key schema is not needed. Debezium widens
+     * FLOAT to a double and reports TINYINT as int16, so {@code datatype.propagate.source.type} adds
+     * the source type of exactly those columns, which SeaTunnel mapped to FLOAT and (for
+     * {@code tinyint(1)}) BOOLEAN. The raw record's Kafka key is Debezium's key; the raw topic has
+     * a single partition, so there is nothing to partition on.
+     */
     private static String buildKafkaConfig(SyncTask task, DataSource source, DataSource target,
                                            String sourceTable, List<String> primaryKeys, List<String> selectedColumns,
                                            String syncMode, SeaTunnelProperties properties) {
         if (primaryKeys.isEmpty()) throw new ServiceException("Kafka 任务必须配置可靠同步键");
         if (SyncMode.FULL.equals(syncMode)) return buildKafkaFullConfig(task, source, target, sourceTable, selectedColumns, properties);
-        StringBuilder builder = new StringBuilder(1600);
+        StringBuilder builder = new StringBuilder(1800);
         appendStreamingEnv(builder, task, properties);
         appendMysqlCdcSourceHead(builder, task, source, sourceTable, properties);
         builder.append(startupOptions(task, syncMode, source))
             .append("    exactly_once = false\n")
             .append("    schema-changes.enabled = false\n")
+            .append("    format = \"compatible_debezium_json\"\n")
+            .append("    debezium = {\n")
+            .append("      key.converter.schemas.enable = false\n")
+            .append("      value.converter.schemas.enable = true\n")
+            .append("      datatype.propagate.source.type = \"").append(PROPAGATED_SOURCE_TYPES).append("\"\n")
+            .append("    }\n")
             .append("  }\n}\n\nsink {\n  Kafka {\n")
             .append("    topic = ").append(quote(KafkaTaskBridgeService.rawTopic(task))).append('\n')
             .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
-            .append("    format = \"DEBEZIUM_JSON\"\n")
-            .append("    partition_key_fields = ").append(stringList(primaryKeys)).append('\n')
+            .append("    format = \"COMPATIBLE_DEBEZIUM_JSON\"\n")
             .append("    semantics = \"AT_LEAST_ONCE\"\n")
             .append("    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n")
             .append("  }\n}\n");

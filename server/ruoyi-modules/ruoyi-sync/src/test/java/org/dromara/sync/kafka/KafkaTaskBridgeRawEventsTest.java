@@ -34,11 +34,14 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 
 /**
- * Phase labelling of a real bridge worker fed the raw records SeaTunnel 2.3.13 actually writes.
- * The MySQL-CDC records below were copied from the raw topic of a FULL_CDC MySQL-CDC ->
- * Kafka ({@code format = "DEBEZIUM_JSON"}) job on the local stack (2026-09-24): three rows present
- * before the job started (initial load), then an INSERT, an UPDATE and a DELETE. Only the
- * broker is replaced - the normalizer and serializer are the real ones.
+ * Phase labelling of a real bridge worker fed raw records of the format CDC jobs were generated with
+ * before {@code compatible_debezium_json}: SeaTunnel's {@code DEBEZIUM_JSON} rows. A job started
+ * before an upgrade keeps writing them until it is reinitialized, so the bridge still reads them, and
+ * their initial load stays CDC. The MySQL-CDC records below were copied from the raw topic of a
+ * FULL_CDC MySQL-CDC -> Kafka ({@code format = "DEBEZIUM_JSON"}) job on the local stack (2026-09-24):
+ * three rows present before the job started (initial load), then an INSERT, an UPDATE and a DELETE.
+ * Only the broker is replaced - the normalizer and serializer are the real ones. The current format is
+ * covered by {@link KafkaRawFormatFidelityTest}.
  */
 @Tag("dev")
 class KafkaTaskBridgeRawEventsTest {
@@ -78,7 +81,7 @@ class KafkaTaskBridgeRawEventsTest {
     }
 
     @Test
-    void mysqlCdcInitialLoadRowsArePublishedAsCdcBecauseSeaTunnelWritesThemAsBinlogInserts() {
+    void debeziumJsonInitialLoadRowsArePublishedAsCdcBecauseSeaTunnelWritesThemAsBinlogInserts() {
         List<String> raw = new ArrayList<>(INITIAL_LOAD);
         raw.addAll(BINLOG);
         List<KafkaEventNormalizer.NormalizedEvent> events = bridgeAndCollect(raw, 2);
@@ -139,7 +142,7 @@ class KafkaTaskBridgeRawEventsTest {
                 return new RawTopic(rawValues);
             }
         };
-        bridge.start(task(), kafka(), "source_db");
+        bridge.start(task(), kafka(), mysql());
 
         ArgumentCaptor<List<KafkaEventNormalizer.NormalizedEvent>> published = ArgumentCaptor.forClass(List.class);
         verify(producer, timeout(5000).times(expectedPublishes)).publishForTask(
@@ -156,6 +159,13 @@ class KafkaTaskBridgeRawEventsTest {
         task.setSyncKeyColumns("id");
         task.setConfigVersion(1);
         return task;
+    }
+
+    private static DataSource mysql() {
+        DataSource source = new DataSource();
+        source.setSourceType("MYSQL");
+        source.setDatabaseName("source_db");
+        return source;
     }
 
     private static DataSource kafka() {

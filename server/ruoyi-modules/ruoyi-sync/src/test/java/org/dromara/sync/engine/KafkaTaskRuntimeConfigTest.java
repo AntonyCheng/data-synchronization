@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Tag("dev")
@@ -28,8 +29,17 @@ class KafkaTaskRuntimeConfigTest {
         assertEquals("__ds_raw_42_v3", KafkaTaskBridgeService.rawTopic(task));
         assertTrue(config.config().contains("topic = \"__ds_raw_42_v3\""));
         assertTrue(config.config().contains("bootstrap.servers = \"broker.example:9092\""));
-        assertTrue(config.config().contains("partition_key_fields = [\"id\"]"));
-        assertTrue(config.config().contains("format = \"DEBEZIUM_JSON\""));
+        // Debezium's own records, value schema on, FLOAT / TINYINT source types propagated - what the
+        // bridge needs to publish the initial load as SNAPSHOT with unchanged values.
+        assertTrue(config.config().contains("    format = \"compatible_debezium_json\"\n"
+            + "    debezium = {\n"
+            + "      key.converter.schemas.enable = false\n"
+            + "      value.converter.schemas.enable = true\n"
+            + "      datatype.propagate.source.type = \".+[.]TINYINT,.+[.]FLOAT( UNSIGNED)?( ZEROFILL)?\"\n"
+            + "    }\n"), config.config());
+        assertTrue(config.config().contains("format = \"COMPATIBLE_DEBEZIUM_JSON\""));
+        assertFalse(config.config().contains("\"DEBEZIUM_JSON\""), "SeaTunnel's row format is no longer written");
+        assertFalse(config.config().contains("partition_key_fields"), "the rows are Connect JSON strings, not columns");
     }
 
     @Test

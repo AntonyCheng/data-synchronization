@@ -49,10 +49,10 @@ class KafkaTaskBridgeServiceTest {
     @Test
     void anOperatorStartIsRefusedWhenThePoolIsFullBeforeAnyTopicCheck() {
         bridge = bridge(2);
-        bridge.start(task(1), kafka(), "db");
-        bridge.startGroupItem(task(2), kafka(), "db");
+        bridge.start(task(1), kafka(), source());
+        bridge.startGroupItem(task(2), kafka(), source());
 
-        String refused = assertThrows(ServiceException.class, () -> bridge.start(task(3), kafka(), "db")).getMessage();
+        String refused = assertThrows(ServiceException.class, () -> bridge.start(task(3), kafka(), source())).getMessage();
 
         assertTrue(refused.startsWith("Kafka 桥接容量已满（2/2）"), refused);
         assertTrue(refused.contains("sync.kafka-bridge.max-workers"), refused);
@@ -65,10 +65,10 @@ class KafkaTaskBridgeServiceTest {
     @Test
     void aBackgroundStartParksTheOwnerInsteadOfFailingAndStaysCheap() {
         bridge = bridge(1);
-        bridge.start(task(1), kafka(), "db");
+        bridge.start(task(1), kafka(), source());
 
-        assertFalse(bridge.tryStart(task(2), kafka(), "db"));
-        assertFalse(bridge.tryStartGroupItem(task(2), kafka(), "db"));
+        assertFalse(bridge.tryStart(task(2), kafka(), source()));
+        assertFalse(bridge.tryStartGroupItem(task(2), kafka(), source()));
 
         assertEquals(1, topicChecks.get(), "a parked owner costs no AdminClient round trip");
         assertFalse(bridge.isRunning(2L));
@@ -83,15 +83,15 @@ class KafkaTaskBridgeServiceTest {
     @Test
     void parkedOwnersGetTheNextFreeSlotBeforeNewOperatorStarts() {
         bridge = bridge(2);
-        bridge.start(task(1), kafka(), "db");
-        bridge.start(task(2), kafka(), "db");
-        assertFalse(bridge.tryStart(task(3), kafka(), "db"));
+        bridge.start(task(1), kafka(), source());
+        bridge.start(task(2), kafka(), source());
+        assertFalse(bridge.tryStart(task(3), kafka(), source()));
 
         bridge.stop(1L);
-        String refused = assertThrows(ServiceException.class, () -> bridge.start(task(4), kafka(), "db")).getMessage();
+        String refused = assertThrows(ServiceException.class, () -> bridge.start(task(4), kafka(), source())).getMessage();
         assertTrue(refused.contains("另有 1 个运行中的任务/表项在排队等待桥接"), refused);
 
-        assertTrue(bridge.tryStart(task(3), kafka(), "db"));
+        assertTrue(bridge.tryStart(task(3), kafka(), source()));
         assertTrue(bridge.isRunning(3L));
         assertEquals("", bridge.decorateLastError(3L, ""), "the notice goes away with the parking");
     }
@@ -99,14 +99,14 @@ class KafkaTaskBridgeServiceTest {
     @Test
     void stoppingAParkedOwnerReleasesItsReservation() {
         bridge = bridge(1);
-        bridge.start(task(1), kafka(), "db");
-        assertFalse(bridge.tryStart(task(2), kafka(), "db"));
+        bridge.start(task(1), kafka(), source());
+        assertFalse(bridge.tryStart(task(2), kafka(), source()));
 
         bridge.stop(2L);
         bridge.stop(1L);
 
         assertEquals(Set.of(), bridge.localOwnerIds());
-        bridge.start(task(5), kafka(), "db");
+        bridge.start(task(5), kafka(), source());
         assertTrue(bridge.isRunning(5L));
     }
 
@@ -114,21 +114,21 @@ class KafkaTaskBridgeServiceTest {
     void anOwnerWhoseWorkerDiedKeepsItsSlotForTheRestart() throws Exception {
         bridge = bridge(1);
         dyingOwners.add(9L);
-        bridge.start(task(9), kafka(), "db");
+        bridge.start(task(9), kafka(), source());
         awaitNotRunning(9L);
 
         // The dead worker still holds the only slot, so no one else may take it...
-        assertThrows(ServiceException.class, () -> bridge.start(task(10), kafka(), "db"));
+        assertThrows(ServiceException.class, () -> bridge.start(task(10), kafka(), source()));
         // ...and the heal of its own owner needs no free one.
         dyingOwners.clear();
-        assertTrue(bridge.tryStart(task(9), kafka(), "db"));
+        assertTrue(bridge.tryStart(task(9), kafka(), source()));
         assertTrue(bridge.isRunning(9L));
     }
 
     @Test
     void aGroupResumeIsCheckedAsAWhole() {
         bridge = bridge(3);
-        bridge.start(task(1), kafka(), "db");
+        bridge.start(task(1), kafka(), source());
 
         bridge.requireCapacity(List.of(1L, 2L, 3L)); // 1 already has a worker: needs 2 of the 2 free
 
@@ -169,6 +169,13 @@ class KafkaTaskBridgeServiceTest {
         task.setSyncKeyColumns("id");
         task.setConfigVersion(1);
         return task;
+    }
+
+    private static DataSource source() {
+        DataSource source = new DataSource();
+        source.setSourceType("MYSQL");
+        source.setDatabaseName("db");
+        return source;
     }
 
     private static DataSource kafka() {

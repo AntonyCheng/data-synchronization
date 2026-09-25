@@ -40,16 +40,61 @@ class KafkaEventNormalizerTest {
     }
 
     @Test
+    void debeziumUpdateCarriesItsBeforeImage() {
+        // compatible_debezium_json: an UPDATE is one op=u with both images.
+        List<KafkaEventNormalizer.NormalizedEvent> normalized = normalizer.normalize(List.of(
+            event("u", "{\"code\":\"a-1\",\"name\":\"甲\",\"qty\":1}", "{\"code\":\"a-1\",\"name\":\"甲-upd\",\"qty\":10}", 1790290984000L)),
+            0, List.of("code"));
+
+        assertEquals(1, normalized.size());
+        KafkaEventNormalizer.NormalizedEvent update = normalized.getFirst();
+        assertEquals("UPDATE", update.op());
+        assertEquals("{\"code\":\"a-1\"}", update.key().toString());
+        assertEquals("甲", update.before().path("name").asString());
+        assertEquals("甲-upd", update.data().path("name").asString());
+        assertEquals("CDC", update.phase());
+        assertEquals("2026-09-24T23:03:04Z", update.sourceEventTime(), "the binlog event time, whole seconds");
+    }
+
+    @Test
+    void debeziumUpdateOfTheSyncKeyRetiresTheOldKey() {
+        // Only when the sync key is a unique key other than the primary key: Debezium sends op=u
+        // (the primary key did not change) while the key every event is published under did.
+        List<KafkaEventNormalizer.NormalizedEvent> normalized = normalizer.normalize(List.of(
+            event("u", "{\"id\":7,\"code\":\"b-2\"}", "{\"id\":7,\"code\":\"b-2x\"}", 1000)), 0, List.of("code"));
+
+        assertEquals(List.of("DELETE{\"code\":\"b-2\"}", "INSERT{\"code\":\"b-2x\"}"),
+            normalized.stream().map(e -> e.op() + e.key()).toList());
+        assertEquals("b-2", normalized.get(0).data().path("code").asString());
+        assertEquals("b-2x", normalized.get(1).data().path("code").asString());
+        assertTrue(normalized.stream().allMatch(e -> "CDC".equals(e.phase())));
+    }
+
+    @Test
+    void debeziumReadIsTheInitialLoad() {
+        List<KafkaEventNormalizer.NormalizedEvent> normalized = normalizer.normalize(List.of(
+            event("r", null, "{\"id\":1}", 1000), event("r", null, "{\"id\":2}", 1001), event("c", null, "{\"id\":3}", 2000)),
+            0, List.of("id"));
+
+        assertEquals(List.of("SNAPSHOT", "SNAPSHOT", "CDC"), normalized.stream().map(KafkaEventNormalizer.NormalizedEvent::phase).toList());
+        assertTrue(normalized.stream().allMatch(e -> "INSERT".equals(e.op())));
+    }
+
+    @Test
     void rejectsMissingKey() {
         JsonNode raw = event("c", null, "{\"name\":\"A\"}", 1000);
         assertThrows(ServiceException.class, () -> normalizer.normalize(List.of(raw), 1, List.of("id")));
     }
 
     @Test
-    void rejectsInvalidPhaseOrder() {
-        JsonNode first = event("c", null, "{\"id\":1}", 1000);
-        JsonNode second = event("r", null, "{\"id\":2}", 2000);
-        assertThrows(ServiceException.class, () -> normalizer.normalize(List.of(first, second), 0, List.of("id")));
+    void aNewInitialLoadAfterChangesIsSnapshotAgain() {
+        // Restarting a stopped task, or reinitializing it, reuses the raw topic: the new run's initial
+        // load follows the previous run's changes, possibly in the same poll batch.
+        List<KafkaEventNormalizer.NormalizedEvent> normalized = normalizer.normalize(List.of(
+            event("c", null, "{\"id\":1}", 1000), event("r", null, "{\"id\":1}", 2000), event("r", null, "{\"id\":2}", 2000)),
+            0, List.of("id"));
+
+        assertEquals(List.of("CDC", "SNAPSHOT", "SNAPSHOT"), normalized.stream().map(KafkaEventNormalizer.NormalizedEvent::phase).toList());
     }
 
     @Test

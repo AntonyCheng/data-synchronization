@@ -61,7 +61,7 @@ class EngineJobRunnerTest {
         assertThrows(ServiceException.class, () -> runner.submit(job, generated));
 
         InOrder order = inOrder(bridge, restClient);
-        order.verify(bridge).start(job.task(), job.target(), "source_db");
+        order.verify(bridge).start(job.task(), job.target(), job.source());
         order.verify(restClient).submit("ds-task-42", "env {}", null, false);
         order.verify(bridge).stop(OWNER);
     }
