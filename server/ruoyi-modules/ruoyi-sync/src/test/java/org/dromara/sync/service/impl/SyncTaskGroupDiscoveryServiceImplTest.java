@@ -137,7 +137,7 @@ class SyncTaskGroupDiscoveryServiceImplTest {
             assertNull(item.getEngineJobId());
         }
         verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
-        assertEquals(2, group.getConfigVersion());
+        assertEquals(1, group.getConfigVersion(), "adding tables changes no table's config");
         assertEquals("", group.getLastError());
         verify(groupMapper).updateById(group);
         assertEquals("发现 2 张新表，已启动 0 张，失败 0 张", result.getMessage());
@@ -185,6 +185,34 @@ class SyncTaskGroupDiscoveryServiceImplTest {
         assertEquals("RUNNING", inserted.get(1).getStatus());
         verify(restClient).submit(eq(SeaTunnelJobConfigGenerator.JOB_NAME_PREFIX + inserted.get(1).getItemId()), anyString(), isNull(), eq(false));
         assertEquals("发现 2 张新表，已启动 1 张，失败 1 张", result.getMessage());
+    }
+
+    /**
+     * The group's config_version names every Kafka table's raw topic and is part of its config
+     * fingerprint. Discovery used to bump it under the running jobs: after a restart their bridges
+     * read a new, empty topic, and every paused Kafka table refused to resume.
+     */
+    @Test
+    void discoveryOnALiveKafkaGroupKeepsEveryTableOnItsRawTopic() {
+        SyncTaskGroup group = persisted(group("RUNNING", KAFKA_ID));
+        SyncTaskGroupItem customers = item(11L, "customers");
+        customers.setSelectedColumns("id,name");
+        customers.setSyncKeyColumns("id");
+        items.add(customers);
+        String customersRawTopic = KafkaTaskBridgeService.rawTopic(SyncTaskGroupConfigGenerator.toTask(group, customers));
+        sourceTables("customers", "orders");
+        ArgumentCaptor<String> submitted = ArgumentCaptor.forClass(String.class);
+
+        service.discover(GROUP_ID);
+
+        assertEquals(1, group.getConfigVersion(), "adding a table changes no table's config");
+        assertEquals(customersRawTopic, KafkaTaskBridgeService.rawTopic(SyncTaskGroupConfigGenerator.toTask(group, customers)));
+        SyncTaskGroupItem orders = inserted.getFirst();
+        assertEquals("RUNNING", orders.getStatus());
+        verify(restClient).submit(anyString(), submitted.capture(), isNull(), eq(false));
+        assertTrue(submitted.getValue().contains(
+                "topic = \"" + KafkaTaskBridgeService.rawTopic(SyncTaskGroupConfigGenerator.toTask(group, orders)) + "\""),
+            "the new table's job writes the raw topic its bridge reads, before and after a restart");
     }
 
     /**

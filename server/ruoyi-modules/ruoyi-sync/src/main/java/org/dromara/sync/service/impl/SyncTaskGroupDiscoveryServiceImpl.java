@@ -134,10 +134,11 @@ public class SyncTaskGroupDiscoveryServiceImpl implements ISyncTaskGroupDiscover
             }
         }
         int discovered = plan.items().size();
-        if (discovered > 0) {
-            group.setConfigVersion((group.getConfigVersion() == null ? 1 : group.getConfigVersion()) + 1);
-            if (!jobIds.isEmpty()) group.setEngineJobId(appendJobIds(group.getEngineJobId(), jobIds));
-        }
+        // config_version stays: adding a table changes no table's config. The version names every
+        // Kafka table's raw topic and so is part of its config fingerprint - bumping it under running
+        // jobs sent their bridges to a new, empty topic after a restart and made every paused Kafka
+        // table refuse to resume.
+        if (!jobIds.isEmpty()) group.setEngineJobId(appendJobIds(group.getEngineJobId(), jobIds));
         String lastError = plan.note(failed);
         // The periodic pass repeats an unchanged "over the limit" every minute - only write a change.
         if (discovered > 0 || !lastError.equals(StringUtils.defaultString(group.getLastError()))) {
