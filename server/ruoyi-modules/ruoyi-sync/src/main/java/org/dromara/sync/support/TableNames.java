@@ -24,6 +24,12 @@ public final class TableNames {
     }
 
     /** Prefixes {@code table} with {@code prefix.} unless it is already qualified. */
+    /** The database of a {@code db.table} reference, else {@code fallback}. */
+    public static String database(String tableReference, String fallback) {
+        int separator = tableReference == null ? -1 : tableReference.lastIndexOf('.');
+        return separator < 0 ? fallback : tableReference.substring(0, separator);
+    }
+
     public static String qualified(String prefix, String table) {
         return table.indexOf('.') >= 0 ? table : prefix + '.' + table;
     }

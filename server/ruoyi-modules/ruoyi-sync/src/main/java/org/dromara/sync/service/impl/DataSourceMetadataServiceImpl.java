@@ -216,7 +216,8 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         result.setTaskId(task.getTaskId());
         result.setSourceTable(task.getSourceTable());
         result.setTargetTable(TableNames.display(target, task.getTargetSchema(), task.getTargetTable()));
-        DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), source.getDatabaseName(), null, task.getSourceTable());
+        DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), TableNames.database(task.getSourceTable(), source.getDatabaseName()), null,
+            TableNames.unqualified(task.getSourceTable()));
         SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(sourceMetadata,
             task.getSelectedColumns(), task.getSyncKeyColumns());
         List<String> syncKeys = selection.syncKeyColumns();
@@ -280,7 +281,8 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         result.setTaskId(task.getTaskId());
         result.setSourceTable(task.getSourceTable());
         result.setTargetTable(task.getTargetTable());
-        DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), source.getDatabaseName(), null, task.getSourceTable());
+        DataSourceMetadataVo sourceMetadata = queryTableMetadata(source.getSourceId(), TableNames.database(task.getSourceTable(), source.getDatabaseName()), null,
+            TableNames.unqualified(task.getSourceTable()));
         SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(sourceMetadata,
             task.getSelectedColumns(), task.getSyncKeyColumns());
         boolean topicPresent = StringUtils.isNotBlank(task.getTargetTable());

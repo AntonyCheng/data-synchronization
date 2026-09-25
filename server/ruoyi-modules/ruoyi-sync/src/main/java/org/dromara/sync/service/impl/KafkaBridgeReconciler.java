@@ -115,7 +115,7 @@ public class KafkaBridgeReconciler {
             for (SyncTaskGroupItem item : itemMapper.selectByGroupId(group.getGroupId())) {
                 if (!SyncStatus.RUNNING.equals(item.getStatus())) continue;
                 desired.put(item.getItemId(), new Desired(item.getItemId(),
-                    SyncTaskGroupConfigGenerator.toTask(group, item), target, source, true));
+                    SyncTaskGroupConfigGenerator.toTask(group, item), target, SyncTaskGroupConfigGenerator.itemSource(item, source), true));
             }
         }
         return desired;

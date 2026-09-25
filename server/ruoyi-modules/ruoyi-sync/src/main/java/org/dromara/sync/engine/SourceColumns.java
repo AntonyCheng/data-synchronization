@@ -21,11 +21,14 @@ public interface SourceColumns {
     /** Column names of {@code tableReference} ({@code table} or {@code db.table}) in table order. */
     List<String> of(String tableReference);
 
-    /** Reads through the platform's metadata introspection, the single path the wizard and prechecks use. */
+    /**
+     * Reads through the platform's metadata introspection, the single path the wizard and prechecks use.
+     * A {@code db.table} reference is read in its own database, anything else in the data source's.
+     */
     static SourceColumns fromMetadata(IDataSourceMetadataService metadataService, DataSource source) {
         return tableReference -> {
             DataSourceMetadataVo metadata = metadataService.queryTableMetadata(source.getSourceId(),
-                source.getDatabaseName(), TableNames.unqualified(tableReference));
+                TableNames.database(tableReference, source.getDatabaseName()), TableNames.unqualified(tableReference));
             if (metadata == null || metadata.getColumns() == null || metadata.getColumns().isEmpty()) {
                 throw new ServiceException("源表没有可同步字段：" + tableReference);
             }

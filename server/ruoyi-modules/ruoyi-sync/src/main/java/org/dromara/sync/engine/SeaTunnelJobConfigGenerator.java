@@ -96,14 +96,14 @@ public final class SeaTunnelJobConfigGenerator {
             throw new ServiceException("源表和目标表不能为空");
         }
 
-        List<String> primaryKeys = resolveSyncKeys(source, task);
-        List<String> selectedColumns = resolveSelectedColumns(sourceColumns, task);
+        String sourceTable = TableNames.qualified(source.getDatabaseName(), task.getSourceTable());
+        List<String> primaryKeys = resolveSyncKeys(source, task, sourceTable);
+        List<String> selectedColumns = resolveSelectedColumns(sourceColumns, task, sourceTable);
         boolean full = SyncMode.FULL.equals(syncMode);
         if (primaryKeys.isEmpty() && !full) {
             throw new ServiceException("源表没有主键，无法生成可恢复的 CDC 任务");
         }
 
-        String sourceTable = TableNames.qualified(source.getDatabaseName(), task.getSourceTable());
         String configuredTargetTable = overwriteTargetTable(task, syncMode);
         boolean kafkaTarget = DataSourceType.isKafka(target);
         String targetTable = kafkaTarget || DataSourceType.isMysql(target)
@@ -164,7 +164,7 @@ public final class SeaTunnelJobConfigGenerator {
         // does not propagate NOT NULL/primary-key metadata, so a target auto-created
         // through it fails ("All parts of a PRIMARY KEY must be NOT NULL") for any table
         // whose sync key is NOT NULL - i.e. almost every well-formed table.
-        boolean needsProjection = !isFullColumnSelection(sourceColumns, task.getSourceTable(), selectedColumns);
+        boolean needsProjection = !isFullColumnSelection(sourceColumns, sourceTable, selectedColumns);
         String sinkInput = needsProjection ? projectedOutput : sourceOutput;
         StringBuilder builder = new StringBuilder(1800);
         appendStreamingEnv(builder, task, properties);
@@ -297,7 +297,7 @@ public final class SeaTunnelJobConfigGenerator {
         builder.append("    url = ").append(quote(engineMysqlJdbcUrl(source, properties))).append('\n')
             .append("    username = ").append(quote(source.getUsername())).append('\n')
             .append("    password = ").append(quote(source.getPassword())).append('\n')
-            .append("    database-names = [").append(quote(source.getDatabaseName())).append("]\n")
+            .append("    database-names = [").append(quote(TableNames.database(sourceTable, source.getDatabaseName()))).append("]\n")
             .append("    table-names = [").append(quote(sourceTable)).append("]\n")
             .append("    server-id = \"").append(serverId).append('-').append(serverId + SERVER_ID_RANGE_WIDTH - 1).append("\"\n")
             .append("    server-time-zone = ").append(quote(SourceTimeZones.effective(source))).append('\n');
@@ -387,7 +387,8 @@ public final class SeaTunnelJobConfigGenerator {
     private static void ensureMysqlFullModeTargetTable(SyncTask task, DataSource source, DataSource target,
                                                         String targetTable, List<String> selectedColumns, SourceColumns sourceColumns) {
         if (!DataSourceType.isMysql(target)) return;
-        if (!isFullColumnSelection(sourceColumns, task.getSourceTable(), selectedColumns)) return;
+        String sourceTable = TableNames.qualified(source.getDatabaseName(), task.getSourceTable());
+        if (!isFullColumnSelection(sourceColumns, sourceTable, selectedColumns)) return;
         String targetTableName = TableNames.unqualified(targetTable);
         try (Connection targetConnection = JdbcUrls.open(target)) {
             try (ResultSet existing = targetConnection.getMetaData().getTables(target.getDatabaseName(), null, targetTableName, new String[]{"TABLE"})) {
@@ -396,7 +397,7 @@ public final class SeaTunnelJobConfigGenerator {
             String createTableSql;
             try (Connection sourceConnection = JdbcUrls.open(source);
                  Statement statement = sourceConnection.createStatement();
-                 ResultSet showCreate = statement.executeQuery("SHOW CREATE TABLE `" + TableNames.unqualified(task.getSourceTable()) + "`")) {
+                 ResultSet showCreate = statement.executeQuery("SHOW CREATE TABLE " + quoteQualifiedIdentifier(sourceTable))) {
                 if (!showCreate.next()) return;
                 createTableSql = showCreate.getString(2);
             }
@@ -412,15 +413,15 @@ public final class SeaTunnelJobConfigGenerator {
         }
     }
 
-    private static List<String> resolveSyncKeys(DataSource source, SyncTask task) {
+    private static List<String> resolveSyncKeys(DataSource source, SyncTask task, String sourceTable) {
         List<String> configured = SyncColumnSelectionValidator.parseColumns(task.getSyncKeyColumns());
-        return configured.isEmpty() ? resolvePrimaryKeys(source, task.getSourceTable()) : configured;
+        return configured.isEmpty() ? resolvePrimaryKeys(source, sourceTable) : configured;
     }
 
-    private static List<String> resolveSelectedColumns(SourceColumns sourceColumns, SyncTask task) {
+    private static List<String> resolveSelectedColumns(SourceColumns sourceColumns, SyncTask task, String sourceTable) {
         List<String> configured = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
         if (!configured.isEmpty()) return configured;
-        List<String> columns = sourceColumns.of(task.getSourceTable());
+        List<String> columns = sourceColumns.of(sourceTable);
         if (columns == null || columns.isEmpty()) throw new ServiceException("源表没有可同步字段");
         return columns;
     }
@@ -444,7 +445,7 @@ public final class SeaTunnelJobConfigGenerator {
     private static List<String> resolvePrimaryKeys(DataSource source, String tableReference) {
         String table = TableNames.unqualified(tableReference);
         try (Connection connection = JdbcUrls.open(source);
-             ResultSet resultSet = connection.getMetaData().getPrimaryKeys(source.getDatabaseName(), null, table)) {
+             ResultSet resultSet = connection.getMetaData().getPrimaryKeys(TableNames.database(tableReference, source.getDatabaseName()), null, table)) {
             Map<Short, String> ordered = new LinkedHashMap<>();
             while (resultSet.next()) {
                 ordered.put(resultSet.getShort("KEY_SEQ"), resultSet.getString("COLUMN_NAME"));

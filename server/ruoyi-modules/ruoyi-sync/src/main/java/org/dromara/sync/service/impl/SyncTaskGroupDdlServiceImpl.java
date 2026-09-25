@@ -119,7 +119,7 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
                 // Existing tasks created before migration 008 receive a baseline on their
                 // first successful check; subsequent checks are real runtime DDL checks.
                 TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-                    item.getSourceTable(), item.getTargetSchema(), item.getTargetTable());
+                    GroupItemOperations.sourceTable(item, source), item.getTargetSchema(), item.getTargetTable());
                 if (compatibility.isPassed()) {
                     item.setSchemaSnapshot(currentJson);
                     item.setSchemaHash(currentHash);
@@ -149,7 +149,7 @@ public class SyncTaskGroupDdlServiceImpl implements ISyncTaskGroupDdlService {
             }
 
             TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-                item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
+                GroupItemOperations.sourceTable(item, source), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
             String eventStatus = compatibility.isPassed() ? EVENT_READY_TO_RESUME : EVENT_PENDING_FIX;
             SyncTaskGroupDdlEvent event = upsertEvent(group, item, currentHash, diff.changeType(), diff.riskLevel(),
                 diff.details(), TableSchemaSnapshot.remediation(diff, compatibility), eventStatus);

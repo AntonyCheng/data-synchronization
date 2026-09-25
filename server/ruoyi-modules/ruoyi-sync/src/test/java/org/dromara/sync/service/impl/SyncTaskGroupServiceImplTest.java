@@ -179,7 +179,7 @@ class SyncTaskGroupServiceImplTest {
         assertEquals("id", subset.getSelectedColumns());
         assertTrue(whole.getSchemaSnapshot().contains("email"), "baseline moves to the live schema");
         // The widened projection is what the pre-start target check saw.
-        verify(metadataService).checkTargetCompatibility(eq(MYSQL_ID), eq(POSTGRES_ID), eq("customers"), any(), eq("customers"), eq("id,name,email"), any());
+        verify(metadataService).checkTargetCompatibility(eq(MYSQL_ID), eq(POSTGRES_ID), eq("source_db.customers"), any(), eq("customers"), eq("id,name,email"), any());
         assertEquals("RUNNING", whole.getStatus());
         assertEquals("RUNNING", subset.getStatus());
     }

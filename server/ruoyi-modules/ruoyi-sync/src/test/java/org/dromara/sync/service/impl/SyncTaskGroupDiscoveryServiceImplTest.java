@@ -13,6 +13,7 @@ import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.engine.EngineJobRunner;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
+import org.dromara.sync.engine.SyncTaskGroupConfigGenerator;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.SyncTaskGroupItemMapper;
 import org.dromara.sync.mapper.SyncTaskGroupMapper;
@@ -22,6 +23,7 @@ import org.dromara.sync.support.SyncLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -183,6 +185,29 @@ class SyncTaskGroupDiscoveryServiceImplTest {
         assertEquals("RUNNING", inserted.get(1).getStatus());
         verify(restClient).submit(eq(SeaTunnelJobConfigGenerator.JOB_NAME_PREFIX + inserted.get(1).getItemId()), anyString(), isNull(), eq(false));
         assertEquals("发现 2 张新表，已启动 1 张，失败 1 张", result.getMessage());
+    }
+
+    /**
+     * A whole-database group may sync a database other than the data source's default one. The
+     * engine job used to read the default database anyway - failing when it had no such table and
+     * silently syncing the wrong table when it had one.
+     */
+    @Test
+    void aWholeDatabaseGroupOnAnotherDatabaseRunsItsTablesThere() {
+        SyncTaskGroup group = persisted(group("RUNNING", POSTGRES_ID));
+        group.setSourceDatabase("sales_db");
+        when(metadataService.queryTables(MYSQL_ID, "sales_db")).thenReturn(List.of("orders"));
+        ArgumentCaptor<String> submitted = ArgumentCaptor.forClass(String.class);
+
+        service.discover(GROUP_ID);
+
+        assertEquals("sales_db", inserted.getFirst().getSourceDatabase());
+        verify(restClient).submit(anyString(), submitted.capture(), isNull(), eq(false));
+        assertTrue(submitted.getValue().contains("database-names = [\"sales_db\"]"), submitted.getValue());
+        assertTrue(submitted.getValue().contains("table-names = [\"sales_db.orders\"]"), submitted.getValue());
+        assertFalse(submitted.getValue().contains("source_db"), "nothing of the job points at the default database");
+        verify(metadataService, never()).queryTableMetadata(MYSQL_ID, "source_db", "orders");
+        verify(metadataService).checkTargetCompatibility(eq(MYSQL_ID), eq(POSTGRES_ID), eq("sales_db.orders"), any(), anyString());
     }
 
     @Test

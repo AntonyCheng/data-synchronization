@@ -1,5 +1,7 @@
 package org.dromara.sync.engine;
 
+import cn.hutool.core.bean.BeanUtil;
+import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
@@ -24,7 +26,7 @@ public final class SyncTaskGroupConfigGenerator {
         StringBuilder redacted = new StringBuilder();
         for (SyncTaskGroupItem item : items) {
             SyncTask task = toTask(group, item);
-            SeaTunnelJobConfigGenerator.GeneratedConfig generated = SeaTunnelJobConfigGenerator.generate(task, source, target, properties, sourceColumns);
+            SeaTunnelJobConfigGenerator.GeneratedConfig generated = SeaTunnelJobConfigGenerator.generate(task, itemSource(item, source), target, properties, sourceColumns);
             config.append("# item ").append(item.getItemId()).append(' ').append(item.getSourceTable()).append("\n")
                 .append(generated.config()).append("\n");
             redacted.append("# item ").append(item.getItemId()).append(' ').append(item.getSourceTable()).append("\n")
@@ -36,7 +38,25 @@ public final class SyncTaskGroupConfigGenerator {
     public static SeaTunnelJobConfigGenerator.GeneratedConfig generateItem(SyncTaskGroup group, SyncTaskGroupItem item,
                                                                       DataSource source, DataSource target,
                                                                       SeaTunnelProperties properties, SourceColumns sourceColumns) {
-        return SeaTunnelJobConfigGenerator.generate(toTask(group, item), source, target, properties, sourceColumns);
+        return SeaTunnelJobConfigGenerator.generate(toTask(group, item), itemSource(item, source), target, properties, sourceColumns);
+    }
+
+    /**
+     * The group's source data source as one item's engine job must see it: pointed at the item's
+     * own database. A whole-database group may sync a database other than the data source's default
+     * one, and every engine-facing step reads the database from the data source - the MySQL-CDC
+     * database filter and table name, the JDBC connection, key and column lookups, the DDL clone of
+     * a FULL target, the Kafka bridge's snapshot rows. An item in the default database gets the data
+     * source itself, so its config and fingerprint are exactly what they were.
+     */
+    public static DataSource itemSource(SyncTaskGroupItem item, DataSource source) {
+        if (item == null || source == null || StringUtils.isBlank(item.getSourceDatabase())
+            || item.getSourceDatabase().equals(source.getDatabaseName())) {
+            return source;
+        }
+        DataSource itemSource = BeanUtil.copyProperties(source, DataSource.class);
+        itemSource.setDatabaseName(item.getSourceDatabase());
+        return itemSource;
     }
 
     /** Projects a group + item onto the single-table task shape the generator and Kafka bridge consume. */

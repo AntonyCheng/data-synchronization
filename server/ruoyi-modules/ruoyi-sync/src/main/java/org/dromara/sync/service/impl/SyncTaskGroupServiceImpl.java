@@ -266,7 +266,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                 boolean hasKey = !SyncColumnSelectionValidator.validate(metadata,
                     item.getSelectedColumns(), item.getSyncKeyColumns()).syncKeyColumns().isEmpty();
                 TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-                    item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
+                    GroupItemOperations.sourceTable(item, source), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
                 itemResult.setTargetCompatibility(compatibility);
                 itemResult.setPassed((!keyRequired || hasKey) && compatibility.isPassed());
                 itemResult.setMessage(itemResult.isPassed() ? "表结构和同步键校验通过"
@@ -585,7 +585,7 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
         boolean widened = GroupItemOperations.followSourceColumns(item, metadata);
         if (!widened) GroupItemOperations.applySelection(item, metadata);
         TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-            item.getSourceTable(), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
+            GroupItemOperations.sourceTable(item, source), item.getTargetSchema(), item.getTargetTable(), item.getSelectedColumns(), item.getSyncKeyColumns());
         if (!compatibility.isPassed()) throw new ServiceException("目标表兼容性未通过：" + compatibility.getMessage());
         if (isDatabaseScope(group) && DataSourceType.isKafka(target)) kafkaTaskBridgeService.ensureTopicExists(target, item.getTargetTable());
         runner.requireBridgeCapacity(GroupItemOperations.job(group, item, source, target));

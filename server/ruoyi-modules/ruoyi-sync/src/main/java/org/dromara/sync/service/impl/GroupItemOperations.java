@@ -17,6 +17,7 @@ import org.dromara.sync.mapper.SyncTaskGroupItemMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
+import org.dromara.sync.support.TableNames;
 import org.dromara.sync.support.TableSchemaSnapshot;
 import org.springframework.stereotype.Component;
 
@@ -55,6 +56,11 @@ class GroupItemOperations {
         return StringUtils.defaultIfBlank(item.getSourceDatabase(), source.getDatabaseName());
     }
 
+    /** The item's source table as {@code db.table}, for lookups that would otherwise read the data source's default database. */
+    static String sourceTable(SyncTaskGroupItem item, DataSource source) {
+        return TableNames.qualified(sourceDatabase(item, source), item.getSourceTable());
+    }
+
     /** Expands / validates the column projection and sync key against live source metadata. */
     static void applySelection(SyncTaskGroupItem item, DataSourceMetadataVo metadata) {
         SyncColumnSelectionValidator.Selection selection = SyncColumnSelectionValidator.validate(metadata,
@@ -91,7 +97,7 @@ class GroupItemOperations {
                 || metadata.getUniqueKeys().stream().anyMatch(key -> Boolean.TRUE.equals(key.getAllNotNull()));
             if (!hasKey) return "源表没有可用同步键";
             TargetCompatibilityVo compatibility = metadataService.checkTargetCompatibility(source.getSourceId(), target.getSourceId(),
-                item.getSourceTable(), item.getTargetSchema(), item.getTargetTable());
+                sourceTable(item, source), item.getTargetSchema(), item.getTargetTable());
             return compatibility.isPassed() ? null : compatibility.getMessage();
         } catch (RuntimeException ex) {
             return StringUtils.defaultIfBlank(ex.getMessage(), "新增表校验失败");
@@ -109,7 +115,8 @@ class GroupItemOperations {
      */
     String submit(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
         var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
-        SeaTunnelJobConfigGenerator.prepareTarget(SyncTaskGroupConfigGenerator.toTask(group, item), source, target, generated, sourceColumns(source));
+        SeaTunnelJobConfigGenerator.prepareTarget(SyncTaskGroupConfigGenerator.toTask(group, item),
+            SyncTaskGroupConfigGenerator.itemSource(item, source), target, generated, sourceColumns(source));
         String jobId = runner.submit(job(group, item, source, target), generated);
         item.setEngineJobId(jobId);
         item.setEngineConfigHash(generated.fingerprint());
@@ -119,9 +126,10 @@ class GroupItemOperations {
         return jobId;
     }
 
-    /** One table item as the engine job runner sees it: projected onto a task, with the group's endpoints. */
+    /** One table item as the engine job runner sees it: projected onto a task, with the group's endpoints and the item's database. */
     static EngineJobRunner.Job job(SyncTaskGroup group, SyncTaskGroupItem item, DataSource source, DataSource target) {
-        return new EngineJobRunner.Job(SyncTaskGroupConfigGenerator.toTask(group, item), source, target, true);
+        return new EngineJobRunner.Job(SyncTaskGroupConfigGenerator.toTask(group, item),
+            SyncTaskGroupConfigGenerator.itemSource(item, source), target, true);
     }
 
     /** Parks the table FAILED with the reason. Its job id stays, so a retry can still reach that job. */
