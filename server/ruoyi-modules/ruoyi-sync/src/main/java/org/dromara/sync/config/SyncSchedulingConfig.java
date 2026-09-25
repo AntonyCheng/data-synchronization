@@ -8,10 +8,11 @@ import org.springframework.scheduling.concurrent.ScheduledExecutorFactoryBean;
 /**
  * The sync module's own scheduler. Every {@code @Scheduled} pass of the module (task / group
  * status refresh, cron trigger, whole-database discovery, DDL check, Kafka bridge reconcile,
- * orphan sweep, alerts, metrics purge) names it with {@code scheduler = SCHEDULER}. They used
- * to share RuoYi's {@code schedule-pool} ({@code ThreadPoolConfig}, cores + 1 threads) with every
- * other module, so a pass stuck on an unreachable engine - a status refresh is up to two 10 s
- * REST calls per task / table - could starve unrelated jobs. Now it can only delay sync passes.
+ * Kafka raw-topic cleanup, orphan sweep, alerts, metrics purge) names it with
+ * {@code scheduler = SCHEDULER}. They used to share RuoYi's {@code schedule-pool}
+ * ({@code ThreadPoolConfig}, cores + 1 threads) with every other module, so a pass stuck on an
+ * unreachable engine - a status refresh is up to two 10 s REST calls per task / table - could
+ * starve unrelated jobs. Now it can only delay sync passes.
  *
  * <p>Registered as a {@link java.util.concurrent.ScheduledExecutorService} with
  * {@code autowireCandidate = false}, deliberately not as a {@code ThreadPoolTaskScheduler}.
@@ -41,7 +42,7 @@ public class SyncSchedulingConfig {
     public static final String SCHEDULER = "syncScheduler";
 
     /** One thread per background pass of the module; see the class comment. */
-    public static final int DEFAULT_POOL_SIZE = 9;
+    public static final int DEFAULT_POOL_SIZE = 10;
 
     @Bean(name = SCHEDULER, autowireCandidate = false)
     public ScheduledExecutorFactoryBean syncScheduler(

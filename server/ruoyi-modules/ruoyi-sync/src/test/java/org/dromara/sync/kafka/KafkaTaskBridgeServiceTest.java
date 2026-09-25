@@ -10,6 +10,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.sync.config.KafkaBridgeProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.mapper.KafkaRawTopicMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -140,10 +141,10 @@ class KafkaTaskBridgeServiceTest {
         KafkaBridgeProperties properties = new KafkaBridgeProperties();
         properties.setMaxWorkers(maxWorkers);
         return new KafkaTaskBridgeService(mock(KafkaEventNormalizer.class), mock(KafkaEventProducer.class),
-            JsonMapper.builder().build(), properties) {
+            JsonMapper.builder().build(), properties, mock(KafkaRawTopicMapper.class)) {
 
             @Override
-            void ensureTopics(SyncTask task, DataSource target) {
+            void ensureTopics(SyncTask task, DataSource target, String ownerType) {
                 topicChecks.incrementAndGet();
             }
 

@@ -10,6 +10,7 @@ import org.dromara.sync.config.KafkaBridgeProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.mapper.KafkaRawTopicMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -177,9 +178,10 @@ class KafkaRawFormatFidelityTest {
     private List<String[]> publish(List<String> raw, String sourceTable, String keys, String zone, int expectedMessages)
         throws InterruptedException {
         KafkaEventProducer producer = mock(KafkaEventProducer.class);
-        bridge = new KafkaTaskBridgeService(new KafkaEventNormalizer(mapper), producer, mapper, new KafkaBridgeProperties()) {
+        bridge = new KafkaTaskBridgeService(new KafkaEventNormalizer(mapper), producer, mapper, new KafkaBridgeProperties(),
+            mock(KafkaRawTopicMapper.class)) {
             @Override
-            void ensureTopics(SyncTask task, DataSource target) {
+            void ensureTopics(SyncTask task, DataSource target, String ownerType) {
             }
 
             @Override

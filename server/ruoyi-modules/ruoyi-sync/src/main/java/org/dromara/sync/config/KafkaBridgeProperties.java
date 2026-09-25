@@ -4,7 +4,9 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
-/** Limits of the in-process Kafka bridge ({@code KafkaTaskBridgeService}). */
+import java.time.Duration;
+
+/** Limits of the in-process Kafka bridge ({@code KafkaTaskBridgeService}) and its raw-topic cleanup. */
 @Data
 @Component
 @ConfigurationProperties(prefix = "sync.kafka-bridge")
@@ -20,4 +22,13 @@ public class KafkaBridgeProperties {
      * single tasks for roughly 130 threads and well under 100 MiB of buffers.
      */
     private int maxWorkers = 64;
+
+    /**
+     * How long a raw topic stays after the janitor first found no owner using it, before it is
+     * deleted. Owners only move to a new raw topic while their job is stopped, but a bridge worker
+     * on another instance may still be draining the old one until its reconciler retires it
+     * (within one reconcile interval, 30 s); the grace covers that with a wide margin. A deleted
+     * topic's registry row is kept for the same time, to catch a lingering client re-creating it.
+     */
+    private Duration rawTopicRetireGrace = Duration.ofMinutes(10);
 }
