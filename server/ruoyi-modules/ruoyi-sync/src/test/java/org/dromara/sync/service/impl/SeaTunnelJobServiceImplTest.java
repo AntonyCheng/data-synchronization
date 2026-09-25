@@ -160,7 +160,7 @@ class SeaTunnelJobServiceImplTest {
         assertThrows(ServiceException.class, () -> service.start(TASK_ID));
 
         InOrder order = inOrder(bridge, restClient);
-        order.verify(bridge).start(eq(task), eq(kafka), eq("source_db"));
+        order.verify(bridge).start(eq(task), eq(kafka), eq(mysql));
         order.verify(restClient).submit(anyString(), anyString(), isNull(), eq(false));
         order.verify(bridge).stop(TASK_ID);
         assertEquals("FAILED", task.getStatus());
@@ -300,7 +300,7 @@ class SeaTunnelJobServiceImplTest {
         when(bridge.tryStart(any(), any(), any())).thenReturn(true);
         service.refreshStatus(TASK_ID);
         // The heal of a job that already runs never takes the operator path that refuses when full.
-        verify(bridge).tryStart(eq(task), eq(kafka), eq("source_db"));
+        verify(bridge).tryStart(eq(task), eq(kafka), eq(mysql));
         verify(bridge, never()).start(any(), any(), any());
 
         when(restClient.status("job-1")).thenReturn(snapshot("DOING_SAVEPOINT", null, null));

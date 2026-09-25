@@ -18,6 +18,7 @@ import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.support.SourceTimeZones;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
 import org.dromara.sync.support.TableNames;
@@ -26,6 +27,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Duration;
+import java.time.ZoneId;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -98,27 +100,31 @@ public class KafkaTaskBridgeService {
         this.executor.allowCoreThreadTimeOut(true);
     }
 
-    /** Operator start of a platform task; publish metrics are persisted onto its ds_sync_task row. Throws when full. */
-    public void start(SyncTask task, DataSource target, String sourceDatabase) {
-        start(task, target, sourceDatabase, true, true);
+    /**
+     * Operator start of a platform task; publish metrics are persisted onto its ds_sync_task row. Throws when full.
+     * {@code source} is the task's source data source: its database names bounded snapshot rows, its time
+     * zone renders the {@code TIMESTAMP} values of CDC records (see {@link KafkaRawRecordReader}).
+     */
+    public void start(SyncTask task, DataSource target, DataSource source) {
+        start(task, target, source, true, true);
     }
 
     /** Operator start of a task-group item (no ds_sync_task metrics). Throws when full. */
-    public void startGroupItem(SyncTask task, DataSource target, String sourceDatabase) {
-        start(task, target, sourceDatabase, false, true);
+    public void startGroupItem(SyncTask task, DataSource target, DataSource source) {
+        start(task, target, source, false, true);
     }
 
     /** Bridge for a task whose engine job already runs; {@code false} = parked until a slot frees. */
-    public boolean tryStart(SyncTask task, DataSource target, String sourceDatabase) {
-        return start(task, target, sourceDatabase, true, false);
+    public boolean tryStart(SyncTask task, DataSource target, DataSource source) {
+        return start(task, target, source, true, false);
     }
 
     /** Bridge for a group item whose engine job already runs; {@code false} = parked until a slot frees. */
-    public boolean tryStartGroupItem(SyncTask task, DataSource target, String sourceDatabase) {
-        return start(task, target, sourceDatabase, false, false);
+    public boolean tryStartGroupItem(SyncTask task, DataSource target, DataSource source) {
+        return start(task, target, source, false, false);
     }
 
-    private boolean start(SyncTask task, DataSource target, String sourceDatabase, boolean persistTaskMetrics,
+    private boolean start(SyncTask task, DataSource target, DataSource source, boolean persistTaskMetrics,
                           boolean refuseWhenFull) {
         if (task == null || task.getTaskId() == null) throw new ServiceException("Kafka 桥接任务不能为空");
         if (!DataSourceType.isKafka(target)) {
@@ -130,6 +136,8 @@ public class KafkaTaskBridgeService {
         // Persisted at save time as the fully expanded, real-cased column list; used to
         // undo the Oracle-compat UPPER CASE folding a GoldenDB JDBC snapshot applies.
         List<String> sourceColumns = SyncColumnSelectionValidator.parseColumns(task.getSelectedColumns());
+        String sourceDatabase = source == null ? null : source.getDatabaseName();
+        ZoneId sourceZone = sourceZone(source);
         Long ownerId = task.getTaskId();
         // Before the topic precheck: a refused owner costs no AdminClient round trip.
         if (!admit(ownerId, refuseWhenFull)) return false;
@@ -143,7 +151,7 @@ public class KafkaTaskBridgeService {
                 if (existing != null && existing.isRunning()) return existing;
                 if (existing != null) existing.close();
                 Worker worker = new Worker(taskId, KafkaAdminClients.bootstrapServers(target), rawTopic(task), task.getTargetTable(),
-                    task.getSourceTable(), sourceDatabase, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
+                    task.getSourceTable(), sourceDatabase, sourceZone, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
                 worker.future = executor.submit(worker);
                 return worker;
             });
@@ -151,6 +159,16 @@ public class KafkaTaskBridgeService {
         }
         if (wasParked) log.info("kafka bridge got a free slot: owner {} is bridged again", ownerId);
         return true;
+    }
+
+    /**
+     * The zone the engine job was given as {@code server-time-zone}; the generator refuses to build a
+     * job for an invalid one, so an invalid value here was written around the service.
+     */
+    private static ZoneId sourceZone(DataSource source) {
+        String zone = SourceTimeZones.effective(source);
+        if (!SourceTimeZones.isValid(zone)) throw new ServiceException("源数据源的服务器时区“" + zone + "”无效，Kafka 桥接无法换算 TIMESTAMP");
+        return ZoneId.of(zone);
     }
 
     /**
@@ -269,11 +287,12 @@ public class KafkaTaskBridgeService {
                 try {
                     // One partition, deliberately. The raw topic is an internal buffer read by
                     // exactly one single-threaded bridge worker, so extra partitions buy no
-                    // throughput - they only cost ordering. Every UPDATE arrives as a DELETE +
-                    // CREATE pair (SeaTunnel's DEBEZIUM_JSON sink splits it); on a multi-partition
-                    // topic another row's event can interleave between the two halves and the
-                    // normalizer then can't merge them back into an op=UPDATE. A single
-                    // partition keeps the stream in binlog order so the pair stays adjacent.
+                    // throughput - they only cost ordering. A single partition keeps the stream in
+                    // binlog order: the initial load before every change, each key's changes in
+                    // order, and the DELETE + CREATE halves of an UPDATE adjacent where the engine
+                    // splits one (always with SeaTunnel's DEBEZIUM_JSON format, which jobs started
+                    // before compatible_debezium_json still write; with Debezium's records only when
+                    // the primary key changed and the sync key is another unique key).
                     admin.createTopics(List.of(new NewTopic(rawTopic, 1, (short) 1))).all().get(10, TimeUnit.SECONDS);
                 } catch (Exception ex) {
                     if (!(ex.getCause() instanceof TopicExistsException)) throw ex;
@@ -325,6 +344,7 @@ public class KafkaTaskBridgeService {
         private final List<String> sourceColumns;
         private final boolean persistTaskMetrics;
         private final KafkaOutputFormat outputFormat;
+        private final KafkaRawRecordReader reader;
         private final AtomicBoolean running = new AtomicBoolean(true);
         private volatile Consumer<String, String> consumer;
         private volatile Future<?> future;
@@ -332,6 +352,7 @@ public class KafkaTaskBridgeService {
 
         private Worker(Long taskId, String bootstrapServers, String rawTopic, String targetTopic, String sourceTable,
                        String sourceDatabase,
+                       ZoneId sourceZone,
                        List<String> keyFields,
                        List<String> sourceColumns,
                        boolean persistTaskMetrics,
@@ -346,6 +367,7 @@ public class KafkaTaskBridgeService {
             this.sourceColumns = List.copyOf(sourceColumns);
             this.persistTaskMetrics = persistTaskMetrics;
             this.outputFormat = outputFormat;
+            this.reader = new KafkaRawRecordReader(jsonMapper, sourceZone);
         }
 
         @Override
@@ -366,7 +388,8 @@ public class KafkaTaskBridgeService {
                         List<JsonNode> rawEvents = new java.util.ArrayList<>(records.count());
                         for (ConsumerRecord<String, String> record : records) {
                             if (!running.get()) return;
-                            rawEvents.add(jsonMapper.readTree(record.value()));
+                            JsonNode event = reader.read(record.value());
+                            if (event != null) rawEvents.add(event);
                         }
                         // MySQL CDC can emit UPDATE as DELETE and CREATE in separate
                         // poll batches. Keep a trailing DELETE uncommitted until the
@@ -411,12 +434,12 @@ public class KafkaTaskBridgeService {
                 else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
                 return;
             }
-            // MySQL-CDC (FULL_CDC / INCREMENTAL). SeaTunnel 2.3.13 maps a Debezium READ (initial
-            // load) and CREATE (binlog insert) to the same RowKind.INSERT, and its DEBEZIUM_JSON
-            // sink writes only op=c / op=d, never r. An initial-load row is identical to a binlog
-            // insert field by field (ts_ms is the capture time of both, no headers), so it is
-            // published as CDC. op=r is honoured only if an upstream ever sends it. See
-            // docs/kafka-event-formats.md for what consumers rely on instead.
+            // MySQL-CDC (FULL_CDC / INCREMENTAL). The engine writes Debezium's own records
+            // (compatible_debezium_json), so an initial-load row is op=r and published as SNAPSHOT.
+            // One engine run reads the binlog only after its whole initial load; a restarted or
+            // reinitialized job starts a new initial load in the same raw topic. A job started
+            // before that format (SeaTunnel's DEBEZIUM_JSON) wrote its initial load as op=c,
+            // indistinguishable from a binlog insert, and that stays CDC. See docs/kafka-event-formats.md.
             int snapshotCount = 0;
             while (snapshotCount < rawEvents.size()
                 && "r".equals(rawEvents.get(snapshotCount).path("op").asText())) snapshotCount++;

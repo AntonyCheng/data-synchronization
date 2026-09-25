@@ -130,8 +130,8 @@ public class EngineJobRunner implements DisposableBean {
      */
     public void preflight(Job job) {
         if (!job.kafka()) return;
-        if (job.groupItem()) bridge.startGroupItem(job.task(), job.target(), job.source().getDatabaseName());
-        else bridge.start(job.task(), job.target(), job.source().getDatabaseName());
+        if (job.groupItem()) bridge.startGroupItem(job.task(), job.target(), job.source());
+        else bridge.start(job.task(), job.target(), job.source());
     }
 
     /**
@@ -309,8 +309,8 @@ public class EngineJobRunner implements DisposableBean {
     public String healBridge(Job job) {
         if (!job.kafka() || bridge.isRunning(job.ownerId())) return null;
         try {
-            if (job.groupItem()) bridge.tryStartGroupItem(job.task(), job.target(), job.source().getDatabaseName());
-            else bridge.tryStart(job.task(), job.target(), job.source().getDatabaseName());
+            if (job.groupItem()) bridge.tryStartGroupItem(job.task(), job.target(), job.source());
+            else bridge.tryStart(job.task(), job.target(), job.source());
             return null;
         } catch (RuntimeException ex) {
             return "Kafka 桥接未能启动（引擎作业仍在运行，事件在原始 topic 中保留）："

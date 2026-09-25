@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,10 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Scenario 4: single-table FULL_CDC into Kafka. SeaTunnel writes a private raw Debezium topic;
- * the platform bridge publishes the normalized ENVELOPE events (docs/kafka-event-formats.md) to
- * the operator's topic, keyed by the sync key. Consumes the real output topic and pins the
- * initial-load INSERTs (phase CDC) and the CDC INSERT / UPDATE (with before image) / DELETE events.
+ * Scenario 4: single-table FULL_CDC into Kafka. SeaTunnel writes Debezium's own change events
+ * (compatible_debezium_json) to a private raw topic; the platform bridge publishes the normalized
+ * ENVELOPE events (docs/kafka-event-formats.md) to the operator's topic, keyed by the sync key.
+ * Consumes the real output topic and pins the initial-load INSERTs (phase SNAPSHOT, all before the
+ * first CDC event) and the CDC INSERT / UPDATE (with before image) / DELETE events, whose
+ * sourceEventTime is the binlog event time (whole seconds).
  */
 @Tag("e2e")
 class KafkaTaskE2eTest extends E2eSupport {
@@ -94,10 +97,8 @@ class KafkaTaskE2eTest extends E2eSupport {
                 Set.of(1L, 2L, 3L).stream().allMatch(id -> events.stream().anyMatch(e -> e.is("INSERT", id))), taskId);
             for (long id = 1; id <= 3; id++) {
                 Event event = first(snapshot, "INSERT", id);
-                // CDC by contract (docs/kafka-event-formats.md, "phase 的真实含义"): SeaTunnel writes
-                // a MySQL-CDC initial-load row as op=c, identical field for field to a binlog
-                // INSERT, so the platform has no signal to label it SNAPSHOT and does not guess.
-                assertEquals("CDC", text(event.value(), "phase"), "initial-load event phase: " + event);
+                // The engine hands Debezium's READ (op=r) through; docs/kafka-event-formats.md, "phase".
+                assertEquals("SNAPSHOT", text(event.value(), "phase"), "initial-load event phase: " + event);
                 assertEquals(defaultName(id), text(event.value().path("data"), "name"), "snapshot row data: " + event);
                 assertEquals("source_db", text(event.value().path("source"), "database"));
                 assertEquals(table, text(event.value().path("source"), "table"));
@@ -114,6 +115,11 @@ class KafkaTaskE2eTest extends E2eSupport {
 
             Event insert = first(all, "INSERT", 4);
             assertEquals("CDC", text(insert.value(), "phase"));
+            // sourceEventTime of a binlog event is the source's event time, whole seconds.
+            Instant eventTime = Instant.parse(text(insert.value(), "sourceEventTime"));
+            assertEquals(0, eventTime.getNano(), "binlog event time has whole seconds: " + insert);
+            // The binlog clock is the MySQL container's; allow for drift against this host.
+            assertTrue(!eventTime.isAfter(Instant.now().plusSeconds(5)), "event time is not in the future: " + insert);
             assertEquals("kafka-insert", text(insert.value().path("data"), "name"));
             assertEquals(1, insert.key().size(), "the message key is exactly the sync key: " + insert.key());
             assertEquals(insert.key(), insert.value().path("key"), "envelope key equals the message key");
@@ -127,8 +133,13 @@ class KafkaTaskE2eTest extends E2eSupport {
             assertEquals("row-2", text(delete.value().path("data"), "name"), "DELETE carries the deleted row: " + delete);
             assertTrue(all.stream().noneMatch(e -> e.is("INSERT", 2) && e.offset() > delete.offset()),
                 "nothing may resurrect the deleted row");
-            assertTrue(all.stream().noneMatch(e -> "SNAPSHOT".equals(text(e.value(), "phase"))),
-                "a FULL_CDC task never publishes SNAPSHOT: " + all);
+            long lastSnapshot = all.stream().filter(e -> "SNAPSHOT".equals(text(e.value(), "phase")))
+                .mapToLong(Event::offset).max().orElseThrow();
+            long firstCdc = all.stream().filter(e -> "CDC".equals(text(e.value(), "phase")))
+                .mapToLong(Event::offset).min().orElseThrow();
+            assertEquals(3, all.stream().filter(e -> "SNAPSHOT".equals(text(e.value(), "phase"))).count(),
+                "exactly the three initial-load rows are SNAPSHOT: " + all);
+            assertTrue(lastSnapshot < firstCdc, "the initial load precedes every CDC event: " + all);
             log("CDC events consumed");
         }
 

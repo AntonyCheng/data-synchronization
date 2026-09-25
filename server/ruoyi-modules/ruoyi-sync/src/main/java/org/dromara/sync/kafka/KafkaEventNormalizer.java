@@ -8,12 +8,16 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 
-/** Converts SeaTunnel Debezium JSON into the PRD Kafka event envelope. */
+/**
+ * Converts raw change events into the PRD Kafka event envelope. The input is what
+ * {@link KafkaRawRecordReader} makes of a raw record: {@code op} {@code r} (initial load) /
+ * {@code c} / {@code u} / {@code d}, the {@code before} / {@code after} images and {@code ts_ms}.
+ * Debezium's own records carry an UPDATE as one {@code u}; SeaTunnel's {@code DEBEZIUM_JSON} records
+ * split it into an adjacent {@code d} + {@code c}, which is merged back here.
+ */
 @Component
 public class KafkaEventNormalizer {
 
@@ -54,9 +58,24 @@ public class KafkaEventNormalizer {
                 }
             }
 
+            String phase = "r".equals(operation) || index < snapshotCount ? "SNAPSHOT" : "CDC";
+            String eventTime = eventTime(timestamp(current));
+            if ("u".equals(operation)) {
+                // Debezium's own UPDATE (compatible_debezium_json raw records) carries both images.
+                JsonNode before = current.path("before");
+                ObjectNode beforeKey = before.isObject() ? key(before, keyFields) : key;
+                if (beforeKey.toString().equals(key.toString())) {
+                    result.add(new NormalizedEvent("UPDATE", key, before.isObject() ? before : null,
+                        current.path("after"), phase, database, table, eventTime));
+                } else {
+                    // The sync key itself changed: the old key is gone, as for a d + c pair with two keys.
+                    result.add(new NormalizedEvent("DELETE", beforeKey, before, before, phase, database, table, eventTime));
+                    result.add(new NormalizedEvent("INSERT", key, null, current.path("after"), phase, database, table, eventTime));
+                }
+                continue;
+            }
             String normalizedOperation = switch (operation) {
                 case "c", "r" -> "INSERT";
-                case "u" -> "UPDATE";
                 case "d" -> "DELETE";
                 default -> throw new ServiceException("不支持的 Debezium 操作类型：" + operation);
             };
@@ -64,10 +83,12 @@ public class KafkaEventNormalizer {
             result.add(new NormalizedEvent(
                 normalizedOperation, key,
                 "DELETE".equals(normalizedOperation) ? current.path("before") : null,
-                data, "r".equals(operation) || index < snapshotCount ? "SNAPSHOT" : "CDC",
-                database, table, eventTime(timestamp(current))));
+                data, phase, database, table, eventTime));
         }
-        validatePhaseOrder(result);
+        // No ordering check across phases: a restarted or reinitialized job writes a new initial load
+        // (op=r) into the same raw topic after the previous run's changes, and each record's own op
+        // says which phase it belongs to. Within one run the engine reads the binlog only after the
+        // whole initial load (docs/kafka-event-formats.md).
         return List.copyOf(result);
     }
 
@@ -159,19 +180,6 @@ public class KafkaEventNormalizer {
             throw new ServiceException("Kafka 事件缺少字段：" + field);
         }
         return value.asText();
-    }
-
-    private static void validatePhaseOrder(List<NormalizedEvent> events) {
-        boolean cdcSeen = false;
-        Set<String> phases = new HashSet<>();
-        for (NormalizedEvent event : events) {
-            if ("CDC".equals(event.phase())) cdcSeen = true;
-            if ("SNAPSHOT".equals(event.phase()) && cdcSeen) {
-                throw new ServiceException("Kafka 事件阶段顺序无效：CDC 后不能回到 SNAPSHOT");
-            }
-            phases.add(event.phase());
-        }
-        if (phases.isEmpty()) throw new ServiceException("Kafka 事件阶段不能为空");
     }
 
     public record NormalizedEvent(String op, ObjectNode key, JsonNode before, JsonNode data,

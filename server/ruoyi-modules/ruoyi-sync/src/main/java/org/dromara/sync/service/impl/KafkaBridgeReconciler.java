@@ -83,8 +83,8 @@ public class KafkaBridgeReconciler {
             if (bridge.isRunning(want.ownerId())) continue;
             try {
                 boolean started = want.groupItem()
-                    ? bridge.tryStartGroupItem(want.task(), want.target(), want.sourceDatabase())
-                    : bridge.tryStart(want.task(), want.target(), want.sourceDatabase());
+                    ? bridge.tryStartGroupItem(want.task(), want.target(), want.source())
+                    : bridge.tryStart(want.task(), want.target(), want.source());
                 if (!started) continue;
                 if (failing.remove(want.ownerId())) log.info("kafka bridge recovered: owner {}", want.ownerId());
                 else log.info("kafka bridge started: owner {} ({})", want.ownerId(), want.groupItem() ? "group item" : "task");
@@ -106,7 +106,7 @@ public class KafkaBridgeReconciler {
             DataSource target = dataSource(dataSources, task.getTargetId());
             if (!DataSourceType.isKafka(target)) continue;
             DataSource source = dataSource(dataSources, task.getSourceId());
-            desired.put(task.getTaskId(), new Desired(task.getTaskId(), task, target, sourceDatabase(source), false));
+            desired.put(task.getTaskId(), new Desired(task.getTaskId(), task, target, source, false));
         }
         for (SyncTaskGroup group : groupMapper.selectLive()) {
             DataSource target = dataSource(dataSources, group.getTargetId());
@@ -115,7 +115,7 @@ public class KafkaBridgeReconciler {
             for (SyncTaskGroupItem item : itemMapper.selectByGroupId(group.getGroupId())) {
                 if (!SyncStatus.RUNNING.equals(item.getStatus())) continue;
                 desired.put(item.getItemId(), new Desired(item.getItemId(),
-                    SyncTaskGroupConfigGenerator.toTask(group, item), target, sourceDatabase(source), true));
+                    SyncTaskGroupConfigGenerator.toTask(group, item), target, source, true));
             }
         }
         return desired;
@@ -126,10 +126,6 @@ public class KafkaBridgeReconciler {
         return cache.computeIfAbsent(id, dataSourceMapper::selectById);
     }
 
-    private static String sourceDatabase(DataSource source) {
-        return source == null ? null : source.getDatabaseName();
-    }
-
-    private record Desired(Long ownerId, SyncTask task, DataSource target, String sourceDatabase, boolean groupItem) {
+    private record Desired(Long ownerId, SyncTask task, DataSource target, DataSource source, boolean groupItem) {
     }
 }

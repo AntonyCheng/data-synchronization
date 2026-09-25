@@ -880,7 +880,7 @@ class SyncTaskGroupServiceImplTest {
 
         assertEquals("RUNNING", item.getStatus());
         assertEquals("RUNNING", group.getStatus());
-        verify(bridge, times(4)).tryStartGroupItem(any(), any(), eq("source_db"));
+        verify(bridge, times(4)).tryStartGroupItem(any(), any(), eq(mysql));
         verify(bridge, never()).startGroupItem(any(), any(), any());
     }
 
