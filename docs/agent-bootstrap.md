@@ -3,6 +3,11 @@
 面向对象：在一台**全新机器**上、只拿到本仓库 `git clone` 结果的 AI 智能体。
 目标：把平台跑到「浏览器能登录、能建同步任务」的状态。
 
+> 当前采用 Linux 开发机 + Windows 验证机的双机模式（见 [dev-workflow.md](dev-workflow.md)）。本文描述的是搭建
+> **Windows 验证机**——平台在这台机器上运行。Linux 开发机只需 `sudo apt install openjdk-21-jdk-headless unzip`、
+> `~/.ssh/config` 里指向验证机的 `lxz-win` 别名，再执行 `./win.sh setup`；从 Linux 远程执行下文的 `dev.ps1`
+> 时用 `./win.sh dev …`（原因见 dev-workflow.md §8）。
+
 > 结论先行：装好 §1 的前置条件后，`.\dev.ps1 up` 会自动补齐仓库不携带的东西
 > （`web/.env.development`、`web/node_modules`、`-Poc` 需要的 SeaTunnel 连接器 JAR），
 > 不再需要手动步骤。**业务数据**（数据源、任务）在 gitignore 的数据库卷里，新机器是空的，

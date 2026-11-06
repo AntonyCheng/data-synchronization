@@ -42,14 +42,15 @@
 | [e2e-regression.md](e2e-regression.md) | 端到端回归套件：前置条件、运行命令、各场景钉住的语义与清理 |
 | [git-strategy.md](git-strategy.md) | Git 管理策略 |
 
-## 启动
+## 开发与启动
 
 | 文档 | 内容 |
 |---|---|
-| [agent-bootstrap.md](agent-bootstrap.md) | 在一台新机器上把项目跑起来（面向智能体，含仓库缺口清单） |
+| [dev-workflow.md](dev-workflow.md) | 开发模式：Linux 开发机（编辑、提交、编译、单测）+ Windows 验证机（运行、e2e、验收、部署），`win.sh` 用法与远程运行的坑 |
+| [agent-bootstrap.md](agent-bootstrap.md) | 在一台新的 Windows 验证机上把项目跑起来（面向智能体，含仓库缺口清单） |
 
 ## 相关资源
 
 - 本地引擎栈（SeaTunnel 镜像构建、Compose）、离线交付模板：仓库根目录 `deploy/`。
 - 平台开发阶段的元数据库 MySQL 和 Redis：`platform/`。
-- 启动方式见仓库根 `CLAUDE.md`（`dev.ps1`）。
+- 启动方式见仓库根 `CLAUDE.md`：Windows 上用 `dev.ps1`，从 Linux 开发机用 `win.sh`。

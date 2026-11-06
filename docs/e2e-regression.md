@@ -6,7 +6,8 @@
 
 ## 前置条件
 
-- 本地栈已启动：`.\dev.ps1 up -Poc`（后端 `:18081`、SeaTunnel REST `:18080`、源 MySQL `:23306`、PostgreSQL `:25432`、目标 MySQL `:23307`、Kafka `:29092`、平台 Redis `:16379`）。套件不启动、不停止、不重启任何进程或容器。
+- 套件在 **Windows 验证机**上运行（双机模式见 [dev-workflow.md](dev-workflow.md)），被测代码先经 `./win.sh sync` 同步过去。
+- 本地栈已启动：`.\dev.ps1 up -Poc`，从 Linux 为 `./win.sh dev up -Poc`（后端 `:18081`、SeaTunnel REST `:18080`、源 MySQL `:23306`、PostgreSQL `:25432`、目标 MySQL `:23307`、Kafka `:29092`、平台 Redis `:16379`）。套件不启动、不停止、不重启任何进程或容器。
 - 已登记数据源（按名称经 `GET /sync/data-source/options` 查找，不写死 ID）：`POC MySQL`、`POC PostgreSQL`、`POC MySQL Target`、`POC Kafka 3.8`。
 - 登录验证码开启时，答案从平台 Redis 的 `global:captcha_codes:<uuid>` 读取（内置极简 RESP 客户端）。
 - 源库建表/改表用 root（平台的 `seatunnel` 账号无 DDL 权限）。所有地址、账号可用 `-De2e.<key>=...` 或对应环境变量覆盖，见 `E2eConfig`。
@@ -22,6 +23,10 @@ mvn -q -o -Pdev -pl ruoyi-modules/ruoyi-sync -Dmaven.test.skip=false -Dgroups=e2
 ```
 
 `-q` 会隐藏汇总，结果看 `ruoyi-modules/ruoyi-sync/target/surefire-reports/`。每一步都有 `[e2e <runId> +耗时] ...` 进度日志（在报告的 system-out 中）。一次完整运行约 4 分钟，其中场景 1–3 约 2.5 分钟。
+
+从 Linux 开发机：`./win.sh e2e`（可追加 `-Dtest=...`）在 Windows 上以脱离 SSH 会话的方式运行同一条命令（不加 `-q`，日志里有汇总），
+`./win.sh wait e2e 1200` 等待结束——成功退出码 0，Maven 失败时日志以 `[win.sh] failed: mvn exited with code …` 结尾；
+单个用例的细节用 `./win.sh ps` 读 Windows 上的 surefire 报告。
 
 分组接线：根 pom 的 surefire 把 `<groups>` 固定为 `${profiles.active}`，命令行 `-Dgroups` 原本会被静默忽略。`ruoyi-sync/pom.xml` 改为经同名属性 `groups`（默认值仍为 `${profiles.active}`）传入，因此 `-Dgroups=e2e` 只选中本套件，默认与 `-Dgroups=dev` 的常规回归不受影响、永远不会跑到 e2e。模块同时以 test 作用域引入 MySQL / PostgreSQL JDBC 驱动（与 `ruoyi-admin` 运行时同版本）。
 

@@ -11,4 +11,5 @@ MySQL binlog CDC synchronization platform. MVP targets: PostgreSQL, MySQL and Ka
 - `docs/`: architecture and design reference.
 
 Start with [docs/README.md](docs/README.md), then the repo-root `CLAUDE.md` for how to run
-the stack (`dev.ps1`).
+the stack: `dev.ps1` on the Windows verification host, driven from the Linux dev box by `win.sh`
+([docs/dev-workflow.md](docs/dev-workflow.md)).

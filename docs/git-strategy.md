@@ -10,7 +10,7 @@
 - `platform/` 的 Compose、初始化脚本、`.env.example` 和说明文档。
 - `deploy/` 的本地引擎栈 Compose、SeaTunnel 镜像构建文件、元数据库迁移脚本和离线交付模板。
 - `docs/` 的架构和设计参考文档。
-- 根目录 `.gitignore`、`dev.ps1` 以及项目级 README、CI 和开发脚本。
+- 根目录 `.gitignore`、`dev.ps1`、`win.sh` 以及项目级 README、CI 和开发脚本。
 
 ## 不应提交内容
 

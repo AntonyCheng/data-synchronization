@@ -25,17 +25,64 @@ scheduling, and the SeaTunnel REST adapter.
 
 All product API routes live under `/sync`; backend package is `org.dromara.sync`.
 
+## Development topology — Linux dev box + Windows verification host
+
+Since 2026-11 the work is split across two machines (full guide: `docs/dev-workflow.md`):
+
+- **Linux dev box** — this checkout, where Claude Code runs. 2 vCPU / 3.8 GB, so it only edits,
+  commits, compiles and tests: the `@Tag("dev")` unit regression (OpenJDK 21 from apt; `sh mvnw` in
+  `server/`) and the frontend `pnpm lint` (oxlint + `tsc`, run in `web/`). It never starts the backend,
+  the frontend dev server or containers.
+- **Windows verification host** — `lxz-win` in `~/.ssh/config` (10.9.0.6, `C:\projects\data-synchronization`,
+  PowerShell 5.1, Docker Desktop). Everything that *runs* happens there: `dev.ps1` (incl. the `-Poc`
+  engine stack), the e2e suite, browser checks, offline packaging and deployment.
+  Its working tree is a mirror of the Linux one (branch `sync/linux`) — never edit code there.
+
+The repo-root `win.sh` drives the Windows host from Linux:
+
+```bash
+./win.sh sync                                       # mirror this working tree (untracked files too) to Windows; refused if Windows has local edits
+./win.sh dev up -Poc && ./win.sh wait dev-up 1500   # whole stack, detached (`dev status`, `dev down [-All]` run inline)
+./win.sh dev restart-backend && ./win.sh wait dev-restart-backend 600
+./win.sh devlog backend 200                         # `dev.ps1 logs` follows forever - never call it remotely
+./win.sh e2e [-Dtest=...] && ./win.sh wait e2e 1200
+./win.sh ps 'git status --short; docker ps'          # any PowerShell in the Windows repo root (UTF-8; JDK 21 on PATH)
+./win.sh tunnel                                     # 127.0.0.1:28081/18003/28080 here -> Windows 18081/8003/18080 (only port 22 crosses the VPN)
+```
+
+What `win.sh` handles, and a raw `ssh lxz-win ...` must too: Windows OpenSSH kills every process of a
+session when the session ends (`Start-Process` children included), so anything that must outlive the
+command is created through WMI (`win.sh bg`); under PS 5.1, piping or redirecting a native command's
+stderr (`|`, `2>&1`, `*>&1`) turns each stderr line into an error that `$ErrorActionPreference = 'Stop'`
+(as in `dev.ps1`) makes fatal; the default SSH shell is cmd.exe with GBK output; and a remote session
+cannot reach the Windows credential store, so a `docker pull` or an image build that needs the registry
+fails there — the engine image is used as built, and is rebuilt only in an interactive session on Windows.
+What it cannot handle: an SSH session of this admin account is elevated (High integrity), and Windows 11
+refuses to let an elevated process cross junctions / symlinks a normal process created ("untrusted mount
+point") — pnpm's `node_modules` is all junctions, so **no Node tooling runs remotely**. The frontend dev
+server is started by the user in a terminal on Windows (`.\dev.ps1 up` skips what already runs); frontend
+lint runs on Linux. Linux→Windows runs at ~8 KB/s: sync git
+deltas only, build artifacts on Windows. The Windows host is shared with other projects: touch only
+`dbs-*` / `ds-poc-*` / `data-sync-mvp-offline-*` containers, never `docker system prune`, and mind
+C: (~16 GB free).
+
 ## Essential commands
 
-> **Fresh machine?** `dev.ps1 up` self-provisions what the repo does not carry —
+Everything in this section except the backend unit tests and the frontend `pnpm install` / `pnpm lint`
+(both on the Linux dev box) runs on the **Windows host** — in a terminal there, or from Linux through
+`./win.sh dev …` / `./win.sh ps '…'` (Node tooling only in a terminal there, see above).
+
+> **Fresh Windows host?** `dev.ps1 up` self-provisions what the repo does not carry —
 > `web/.env.development` (from `.env.example`), `web/node_modules` (`pnpm install`),
 > and, for `-Poc`, the SeaTunnel connector JARs (`deploy/local-stack/seatunnel/fetch-vendor.ps1`,
 > SHA-1-checked against `vendor/checksums.sha1`). See `docs/agent-bootstrap.md`.
+> **Fresh Linux dev box?** `sudo apt install openjdk-21-jdk-headless unzip`, an `lxz-win` SSH alias,
+> then `./win.sh setup`.
 
 ### One command for the whole local stack — `dev.ps1` (repo root)
 
 `dev.ps1` orchestrates docker (base services) + java21 (backend) + pnpm (frontend).
-Windows PowerShell 5.1 compatible (there is no `pwsh` on the dev machine).
+Windows PowerShell 5.1 compatible (there is no `pwsh` on the Windows host).
 
 ```powershell
 .\dev.ps1 up                 # containers(health-gated) -> migrations(idempotent) -> backend ∥ frontend -> prints URLs
@@ -75,19 +122,22 @@ Dev-profile default also disables Snail-AI OpenAPI and MyBatis SQL logging (over
 with `SNAIL_AI_OPENAPI_ENABLED` / `MYBATIS_SQL_LOG`).
 
 Tests are **skipped by default**. Surefire filters by JUnit `@Tag` equal to the active
-profile, so runnable tests are tagged `@Tag("dev")`. To run the `ruoyi-sync` regression:
+profile, so runnable tests are tagged `@Tag("dev")`. To run the `ruoyi-sync` regression —
+on the Linux dev box, from `server/` (~35 s warm, 261 tests at `eb26645`; the wrapper has no exec bit):
 
-```powershell
-mvn -Pdev -pl ruoyi-modules/ruoyi-sync -am -Dmaven.test.skip=false -Dgroups=dev -Dsurefire.failIfNoSpecifiedTests=false test
-# single class(es): append -Dtest=SyncTaskSchedulerTest,ResourceProtectionPolicyTest
+```bash
+MAVEN_OPTS="-Xmx768m -XX:+UseSerialGC" sh mvnw -B -ntp -o -Pdev -pl ruoyi-modules/ruoyi-sync -am -Dmaven.test.skip=false -Dgroups=dev -Dsurefire.failIfNoSpecifiedTests=false test
+# single class(es): append -Dtest=SyncTaskSchedulerTest,ResourceProtectionPolicyTest; drop -o after adding a dependency
 ```
 
-Black-box e2e suite against the running `dev.ps1 up -Poc` stack (`@Tag("e2e")`, `-Dgroups=e2e`, never part of the `dev` run): see `docs/e2e-regression.md`.
+Black-box e2e suite against the running `dev.ps1 up -Poc` stack (`@Tag("e2e")`, `-Dgroups=e2e`, never part of the `dev` run): runs on the Windows host (`./win.sh e2e`), see `docs/e2e-regression.md`.
 
 ### Frontend — manual (run from `web/`)
 
 pnpm 10 / Node ≥ 20.19. Dev server port comes from `web/.env.development`
 `VITE_APP_PORT` (currently **8003**); proxies `/dev-api` + `/prod-api` → `:18081`.
+`pnpm install` / `lint` / `fmt` run on the Linux dev box (lint ~30 s); `pnpm dev` / `build` run on the
+Windows host, in an interactive terminal there.
 
 ```powershell
 pnpm install
@@ -215,6 +265,9 @@ Spring/MyBatis-Plus or React/Antd habits.
   `SYNC_CREDENTIAL_ENCRYPTION_ENABLED=true` + `SYNC_CREDENTIAL_ENCRYPTION_PASSWORD=<16|24|32 chars>`
   (`mybatis-encryptor` in yaml). Plaintext POC rows stay readable; a save (blank password
   field keeps the current value) migrates a row to ciphertext. See `docs/credential-protection.md`.
+  On the Windows host both are set at User scope (`dev.ps1` imports them) and the metadata DB's
+  data sources are encrypted with that password — never print it, and never point a backend
+  started anywhere else at that database.
 - The backend start scripts set `-Djdk.net.unixdomain.tmpdir` to an ASCII path under
   `.dev-runtime/jdk-sockets` — a JDK 21 / Redisson issue when the Windows user profile
   path contains non-ASCII characters. Keep that workaround if you touch startup.
@@ -225,7 +278,8 @@ Spring/MyBatis-Plus or React/Antd habits.
   `.dev-runtime/`, or `deploy/release/` (offline package build output).
   Commit only `.env.example` templates. See `docs/git-strategy.md`.
 - Commit message style in history is Conventional-Commits-ish with a scope for repo-wide
-  changes: `poc:`, `release:`, `docs(repo):`, `chore(repo):`.
+  changes: `poc:`, `release:`, `docs(repo):`, `chore(repo):`. Commits are made on the Linux dev
+  box as `AntonyCheng <1911261716@qq.com>` (repo-local git config, same identity as the history).
 
 ## Codex config import
 
