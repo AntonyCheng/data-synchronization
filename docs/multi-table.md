@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-MVP 支持显式多表任务组和整库范围任务组。两者均支持 MySQL -> PostgreSQL/MySQL/Kafka、全量 + binlog CDC；整库组可选择自动发现新增表。执行模型仍是一张表一个 SeaTunnel job，不引入跨表事务或自动 DDL。
+MVP 支持显式多表任务组和整库范围任务组。两者均支持 MySQL -> PostgreSQL/MySQL/Kafka，同步模式与单表相同（全量、纯增量、全量 + binlog CDC）；整库组可选择自动发现新增表。执行模型仍是一张表一个 SeaTunnel job，不引入跨表事务或自动 DDL。
 
 表项的字段选择在保存时物化为具体列并同时记录源表结构基线；启动和“重新初始化该表”时，覆盖了基线全部列的选择被视为“整表”，会按源表当前结构重新推导（新增列自动纳入，并在启动前校验中一并检查目标端），显式子集则原样保留。新发现的表沿用组内已有表项的目标 schema，没有时取目标数据源配置的 schema（PostgreSQL 默认 `public`）。
 
@@ -24,7 +24,7 @@ MVP 支持显式多表任务组和整库范围任务组。两者均支持 MySQL 
 
 - 每个表项生成一份独立的 MySQL -> PostgreSQL 配置并提交一个 SeaTunnel job；每个 job 拥有独立 checkpoint/savepoint。组级操作按表项顺序执行并聚合结果，不把组级状态误当成单表状态。
 - 显式多表组保持原子启动：任一表校验或提交失败时补偿停止前序作业。整库组将发现阶段已确认的表级错误隔离为 `FAILED`，继续提交其他可用表；运行中新增表提交失败也只影响该表，组状态聚合为 `DEGRADED`。
-- 任务组状态为 `DRAFT -> VALIDATING -> RUNNING/DEGRADED -> PAUSING -> PAUSED/FAILED -> STOPPED`，表项另存 `PENDING/RUNNING/DEGRADED/FAILED/FINISHED`。显式多表启动失败时已提交的前序表项会被停止并记录补偿错误，避免出现“接口失败但部分运行”的隐性状态。
+- 任务组状态由表项状态聚合（`support/GroupStatuses.aggregate`）：`DRAFT`、`RUNNING`、`DEGRADED`（有表被隔离为 `FAILED` / `DDL_BLOCKED`，其余仍在运行）、`PAUSING`、`PAUSED`、`STOPPED`、`FAILED`（只剩被隔离的表）；表项状态为 `PENDING`、`RUNNING`、`PAUSING`、`PAUSED`、`DDL_BLOCKED`、`FAILED`、`STOPPED`、`FINISHED`。显式多表启动失败时已提交的前序表项会被停止并记录补偿错误，避免出现“接口失败但部分运行”的隐性状态。
 - 恢复使用同一版本配置和 job 级 savepoint；若映射、列或凭证版本变化，必须新建版本并重新全量。
 
 ### 部分失败语义（生命周期不使用数据库事务）

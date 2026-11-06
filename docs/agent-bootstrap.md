@@ -46,7 +46,7 @@
    - `web/node_modules` 不存在 → 跑 `pnpm install`。
 2. `docker compose`（`platform/docker-compose.yml`，项目名 `data-sync-platform`）拉起 `dbs-mysql`(:13306) 和 `dbs-redis`(:16379)，健康门控。
    - 首次启动时 MySQL init 容器用 `utf8mb4` 客户端执行 `server/script/sql/ry_vue.sql`（RuoYi 上游全量 schema + 中文种子）和 `ry_sync.sql`（本项目基线 schema），都随仓库提交。
-3. `deploy/migrate-platform-schema.ps1` 幂等地按文件名顺序套用 `server/script/sql/ry_sync_migration_*.sql`（002–017）。
+3. `deploy/migrate-platform-schema.ps1` 幂等地按文件名顺序套用全部 `server/script/sql/ry_sync_migration_*.sql`。
 4. 前端：`pnpm dev`（Umi/Vite dev server，端口取自 `.env.development` 的 `VITE_APP_PORT`=8003）。
 5. 后端：reactor `install`（跳过 fat jar，约 35s 热态）→ 从 `server/ruoyi-admin/` 跑 `mvn spring-boot:run`，端口 `18081`。
 
@@ -161,7 +161,7 @@ REDIS_PASSWORD=ruoyi123
 
 - 后端全部代码 + `application-dev.yml` / `application-dev-fast.yml`（业务模块只有 `server/ruoyi-modules/ruoyi-sync` 是本项目的）
 - 前端全部 `web/src`、`web/config`、`web/vite.config.ts`、`web/package.json` + `pnpm-lock.yaml`
-- 元数据库 schema：`ry_vue.sql` + `ry_sync.sql` + `ry_sync_migration_002..017.sql`
+- 元数据库 schema：`ry_vue.sql` + `ry_sync.sql` + 全部 `ry_sync_migration_*.sql`
 - 编排脚本：`dev.ps1`、`server/script/bin/*.ps1`、`deploy/migrate-platform-schema.ps1`、`deploy/local-stack/seatunnel/fetch-vendor.ps1`
 - 引擎栈 compose、SeaTunnel `Dockerfile` / `entrypoint.sh` / `config/seatunnel.yaml` / `vendor/checksums.sha1` / `patch/`（GoldenDB 兼容补丁源码 + 自检）、源/目标库 init SQL
 - 离线交付模板：`deploy/offline/`、`deploy/build-offline-package.ps1`
