@@ -41,12 +41,23 @@ public class KafkaEventNormalizer {
      */
     public List<NormalizedEvent> normalize(List<JsonNode> changeEvents, int snapshotCount, List<String> keyFields,
                                            List<String> selectedColumns) {
+        return normalizeIndexed(changeEvents, snapshotCount, keyFields, selectedColumns).stream().map(Indexed::event).toList();
+    }
+
+    /**
+     * {@link #normalize(List, int, List, List)}, each event with the position in {@code changeEvents} of
+     * the first raw event it was made from (a merged {@code d} + {@code c} pair carries the {@code d}'s,
+     * both halves of a key-changing {@code u} carry the {@code u}'s). The bridge maps it back to the raw
+     * offset it may commit up to when publishing stops at that event.
+     */
+    public List<Indexed> normalizeIndexed(List<JsonNode> changeEvents, int snapshotCount, List<String> keyFields,
+                                          List<String> selectedColumns) {
         if (changeEvents == null || changeEvents.isEmpty()) throw new ServiceException("Kafka 原始事件不能为空");
         if (snapshotCount < 0 || snapshotCount > changeEvents.size()) throw new ServiceException("Kafka 快照事件数量无效");
         if (keyFields == null || keyFields.isEmpty()) throw new ServiceException("Kafka 必须配置可靠同步键");
         List<JsonNode> rawEvents = selectedColumns == null || selectedColumns.isEmpty()
             ? changeEvents : project(changeEvents, selectedColumns);
-        List<NormalizedEvent> result = new ArrayList<>();
+        List<Indexed> result = new ArrayList<>();
         for (int index = 0; index < rawEvents.size(); index++) {
             JsonNode current = rawEvents.get(index);
             String operation = requiredText(current, "op");
@@ -63,10 +74,10 @@ public class KafkaEventNormalizer {
                     && table.equals(next.path("source").path("table").asText())) {
                     ObjectNode nextKey = key(next.path("after"), keyFields);
                     if (key.toString().equals(nextKey.toString())) {
-                        result.add(new NormalizedEvent(
+                        result.add(new Indexed(new NormalizedEvent(
                             "UPDATE", key, current.path("before"), next.path("after"),
                             phase(index, snapshotCount), database, table,
-                            eventTime(Math.max(timestamp(current), timestamp(next)))));
+                            eventTime(Math.max(timestamp(current), timestamp(next)))), index));
                         index++;
                         continue;
                     }
@@ -80,12 +91,12 @@ public class KafkaEventNormalizer {
                 JsonNode before = current.path("before");
                 ObjectNode beforeKey = before.isObject() ? key(before, keyFields) : key;
                 if (beforeKey.toString().equals(key.toString())) {
-                    result.add(new NormalizedEvent("UPDATE", key, before.isObject() ? before : null,
-                        current.path("after"), phase, database, table, eventTime));
+                    result.add(new Indexed(new NormalizedEvent("UPDATE", key, before.isObject() ? before : null,
+                        current.path("after"), phase, database, table, eventTime), index));
                 } else {
                     // The sync key itself changed: the old key is gone, as for a d + c pair with two keys.
-                    result.add(new NormalizedEvent("DELETE", beforeKey, before, before, phase, database, table, eventTime));
-                    result.add(new NormalizedEvent("INSERT", key, null, current.path("after"), phase, database, table, eventTime));
+                    result.add(new Indexed(new NormalizedEvent("DELETE", beforeKey, before, before, phase, database, table, eventTime), index));
+                    result.add(new Indexed(new NormalizedEvent("INSERT", key, null, current.path("after"), phase, database, table, eventTime), index));
                 }
                 continue;
             }
@@ -95,10 +106,10 @@ public class KafkaEventNormalizer {
                 default -> throw new ServiceException("不支持的 Debezium 操作类型：" + operation);
             };
             JsonNode data = "DELETE".equals(normalizedOperation) ? current.path("before") : current.path("after");
-            result.add(new NormalizedEvent(
+            result.add(new Indexed(new NormalizedEvent(
                 normalizedOperation, key,
                 "DELETE".equals(normalizedOperation) ? current.path("before") : null,
-                data, phase, database, table, eventTime));
+                data, phase, database, table, eventTime), index));
         }
         // No ordering check across phases: a restarted or reinitialized job writes a new initial load
         // (op=r) into the same raw topic after the previous run's changes, and each record's own op
@@ -226,5 +237,9 @@ public class KafkaEventNormalizer {
     public record NormalizedEvent(String op, ObjectNode key, JsonNode before, JsonNode data,
                                   String phase, String sourceDatabase, String sourceTable,
                                   String sourceEventTime) {
+    }
+
+    /** A normalized event and the position of the first raw event it came from; see {@link #normalizeIndexed}. */
+    public record Indexed(NormalizedEvent event, int input) {
     }
 }

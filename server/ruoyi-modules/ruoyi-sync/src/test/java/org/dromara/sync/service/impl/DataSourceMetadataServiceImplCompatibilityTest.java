@@ -1,8 +1,9 @@
 package org.dromara.sync.service.impl;
 
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.sql.Types;
@@ -13,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Tag("dev")
 class DataSourceMetadataServiceImplCompatibilityTest {
 
-    private final DataSourceMetadataServiceImpl service = new DataSourceMetadataServiceImpl(null, null);
+    private final DataSourceMetadataServiceImpl service = new DataSourceMetadataServiceImpl(null, null, new SeaTunnelProperties());
 
     @Test
     void mysqlJsonToMysqlJsonIsCompatible() throws Exception {

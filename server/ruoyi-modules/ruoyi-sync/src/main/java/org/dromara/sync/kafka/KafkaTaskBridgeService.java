@@ -3,23 +3,36 @@ package org.dromara.sync.kafka;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.Config;
+import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.NoOffsetForPartitionException;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.InvalidConfigurationException;
+import org.apache.kafka.common.errors.InvalidRequestException;
+import org.apache.kafka.common.errors.PolicyViolationException;
 import org.apache.kafka.common.errors.TopicExistsException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.KafkaBridgeProperties;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.KafkaRawTopic;
 import org.dromara.sync.domain.SyncTask;
-import org.dromara.sync.mapper.KafkaRawTopicMapper;
 import org.dromara.sync.support.SourceTimeZones;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
@@ -31,13 +44,16 @@ import tools.jackson.databind.json.JsonMapper;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -45,10 +61,25 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 /**
  * Owns the runtime bridge from SeaTunnel's Debezium raw topic to the PRD event topic.
  * Offsets are committed only after the normalized event has received a broker ack.
+ *
+ * <p>Delivery: the bridge never moves past an event it could not publish. When publishing stops - the
+ * output topic refuses an event (too large, no ACL), the broker fails, a raw record is unreadable - the
+ * worker commits the raw offset up to that event, records why on the owner row
+ * ({@code kafka_bridge_error}, which the status refresh shows and {@code SyncAlertNotifier} announces)
+ * and tries the same event again after a growing wait ({@code sync.kafka-bridge.retry-*}); the record
+ * is cleared once it goes through. The worker stays alive meanwhile, so the reconciler and the status
+ * refresh leave it alone - they used to restart a dead worker every 30 s, and it republished the
+ * events behind the failed one each time.
+ *
+ * <p>Position: the consumer runs with {@code auto.offset.reset=none}. When Kafka has no valid offset
+ * for the raw topic, the worker decides itself ({@code Worker#position}) and never jumps silently: a
+ * position retention already deleted, or one past the end of a recreated topic, is reported with
+ * {@link #RAW_TOPIC_GAP_PREFIX}, and the status refresh parks the owner for reinitialization.
  *
  * <p>Capacity: at most {@code sync.kafka-bridge.max-workers} workers (one thread + one consumer
  * each) per instance. An owner that already has a worker keeps its slot when the worker is
@@ -72,14 +103,30 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class KafkaTaskBridgeService {
 
     public static final String RAW_TOPIC_PREFIX = "__ds_raw_";
+    /**
+     * Starts the stop reason of a bridge whose raw-topic position is gone - events the bridge never
+     * published can no longer be read. Only a new initial load repairs that, so the status refresh
+     * parks such an owner (REINITIALIZE_REQUIRED, or FAILED for a table item) instead of retrying.
+     */
+    public static final String RAW_TOPIC_GAP_PREFIX = "Kafka raw topic 位点越界：";
+    /** Starts every other stop reason: {@code Kafka 桥接已暂停发布：停在 raw offset 7，<why>}. */
+    public static final String STOPPED_PREFIX = "Kafka 桥接已暂停发布：";
+    private static final String REINITIALIZE_HINT = "。需要重新初始化：单表任务请停止后重新启动或重新初始化，任务组表项请「重新初始化该表」";
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     /** Bounded by POLL_TIMEOUT plus one commit round-trip; anything longer means the worker is wedged. */
     private static final Duration GRACEFUL_STOP_TIMEOUT = Duration.ofSeconds(5);
+    /** How far the registry's copy of the committed raw offset may trail the consumer group's. */
+    private static final long OFFSET_SAVE_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
+    /** Head room of the raw topic's {@code max.message.bytes} over the engine producer's record limit (batch framing). */
+    private static final int RAW_TOPIC_FRAMING_BYTES = 1024;
+    private static final int KAFKA_DEFAULT_MAX_BYTES = 1024 * 1024;
     private static final String MAX_WORKERS_KEY = "sync.kafka-bridge.max-workers";
     private final KafkaEventNormalizer normalizer;
     private final KafkaEventProducer producer;
     private final JsonMapper jsonMapper;
-    private final KafkaRawTopicMapper rawTopicMapper;
+    private final KafkaBridgeProperties properties;
+    private final SeaTunnelProperties engineProperties;
+    private final KafkaBridgeStateStore stateStore;
     private final int maxWorkers;
     private final ConcurrentMap<Long, Worker> workers = new ConcurrentHashMap<>();
     /** RUNNING owners refused a worker because the pool was full; they get the next free slots. */
@@ -94,11 +141,14 @@ public class KafkaTaskBridgeService {
     private final ThreadPoolExecutor executor;
 
     public KafkaTaskBridgeService(KafkaEventNormalizer normalizer, KafkaEventProducer producer, JsonMapper jsonMapper,
-                                  KafkaBridgeProperties properties, KafkaRawTopicMapper rawTopicMapper) {
+                                  KafkaBridgeProperties properties, SeaTunnelProperties engineProperties,
+                                  KafkaBridgeStateStore stateStore) {
         this.normalizer = normalizer;
         this.producer = producer;
         this.jsonMapper = jsonMapper;
-        this.rawTopicMapper = rawTopicMapper;
+        this.properties = properties;
+        this.engineProperties = engineProperties;
+        this.stateStore = stateStore;
         this.maxWorkers = Math.max(1, properties.getMaxWorkers());
         AtomicInteger threads = new AtomicInteger();
         this.executor = new ThreadPoolExecutor(maxWorkers, maxWorkers, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
@@ -113,28 +163,31 @@ public class KafkaTaskBridgeService {
      * Operator start of a platform task; publish metrics are persisted onto its ds_sync_task row. Throws when full.
      * {@code source} is the task's source data source: its database names bounded snapshot rows, its time
      * zone renders the {@code TIMESTAMP} values of CDC records (see {@link KafkaRawRecordReader}).
+     * {@code freshRun}: the job about to be submitted starts a new run (start, reinitialize) rather than
+     * resuming a savepoint, so its new initial load may begin at the earliest retained raw record when
+     * the bridge's old position is unreadable.
      */
-    public void start(SyncTask task, DataSource target, DataSource source) {
-        start(task, target, source, true, true);
+    public void start(SyncTask task, DataSource target, DataSource source, boolean freshRun) {
+        start(task, target, source, true, true, freshRun);
     }
 
-    /** Operator start of a task-group item (no ds_sync_task metrics). Throws when full. */
-    public void startGroupItem(SyncTask task, DataSource target, DataSource source) {
-        start(task, target, source, false, true);
+    /** Operator start of a task-group item (no ds_sync_task metrics). Throws when full. See {@link #start}. */
+    public void startGroupItem(SyncTask task, DataSource target, DataSource source, boolean freshRun) {
+        start(task, target, source, false, true, freshRun);
     }
 
     /** Bridge for a task whose engine job already runs; {@code false} = parked until a slot frees. */
     public boolean tryStart(SyncTask task, DataSource target, DataSource source) {
-        return start(task, target, source, true, false);
+        return start(task, target, source, true, false, false);
     }
 
     /** Bridge for a group item whose engine job already runs; {@code false} = parked until a slot frees. */
     public boolean tryStartGroupItem(SyncTask task, DataSource target, DataSource source) {
-        return start(task, target, source, false, false);
+        return start(task, target, source, false, false, false);
     }
 
     private boolean start(SyncTask task, DataSource target, DataSource source, boolean persistTaskMetrics,
-                          boolean refuseWhenFull) {
+                          boolean refuseWhenFull, boolean freshRun) {
         if (task == null || task.getTaskId() == null) throw new ServiceException("Kafka 桥接任务不能为空");
         if (!DataSourceType.isKafka(target)) {
             throw new ServiceException("Kafka 桥接目标数据源无效");
@@ -149,9 +202,16 @@ public class KafkaTaskBridgeService {
         String sourceDatabase = source == null ? null : source.getDatabaseName();
         ZoneId sourceZone = sourceZone(source);
         Long ownerId = task.getTaskId();
+        String ownerType = persistTaskMetrics ? KafkaRawTopic.OWNER_TASK : KafkaRawTopic.OWNER_GROUP_ITEM;
         // Before the topic precheck: a refused owner costs no AdminClient round trip.
         if (!admit(ownerId, refuseWhenFull)) return false;
-        ensureTopics(task, target, persistTaskMetrics ? KafkaRawTopic.OWNER_TASK : KafkaRawTopic.OWNER_GROUP_ITEM);
+        ensureTopics(task, target, ownerType);
+        if (refuseWhenFull) {
+            // An operator starts or resumes the owner: whatever stopped its previous bridge is history,
+            // and a worker that finds it again records it again.
+            stateStore.clearBlocked(ownerType, ownerId);
+            if (freshRun) stateStore.allowReset(target.getSourceId(), rawTopic(task));
+        }
         KafkaOutputFormat outputFormat = KafkaOutputFormat.parse(task.getKafkaOutputFormat());
         boolean wasParked;
         synchronized (admission) {
@@ -160,8 +220,9 @@ public class KafkaTaskBridgeService {
             workers.compute(ownerId, (taskId, existing) -> {
                 if (existing != null && existing.isRunning()) return existing;
                 if (existing != null) existing.close();
-                Worker worker = new Worker(taskId, KafkaAdminClients.bootstrapServers(target), rawTopic(task), task.getTargetTable(),
-                    task.getSourceTable(), sourceDatabase, sourceZone, keyFields, sourceColumns, persistTaskMetrics, outputFormat);
+                Worker worker = new Worker(taskId, ownerType, target.getSourceId(), KafkaAdminClients.bootstrapServers(target),
+                    rawTopic(task), task.getTargetTable(), task.getSourceTable(), sourceDatabase, sourceZone, keyFields,
+                    sourceColumns, persistTaskMetrics, outputFormat);
                 worker.future = executor.submit(worker);
                 return worker;
             });
@@ -238,6 +299,32 @@ public class KafkaTaskBridgeService {
         return StringUtils.isBlank(lastError) ? notice : notice + "；" + lastError;
     }
 
+    /** True when {@code bridgeError} says the owner's raw-topic position is gone; see {@link #RAW_TOPIC_GAP_PREFIX}. */
+    public static boolean isRawTopicGap(String bridgeError) {
+        return bridgeError != null && bridgeError.startsWith(RAW_TOPIC_GAP_PREFIX);
+    }
+
+    /**
+     * The end-to-end lag to show for an owner whose bridge stopped publishing at {@code stoppedSince}
+     * (null while it publishes): the lag stored at the last event that went through froze there,
+     * while the events behind the stop have been waiting at least since it.
+     */
+    public static Long effectiveLagSeconds(Long storedLag, LocalDateTime stoppedSince, LocalDateTime now) {
+        if (stoppedSince == null) return storedLag;
+        long waited = Math.max(0, Duration.between(stoppedSince, now).getSeconds());
+        return storedLag == null ? waited : Math.max(storedLag, waited);
+    }
+
+    /**
+     * The backlog to show for an owner whose bridge stopped publishing ({@code stoppedSince} non-null):
+     * the engine counts only what it has not yet written to the raw topic, which a stopped bridge
+     * leaves at 0, so the raw records waiting behind the stop - counted at its last attempt - are added.
+     */
+    public static Long effectiveBacklogRows(Long engineBacklog, LocalDateTime stoppedSince, Long bridgeBacklog) {
+        if (stoppedSince == null || bridgeBacklog == null) return engineBacklog;
+        return (engineBacklog == null ? 0 : engineBacklog) + bridgeBacklog;
+    }
+
     public void stop(Long taskId) {
         Worker worker;
         synchronized (admission) {
@@ -298,19 +385,7 @@ public class KafkaTaskBridgeService {
                 throw new ServiceException("Kafka 目标 topic 没有可用分区：" + task.getTargetTable());
             }
             if (!knownTopics.contains(rawTopic)) {
-                try {
-                    // One partition, deliberately. The raw topic is an internal buffer read by
-                    // exactly one single-threaded bridge worker, so extra partitions buy no
-                    // throughput - they only cost ordering. A single partition keeps the stream in
-                    // binlog order: the initial load before every change, each key's changes in
-                    // order, and the DELETE + CREATE halves of an UPDATE adjacent where the engine
-                    // splits one (always with SeaTunnel's DEBEZIUM_JSON format, which jobs started
-                    // before compatible_debezium_json still write; with Debezium's records only when
-                    // the primary key changed and the sync key is another unique key).
-                    admin.createTopics(List.of(new NewTopic(rawTopic, 1, (short) 1))).all().get(10, TimeUnit.SECONDS);
-                } catch (Exception ex) {
-                    if (!(ex.getCause() instanceof TopicExistsException)) throw ex;
-                }
+                createRawTopic(admin, rawTopic);
             } else {
                 var rawDescription = admin.describeTopics(List.of(rawTopic)).allTopicNames()
                     .get(10, TimeUnit.SECONDS).get(rawTopic);
@@ -319,6 +394,7 @@ public class KafkaTaskBridgeService {
                             + "partition. Delete the topic while the task is stopped and restart to recreate it.",
                         rawTopic, rawDescription.partitions().size());
                 }
+                alignRawTopicLimit(admin, rawTopic);
             }
         } catch (ServiceException ex) {
             throw ex;
@@ -326,6 +402,62 @@ public class KafkaTaskBridgeService {
             throw new ServiceException("Kafka topic 预检查失败：" + SyncText.safeMessage(ex, ex.getClass().getSimpleName()));
         }
         registerRawTopic(task, target, rawTopic, ownerType);
+    }
+
+    /**
+     * One partition, deliberately. The raw topic is an internal buffer read by exactly one
+     * single-threaded bridge worker, so extra partitions buy no throughput - they only cost ordering.
+     * A single partition keeps the stream in binlog order: the initial load before every change, each
+     * key's changes in order, and the DELETE + CREATE halves of an UPDATE adjacent where the engine
+     * splits one (always with SeaTunnel's DEBEZIUM_JSON format, which jobs started before
+     * compatible_debezium_json still write; with Debezium's records only when the primary key changed
+     * and the sync key is another unique key; and GoldenDB writes every UPDATE that way).
+     *
+     * <p>Its {@code max.message.bytes} makes room for the engine's largest record
+     * ({@code sync.engine.kafka-max-record-bytes}); Kafka's 1 MB default refuses a row with a large
+     * TEXT / BLOB / JSON value. A cluster whose policy forbids the setting gets the topic without it -
+     * a record above the broker's limit then fails the engine job, it is never dropped.
+     */
+    private void createRawTopic(AdminClient admin, String rawTopic) throws Exception {
+        try {
+            admin.createTopics(List.of(new NewTopic(rawTopic, 1, (short) 1)
+                    .configs(Map.of(TopicConfig.MAX_MESSAGE_BYTES_CONFIG, Integer.toString(rawTopicMaxMessageBytes())))))
+                .all().get(10, TimeUnit.SECONDS);
+        } catch (Exception ex) {
+            Throwable cause = ex.getCause();
+            if (cause instanceof TopicExistsException) return;
+            if (!(cause instanceof PolicyViolationException || cause instanceof InvalidConfigurationException
+                || cause instanceof InvalidRequestException)) throw ex;
+            log.warn("raw topic {} created without max.message.bytes={} ({}): a record above the broker default fails the engine job",
+                rawTopic, rawTopicMaxMessageBytes(), cause.getMessage());
+            try {
+                admin.createTopics(List.of(new NewTopic(rawTopic, 1, (short) 1))).all().get(10, TimeUnit.SECONDS);
+            } catch (Exception retry) {
+                if (!(retry.getCause() instanceof TopicExistsException)) throw retry;
+            }
+        }
+    }
+
+    /** Raises the {@code max.message.bytes} of a raw topic created before the setting (or by hand); best effort. */
+    private void alignRawTopicLimit(AdminClient admin, String rawTopic) {
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, rawTopic);
+        int wanted = rawTopicMaxMessageBytes();
+        try {
+            Config config = admin.describeConfigs(List.of(resource)).all().get(10, TimeUnit.SECONDS).get(resource);
+            ConfigEntry entry = config == null ? null : config.get(TopicConfig.MAX_MESSAGE_BYTES_CONFIG);
+            if (entry != null && StringUtils.isNotBlank(entry.value()) && Long.parseLong(entry.value().trim()) >= wanted) return;
+            admin.incrementalAlterConfigs(Map.of(resource, List.of(new AlterConfigOp(
+                    new ConfigEntry(TopicConfig.MAX_MESSAGE_BYTES_CONFIG, Integer.toString(wanted)), AlterConfigOp.OpType.SET))))
+                .all().get(10, TimeUnit.SECONDS);
+            log.info("raw topic {} max.message.bytes raised to {}", rawTopic, wanted);
+        } catch (Exception ex) {
+            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
+            log.warn("raw topic {} max.message.bytes not raised to {}: {}", rawTopic, wanted, ex.getMessage());
+        }
+    }
+
+    private int rawTopicMaxMessageBytes() {
+        return Math.max(KAFKA_DEFAULT_MAX_BYTES, engineProperties.getKafkaMaxRecordBytes()) + RAW_TOPIC_FRAMING_BYTES;
     }
 
     /**
@@ -341,12 +473,26 @@ public class KafkaTaskBridgeService {
             row.setOwnerId(task.getTaskId());
             row.setConfigVersion(configVersion(task));
             row.setCreateTime(LocalDateTime.now());
-            if (rawTopicMapper.registerIfAbsent(row)) {
+            if (stateStore.register(row)) {
                 log.info("raw topic {} registered for cleanup ({} {})", rawTopic, ownerType, task.getTaskId());
             }
         } catch (RuntimeException ex) {
             log.warn("raw topic {} could not be registered for cleanup, retried on the next bridge start: {}",
                 rawTopic, ex.getMessage());
+        }
+    }
+
+    /** The output topic's {@code max.message.bytes}, or -1 when it cannot be read. Package-private for tests. */
+    long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
+        try (AdminClient admin = openAdmin(bootstrapServers)) {
+            Config config = admin.describeConfigs(List.of(resource)).all().get(10, TimeUnit.SECONDS).get(resource);
+            ConfigEntry entry = config == null ? null : config.get(TopicConfig.MAX_MESSAGE_BYTES_CONFIG);
+            return entry == null || StringUtils.isBlank(entry.value()) ? -1 : Long.parseLong(entry.value().trim());
+        } catch (Exception ex) {
+            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
+            log.debug("max.message.bytes of topic {} not readable: {}", topic, ex.getMessage());
+            return -1;
         }
     }
 
@@ -383,10 +529,17 @@ public class KafkaTaskBridgeService {
         executor.shutdownNow();
     }
 
+    /** A raw record that carries a row change, with its offset. */
+    private record Entry(long offset, JsonNode event) {
+    }
+
     private final class Worker implements Runnable {
         private final Long taskId;
+        private final String ownerType;
+        private final Long targetSourceId;
         private final String bootstrapServers;
         private final String rawTopic;
+        private final TopicPartition rawPartition;
         private final String targetTopic;
         private final String sourceDatabase;
         private final String sourceTable;
@@ -396,11 +549,29 @@ public class KafkaTaskBridgeService {
         private final KafkaOutputFormat outputFormat;
         private final KafkaRawRecordReader reader;
         private final AtomicBoolean running = new AtomicBoolean(true);
+        /** Released by {@link #close()}: cuts a retry wait short. */
+        private final CountDownLatch closed = new CountDownLatch(1);
         private volatile Consumer<String, String> consumer;
         private volatile Future<?> future;
-        private JsonNode pendingDelete;
+        /**
+         * A trailing DELETE held back until the next poll: the CREATE half of an UPDATE split in two may
+         * follow it. Its offset stays uncommitted, so a new consumer reads it again.
+         */
+        private Entry pending;
+        /** The raw offset last committed (-1 = none yet), and the registry's copy of it. */
+        private long committed = -1;
+        private long savedOffset = -1;
+        private long savedAtNanos;
+        /** Why publishing stopped and since when; null while the bridge publishes. */
+        private String stopReason;
+        private LocalDateTime stoppedSince;
+        /** Raw records still behind the stop (null = not measured), recorded and named in the reason. */
+        private Long stopBacklog;
+        /** Something was committed in the current consumer session: the retry wait starts over. */
+        private boolean progressed;
 
-        private Worker(Long taskId, String bootstrapServers, String rawTopic, String targetTopic, String sourceTable,
+        private Worker(Long taskId, String ownerType, Long targetSourceId, String bootstrapServers, String rawTopic,
+                       String targetTopic, String sourceTable,
                        String sourceDatabase,
                        ZoneId sourceZone,
                        List<String> keyFields,
@@ -408,8 +579,11 @@ public class KafkaTaskBridgeService {
                        boolean persistTaskMetrics,
                        KafkaOutputFormat outputFormat) {
             this.taskId = taskId;
+            this.ownerType = ownerType;
+            this.targetSourceId = targetSourceId;
             this.bootstrapServers = bootstrapServers;
             this.rawTopic = rawTopic;
+            this.rawPartition = new TopicPartition(rawTopic, 0);
             this.targetTopic = targetTopic;
             this.sourceDatabase = sourceDatabase;
             this.sourceTable = TableNames.unqualified(sourceTable);
@@ -422,50 +596,27 @@ public class KafkaTaskBridgeService {
 
         @Override
         public void run() {
-            Properties properties = new Properties();
-            properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-            properties.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup(taskId));
-            properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-            properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-            // ensureTopics created the topic before this worker started; a worker still subscribed
-            // after the janitor deleted it must not bring it back on a broker that auto-creates topics.
-            properties.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
-            properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-            properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-            try (Consumer<String, String> opened = openConsumer(properties)) {
-                consumer = opened;
-                opened.subscribe(List.of(rawTopic));
+            int failures = 0;
+            try {
                 while (running.get()) {
-                    ConsumerRecords<String, String> records = opened.poll(POLL_TIMEOUT);
-                    if (!records.isEmpty()) {
-                        List<JsonNode> rawEvents = new java.util.ArrayList<>(records.count());
-                        for (ConsumerRecord<String, String> record : records) {
-                            if (!running.get()) return;
-                            JsonNode event = reader.read(record.value());
-                            if (event != null) rawEvents.add(event);
-                        }
-                        // MySQL CDC can emit UPDATE as DELETE and CREATE in separate
-                        // poll batches. Keep a trailing DELETE uncommitted until the
-                        // next batch gives the normalizer a chance to merge it.
-                        if (pendingDelete != null) {
-                            rawEvents.addFirst(pendingDelete);
-                            pendingDelete = null;
-                        }
-                        if (!rawEvents.isEmpty() && "d".equals(rawEvents.getLast().path("op").asText())) {
-                            pendingDelete = rawEvents.removeLast();
-                        }
-                        publish(rawEvents);
-                        if (pendingDelete == null) opened.commitSync();
-                    } else if (pendingDelete != null) {
-                        // A standalone DELETE is released after one empty poll. The
-                        // deferred offset remains uncommitted until its broker ack.
-                        publish(List.of(pendingDelete));
-                        pendingDelete = null;
-                        opened.commitSync();
+                    progressed = false;
+                    stopBacklog = null;
+                    String reason;
+                    try {
+                        reason = consume();
+                    } catch (Exception ex) {
+                        if (!running.get()) return;
+                        reason = STOPPED_PREFIX + KafkaEventProducer.describe(ex);
+                        if (!reason.equals(stopReason)) log.error("Kafka task bridge failed: taskId={}", taskId, ex);
                     }
+                    if (reason == null || !running.get()) return;
+                    failures = progressed ? 1 : failures + 1;
+                    Duration wait = backoff(failures);
+                    reportStop(reason, wait);
+                    if (closed.await(wait.toMillis(), TimeUnit.MILLISECONDS)) return;
                 }
-            } catch (Exception ex) {
-                if (running.get()) log.error("Kafka task bridge stopped unexpectedly: taskId={}", taskId, ex);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
             } finally {
                 consumer = null;
                 running.set(false);
@@ -476,41 +627,287 @@ public class KafkaTaskBridgeService {
             return running.get() && future != null && !future.isDone();
         }
 
-        private void publish(List<JsonNode> rawEvents) {
-            if (rawEvents.isEmpty()) return;
+        /** One consumer session: null once the worker is closed, else why publishing stopped. */
+        private String consume() {
+            long topicLimit = targetTopicMaxMessageBytes(bootstrapServers, targetTopic);
+            Properties config = new Properties();
+            config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+            config.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup(taskId));
+            config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+            // Never a silent jump: without a valid committed offset the worker positions itself (position()).
+            config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "none");
+            // ensureTopics created the topic before this worker started; a worker still subscribed
+            // after the janitor deleted it must not bring it back on a broker that auto-creates topics.
+            config.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
+            config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+            config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+            try (Consumer<String, String> opened = openConsumer(config)) {
+                consumer = opened;
+                if (!running.get()) return null;
+                opened.subscribe(List.of(rawTopic));
+                while (running.get()) {
+                    ConsumerRecords<String, String> records;
+                    try {
+                        records = opened.poll(POLL_TIMEOUT);
+                    } catch (NoOffsetForPartitionException ex) {
+                        String gap = position(opened, ex.partitions(), Map.of());
+                        if (gap != null) return gap;
+                        continue;
+                    } catch (OffsetOutOfRangeException ex) {
+                        String gap = position(opened, ex.partitions(), ex.offsetOutOfRangePartitions());
+                        if (gap != null) return gap;
+                        continue;
+                    }
+                    String failure = records.isEmpty() ? flushPending(opened, topicLimit) : process(opened, records, topicLimit);
+                    if (failure != null) {
+                        stopBacklog = backlog(opened);
+                        return failure;
+                    }
+                }
+                return null;
+            } catch (WakeupException ex) {
+                if (running.get()) throw ex;
+                return null;
+            } finally {
+                consumer = null;
+                pending = null;
+                if (committed > savedOffset) saveOffset(committed, true);
+            }
+        }
+
+        /**
+         * Kafka has no valid position on the raw topic: the group never committed one, its offsets
+         * expired (an owner paused longer than the broker's offsets.retention.minutes), retention
+         * deleted the records at the committed offset, or that offset lies past the end of a recreated
+         * topic. Seeks - and commits - where the bridge may go on and returns null, or returns why it
+         * may not: never a silent jump over events it did not publish.
+         */
+        private String position(Consumer<String, String> opened, Set<TopicPartition> partitions, Map<TopicPartition, Long> refused) {
+            KafkaBridgeStateStore.RawPosition recorded = stateStore.rawPosition(targetSourceId, rawTopic);
+            for (TopicPartition partition : partitions) {
+                long begin = opened.beginningOffsets(List.of(partition)).get(partition);
+                long end = opened.endOffsets(List.of(partition)).get(partition);
+                Long known = refused.containsKey(partition) ? refused.get(partition) : recorded.offset();
+                long target;
+                if (known != null && known >= begin && known <= end) {
+                    // Group offsets expired but the registry knows the place (or retention moved meanwhile).
+                    target = known;
+                } else if (known == null && begin == 0) {
+                    // Never consumed, and nothing has been deleted yet.
+                    target = 0;
+                } else if (recorded.resetAllowed()) {
+                    // A fresh run: its new initial load supersedes whatever the old position held.
+                    target = begin;
+                    log.warn("kafka bridge of owner {} starts its fresh run at the earliest retained offset {} of {} (old position {})",
+                        taskId, begin, rawTopic, known);
+                } else {
+                    return gapReason(known, begin, end);
+                }
+                opened.seek(partition, target);
+                opened.commitSync(Map.of(partition, new OffsetAndMetadata(target)));
+                committed = target;
+                saveOffset(target, true);
+                log.info("kafka bridge of owner {} positioned at offset {} of {}", taskId, target, rawTopic);
+            }
+            if (recorded.resetAllowed()) stateStore.consumeReset(targetSourceId, rawTopic);
+            if (isRawTopicGap(stopReason)) recover();
+            return null;
+        }
+
+        private String gapReason(Long known, long begin, long end) {
+            if (known == null) {
+                return RAW_TOPIC_GAP_PREFIX + "Kafka 与平台都没有桥接在 " + rawTopic + " 上的消费位点，而它前 " + begin
+                    + " 条记录已被保留策略删除，无法确认没有遗漏" + REINITIALIZE_HINT;
+            }
+            if (known < begin) {
+                return RAW_TOPIC_GAP_PREFIX + "桥接停在 " + rawTopic + " 的 offset " + known + "，但它最早只保留到 offset " + begin
+                    + "，其间 " + (begin - known) + " 条变更已被 Kafka 保留策略删除、无法补发" + REINITIALIZE_HINT;
+            }
+            return RAW_TOPIC_GAP_PREFIX + "桥接停在 " + rawTopic + " 的 offset " + known + "，超出它的末尾 offset " + end
+                + "：raw topic 可能被删除后重建，期间的变更已丢失" + REINITIALIZE_HINT;
+        }
+
+        /**
+         * Publishes one poll's records. Returns null with everything published committed, or why
+         * publishing stopped, with the raw offset committed up to the event that could not go out.
+         */
+        private String process(Consumer<String, String> opened, ConsumerRecords<String, String> records, long topicLimit) {
+            List<Entry> entries = new ArrayList<>(records.count() + 1);
+            if (pending != null) entries.add(pending);
+            pending = null;
+            long next = -1;
+            String unreadable = null;
+            for (ConsumerRecord<String, String> record : records) {
+                if (!running.get()) return null;
+                if (record.partition() != rawPartition.partition()) {
+                    return STOPPED_PREFIX + "raw topic " + rawTopic + " 有多个分区，桥接无法保证顺序；请在任务停止时删除该 topic 后重新启动";
+                }
+                JsonNode event;
+                try {
+                    event = reader.read(record.value());
+                } catch (RuntimeException ex) {
+                    unreadable = STOPPED_PREFIX + "停在 raw offset " + record.offset() + "，raw 记录无法解析："
+                        + KafkaEventProducer.describe(ex);
+                    next = record.offset();
+                    break;
+                }
+                if (event != null) entries.add(new Entry(record.offset(), event));
+                next = record.offset() + 1;
+            }
+            long commitTo = next;
+            // MySQL CDC can emit an UPDATE as a DELETE and a CREATE in separate poll batches; a
+            // trailing DELETE waits for the next one to give the normalizer a chance to merge it.
+            Entry held = null;
+            if (!entries.isEmpty() && "d".equals(entries.getLast().event().path("op").asText())) {
+                held = entries.removeLast();
+                commitTo = held.offset();
+            }
+            String failure = publish(opened, entries, topicLimit);
+            if (failure != null) return failure;
+            commit(opened, commitTo);
+            if (unreadable != null) return unreadable;
+            pending = held;
+            if (!entries.isEmpty()) recover();
+            return null;
+        }
+
+        /** An empty poll releases a held DELETE (a standalone one); an idle bridge that is caught up is no longer stopped. */
+        private String flushPending(Consumer<String, String> opened, long topicLimit) {
+            if (pending == null) {
+                if (stopReason != null && caughtUp(opened)) recover();
+                return null;
+            }
+            Entry held = pending;
+            pending = null;
+            String failure = publish(opened, List.of(held), topicLimit);
+            if (failure != null) return failure;
+            commit(opened, held.offset() + 1);
+            recover();
+            return null;
+        }
+
+        /**
+         * Normalizes and publishes {@code entries} in order. On a failure, commits up to the raw record
+         * of the event that could not be published (everything before it went out) and returns why.
+         */
+        private String publish(Consumer<String, String> opened, List<Entry> entries, long topicLimit) {
+            if (entries.isEmpty()) return null;
+            List<KafkaEventNormalizer.Indexed> normalized;
+            try {
+                normalized = normalize(entries.stream().map(Entry::event).toList());
+            } catch (RuntimeException ex) {
+                commit(opened, entries.getFirst().offset());
+                return STOPPED_PREFIX + "停在 raw offset " + entries.getFirst().offset() + " 起的一批记录，无法转换为事件："
+                    + KafkaEventProducer.describe(ex);
+            }
+            List<KafkaEventNormalizer.NormalizedEvent> events = normalized.stream().map(KafkaEventNormalizer.Indexed::event).toList();
+            KafkaEventProducer.PublishOutcome outcome = persistTaskMetrics
+                ? producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat, topicLimit)
+                : producer.publish(bootstrapServers, targetTopic, events, outputFormat, topicLimit);
+            if (!outcome.failed()) return null;
+            Entry failedAt = entries.get(normalized.get(outcome.failedIndex()).input());
+            commit(opened, failedAt.offset());
+            return STOPPED_PREFIX + "停在 raw offset " + failedAt.offset() + "，" + outcome.failure();
+        }
+
+        /**
+         * MySQL-CDC (FULL_CDC / INCREMENTAL) records carry an {@code op}; the engine writes Debezium's own
+         * records (compatible_debezium_json), so an initial-load row is op=r and published as SNAPSHOT.
+         * One engine run reads the binlog only after its whole initial load; a restarted or reinitialized
+         * job starts a new initial load in the same raw topic. A job started before that format
+         * (SeaTunnel's DEBEZIUM_JSON) wrote its initial load as op=c, indistinguishable from a binlog
+         * insert, and that stays CDC. A FULL job's bounded snapshot rows carry no {@code op}. See
+         * docs/kafka-event-formats.md.
+         */
+        private List<KafkaEventNormalizer.Indexed> normalize(List<JsonNode> rawEvents) {
             boolean snapshotRows = rawEvents.stream().allMatch(event -> event != null && !event.has("op"));
             if (snapshotRows) {
                 String database = StringUtils.isBlank(sourceDatabase) ? "unknown" : sourceDatabase;
-                List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalizeSnapshotRows(
+                List<KafkaEventNormalizer.NormalizedEvent> rows = normalizer.normalizeSnapshotRows(
                     rawEvents, database, sourceTable, keyFields, sourceColumns);
-                if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat);
-                else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
-                return;
+                return IntStream.range(0, rows.size()).mapToObj(index -> new KafkaEventNormalizer.Indexed(rows.get(index), index)).toList();
             }
-            // MySQL-CDC (FULL_CDC / INCREMENTAL). The engine writes Debezium's own records
-            // (compatible_debezium_json), so an initial-load row is op=r and published as SNAPSHOT.
-            // One engine run reads the binlog only after its whole initial load; a restarted or
-            // reinitialized job starts a new initial load in the same raw topic. A job started
-            // before that format (SeaTunnel's DEBEZIUM_JSON) wrote its initial load as op=c,
-            // indistinguishable from a binlog insert, and that stays CDC. See docs/kafka-event-formats.md.
             int snapshotCount = 0;
             while (snapshotCount < rawEvents.size()
                 && "r".equals(rawEvents.get(snapshotCount).path("op").asText())) snapshotCount++;
-            List<KafkaEventNormalizer.NormalizedEvent> events = normalizer.normalize(rawEvents, snapshotCount, keyFields, sourceColumns);
-            if (persistTaskMetrics) producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat);
-            else producer.publish(bootstrapServers, targetTopic, events, outputFormat);
+            return normalizer.normalizeIndexed(rawEvents, snapshotCount, keyFields, sourceColumns);
+        }
+
+        private void commit(Consumer<String, String> opened, long offset) {
+            if (offset < 0 || offset <= committed) return;
+            opened.commitSync(Map.of(rawPartition, new OffsetAndMetadata(offset)));
+            committed = offset;
+            progressed = true;
+            saveOffset(offset, false);
+        }
+
+        private void saveOffset(long offset, boolean force) {
+            long now = System.nanoTime();
+            if (!force && savedOffset >= 0 && now - savedAtNanos < OFFSET_SAVE_INTERVAL_NANOS) return;
+            stateStore.saveOffset(targetSourceId, rawTopic, offset);
+            savedOffset = offset;
+            savedAtNanos = now;
+        }
+
+        private boolean caughtUp(Consumer<String, String> opened) {
+            try {
+                if (!opened.assignment().contains(rawPartition)) return false;
+                Long end = opened.endOffsets(List.of(rawPartition)).get(rawPartition);
+                return end != null && opened.position(rawPartition) >= end;
+            } catch (RuntimeException ex) {
+                return false;
+            }
+        }
+
+        /** Raw records from the committed offset to the end of the raw topic, null when Kafka cannot say. */
+        private Long backlog(Consumer<String, String> opened) {
+            try {
+                Long end = opened.endOffsets(List.of(rawPartition)).get(rawPartition);
+                return end != null && committed >= 0 ? Math.max(0, end - committed) : null;
+            } catch (RuntimeException ex) {
+                return null;
+            }
+        }
+
+        private Duration backoff(int failures) {
+            long initial = Math.max(1, properties.getRetryInitialBackoff().toMillis());
+            long max = Math.max(initial, properties.getRetryMaxBackoff().toMillis());
+            long wait = initial << Math.min(20, Math.max(0, failures - 1));
+            return Duration.ofMillis(Math.min(max, wait));
+        }
+
+        /** Records why publishing stopped - every attempt, so a record cleared by an operator start comes back. */
+        private void reportStop(String reason, Duration wait) {
+            if (stoppedSince == null) stoppedSince = LocalDateTime.now();
+            if (reason.equals(stopReason)) {
+                log.info("kafka bridge of owner {} still stopped, next attempt in {}s", taskId, wait.toSeconds());
+            } else {
+                log.warn("kafka bridge of owner {} stopped publishing, next attempt in {}s: {}", taskId, wait.toSeconds(), reason);
+            }
+            stopReason = reason;
+            String backlogNote = stopBacklog == null || stopBacklog == 0 ? "" : "（raw topic 积压 " + stopBacklog + " 条）";
+            stateStore.reportBlocked(ownerType, taskId, SyncText.truncateForColumn(reason + backlogNote), stoppedSince, stopBacklog);
+        }
+
+        private void recover() {
+            if (stopReason == null) return;
+            log.info("kafka bridge of owner {} publishes again (stopped since {})", taskId, stoppedSince);
+            stopReason = null;
+            stoppedSince = null;
+            stateStore.clearBlocked(ownerType, taskId);
         }
 
         /**
          * Stop cooperatively first: {@code wakeup()} makes the blocked {@code poll()} /
          * {@code commitSync()} throw, the loop exits and try-with-resources closes the
-         * consumer cleanly (leaving the group without a rebalance timeout). Interrupting
-         * straight away, as this used to, made the Kafka client log an ERROR with a stack
-         * trace on every ordinary pause / stop. The interrupt is kept only as a last resort
-         * for a worker stuck in a producer ack wait, which {@code wakeup()} cannot unblock.
+         * consumer cleanly (leaving the group without a rebalance timeout); a retry wait ends at
+         * once. Interrupting straight away, as this used to, made the Kafka client log an ERROR
+         * with a stack trace on every ordinary pause / stop. The interrupt is kept only as a last
+         * resort for a worker stuck in a producer ack wait, which {@code wakeup()} cannot unblock.
          */
         private void close() {
             running.set(false);
+            closed.countDown();
             Consumer<String, String> opened = consumer;
             if (opened != null) opened.wakeup();
             Future<?> current = future;

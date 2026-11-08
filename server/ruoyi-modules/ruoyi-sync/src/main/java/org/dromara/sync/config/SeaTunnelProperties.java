@@ -43,6 +43,17 @@ public class SeaTunnelProperties {
     /** Default MySQL CDC source connection pool size. */
     private int sourceConnectionLimit = 2;
 
+    /**
+     * Largest Kafka record, in bytes, the platform writes: the engine's raw-topic records (its Kafka
+     * sink's {@code max.request.size}, and the {@code max.message.bytes} the bridge gives the raw topic)
+     * and the bridge's published events (its producer's {@code max.request.size}; the output topic's own
+     * {@code max.message.bytes} applies on top). Kafka's 1 MB default would refuse a row with a large
+     * TEXT / BLOB / JSON value - a raw record also carries the value schema and, for an UPDATE, both
+     * images. A larger record fails the engine job (or holds the bridge) instead of being dropped. Not
+     * part of the config fingerprint: changing it never strands a savepoint.
+     */
+    private int kafkaMaxRecordBytes = 16 * 1024 * 1024;
+
     /** Addresses as seen from the SeaTunnel runtime rather than the platform process. */
     private Map<String, String> connectionEndpointOverrides = new HashMap<>();
 

@@ -1,21 +1,22 @@
 package org.dromara.sync.kafka;
 
+import org.dromara.common.core.exception.ServiceException;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.SyncTaskMapper;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import org.dromara.common.core.exception.ServiceException;
 
 @Tag("dev")
 class KafkaEventProducerMetricsTest {
@@ -24,7 +25,7 @@ class KafkaEventProducerMetricsTest {
     void persistsMetricsOnlyAfterTaskExists() {
         SyncTaskMapper mapper = mock(SyncTaskMapper.class);
         when(mapper.selectById(9L)).thenReturn(new SyncTask());
-        KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()));
+        KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()), new SeaTunnelProperties());
         KafkaEventNormalizer.NormalizedEvent event = new KafkaEventNormalizer.NormalizedEvent(
             "INSERT", JsonMapper.builder().build().createObjectNode().put("id", 1), null, null,
             "CDC", "source_db", "customers", "2026-08-31T00:00:00Z");
@@ -36,7 +37,7 @@ class KafkaEventProducerMetricsTest {
     void rejectsUnknownTaskBeforePublishing() {
         SyncTaskMapper mapper = mock(SyncTaskMapper.class);
         when(mapper.selectById(99L)).thenReturn(null);
-        KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()));
-        assertThrows(ServiceException.class, () -> producer.publishForTask(99L, "localhost:9092", "topic", List.of(), KafkaOutputFormat.ENVELOPE));
+        KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()), new SeaTunnelProperties());
+        assertThrows(ServiceException.class, () -> producer.publishForTask(99L, "localhost:9092", "topic", List.of(), KafkaOutputFormat.ENVELOPE, -1L));
     }
 }

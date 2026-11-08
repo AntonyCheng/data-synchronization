@@ -29,6 +29,19 @@ public class KafkaRawTopic {
     /** Task id, or table item id for {@link #OWNER_GROUP_ITEM}. */
     private Long ownerId;
     private Integer configVersion;
+    /**
+     * The raw offset the bridge last committed (the next one to read), recorded a few seconds behind
+     * its Kafka consumer group: it outlives the group's offsets, which the broker drops once the group
+     * has been empty for {@code offsets.retention.minutes} (a task paused for a week). Null until the
+     * bridge commits on this topic.
+     */
+    private Long bridgeOffset;
+    /**
+     * {@code "1"} while a fresh run (start / reinitialize) has not positioned its bridge yet: its new
+     * initial load supersedes whatever an unreadable old position held, so the bridge may begin at
+     * the earliest retained record instead of reporting a gap.
+     */
+    private String resetAllowed;
     /** When the janitor first found no owner using the topic; null while it is in use. */
     private LocalDateTime retiredTime;
     /** When the janitor deleted the topic; the row stays a grace period to catch a re-creation. */

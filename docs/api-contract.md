@@ -23,6 +23,7 @@
 | DELETE | `/task/{id}` | 删除非运行中任务 |
 | POST | `/task/{id}/validate` | 校验源端和目标端连接 |
 | POST | `/task/{id}/target-compatibility` | 校验 PostgreSQL/MySQL 目标表或 Kafka topic 兼容性；Kafka 检查 topic 可见性、分区和可靠分区键（topic 可在向导中先创建） |
+| POST | `/task/target-compatibility` | 同一套检查，对象是尚未保存的任务配置（请求体同新建任务，至少要有 `sourceId`、`targetId`、`sourceTable`），供创建向导在提交前展示；不写库，权限 `sync:task:validate` |
 | GET | `/data-source/{sourceId}/kafka/topics` | 查询当前 Kafka 凭证可见的 topic 及分区/副本信息 |
 | POST | `/data-source/{sourceId}/kafka/topics` | 按名称、分区数和副本数主动创建 topic；已存在或无 Create 权限时明确失败，不覆盖已有 topic |
 | POST | `/task/{id}/engine-config` | 生成脱敏的 SeaTunnel HOCON 配置预览 |
@@ -110,11 +111,13 @@ MySQL 数据源可选字段 `serverTimeZone`（`ds_data_source.server_time_zone`
 
 CDC 前置检查返回 `passed`、`message`、`serverId`、`gtidMode`、`binlogRetention`、`timeZone` 和 `checks`。`checks` 中的硬性项目包括 `log_bin=ON`、`binlog_format=ROW`、`binlog_row_image=FULL`、正数 `server_id` 和复制权限；保留策略作为风险提示返回。`timezone`（源端时区）是非硬性项目（`required=false`）：数据源生效时区与源库当前偏移一致时通过；不一致或无法读取源库时区时不通过，`message` 写明增量阶段 `TIMESTAMP` 的偏移量，`suggestion` 给出应填写的服务器时区，并提示已有 CDC 任务需重新初始化。非硬性项目不通过不影响 `passed`，但会附在顶层 `message` 的“注意：”之后，向导据此以警告样式展示。硬性项目未通过时，前端不得继续执行任务校验或启动流程。
 
-目标兼容性检查返回目标表是否存在和逐项 `checks`。目标表不存在属于可接受状态，由 SeaTunnel 按源表结构自动建表；目标表已存在时，源字段缺失、字段类型族不兼容、目标主键与源主键不一致、目标额外必填列无默认值均为硬性失败。额外唯一约束等潜在写入风险在后续版本补充为非阻断告警。
+目标兼容性检查返回目标表是否存在和逐项 `checks`。目标表不存在属于可接受状态，由 SeaTunnel 按源表结构自动建表；目标表已存在时，源字段缺失、字段类型族不兼容、目标主键与源主键不一致、目标额外必填列无默认值均为硬性失败。额外唯一约束等潜在写入风险在后续版本补充为非阻断告警。Kafka 目标的检查项为目标 topic、分区、分区同步键（均为硬性），以及非硬性的 `kafka_message_size`（单条消息大小）：按字段类型估算一行最坏情况下的事件与 raw 记录大小，与目标 topic 的 `max.message.bytes`、`sync.engine.kafka-max-record-bytes` 比较，并列出可能超限的大字段。不通过不影响 `passed`。
 
 `POST /task/{id}/start` 在提交 SeaTunnel 前服务端强制执行同一套综合校验；校验失败只返回启动错误，不改变草稿/已停止任务状态。只有校验通过且引擎提交成功后，任务才会进入 `RUNNING`。
 
 Kafka 目标的启动 / 恢复 / 重新初始化（单表与任务组、表项）在提交引擎作业之前还要占一个桥接名额（`sync.kafka-bridge.max-workers`，见 [monitoring-and-consistency.md](monitoring-and-consistency.md#桥接容量)）。名额已满时返回业务错误「Kafka 桥接容量已满（64/64）…」或任务组恢复的「Kafka 桥接容量不足（已用 60/64，本次需要 20 个）…」，引擎上不会留下作业。单表任务启动被拒不改变状态；单表任务的恢复与重新初始化被拒与其他提交前失败一样记为 `FAILED`（仍可恢复 / 重新初始化）；任务组恢复、表项恢复与重建被拒时状态不变；多表任务组启动中途被拒时补偿停止已提交的表，整库任务组只隔离被拒的表。已在运行的 Kafka 任务/表项不受名额影响其状态，桥接暂缺时其 `lastError` 在列表与详情中显示「Kafka 桥接等待容量…」。
+
+Kafka 任务与表项的 VO 另带 `kafkaBridgeError` / `kafkaBridgeErrorTime` / `kafkaBridgeBacklog`：桥接因某条事件发不出去而暂停发布的原因、起始时间，以及最近一次重试时 raw topic 中排在停止点之后的记录数，正常时为空（见 [kafka-event-formats.md](kafka-event-formats.md) §10）。暂停期间状态刷新把这个记录数计入指标采样的积压（`latestMetrics.backlogRows`）。状态刷新把它写进 `lastError`，任务仍为 `RUNNING`。原因以「Kafka raw topic 位点越界：」开头时，状态刷新把单表任务转为 `REINITIALIZE_REQUIRED`、把表项隔离为 `FAILED`。桥接停止期间，单表任务的 `kafkaLagSeconds` 与状态接口的延迟从停止时刻起持续增长。
 
 单表任务创建采用五步向导，具体页面规则和纯增量位点策略见 [`task-creation-wizard.md`](task-creation-wizard.md)。纯增量任务必须先通过 CDC 前置检查；`TIMESTAMP` 按源数据源的服务器时区（未设置时为 Asia/Shanghai）把本地时间转换为毫秒 epoch，`SPECIFIC` 的 binlog 位置不得小于 4。
 

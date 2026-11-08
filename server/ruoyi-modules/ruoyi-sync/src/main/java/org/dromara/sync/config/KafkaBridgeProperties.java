@@ -31,4 +31,15 @@ public class KafkaBridgeProperties {
      * topic's registry row is kept for the same time, to catch a lingering client re-creating it.
      */
     private Duration rawTopicRetireGrace = Duration.ofMinutes(10);
+
+    /**
+     * First wait before a bridge that stopped publishing (an event its output topic refused, a broker
+     * error, an unreadable raw record) tries the same event again. Each further failure doubles the
+     * wait up to {@link #retryMaxBackoff}. The bridge never moves past an event it could not publish:
+     * everything after it stays in the raw topic until it goes through.
+     */
+    private Duration retryInitialBackoff = Duration.ofSeconds(10);
+
+    /** Longest wait between two attempts of a stopped bridge; see {@link #retryInitialBackoff}. */
+    private Duration retryMaxBackoff = Duration.ofMinutes(5);
 }

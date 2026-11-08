@@ -9,7 +9,7 @@ import {
   SafetyCertificateOutlined,
   StopOutlined
 } from '@ant-design/icons';
-import { Alert, Button, Descriptions, Divider, Input, message, Modal, Space, Tag } from 'antd';
+import { Alert, Button, Descriptions, Divider, Input, message, Modal, Space, Tag, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type {
@@ -34,6 +34,7 @@ import {
   stopSyncTaskGroup,
   validateSyncTaskGroup
 } from '@/api/sync/group';
+import { compatibilityWarnings, warningLines } from '@/components/sync/CompatibilityChecks';
 import MetricsHistoryPanel from '@/components/sync/MetricsHistoryPanel';
 import {
   groupStatusLabel,
@@ -45,6 +46,7 @@ import {
   sourceTypeOf,
   useGroupPermissions
 } from '@/pages/sync/group/shared';
+import { bridgeStopReason, publishPaused } from '@/utils/syncBridge';
 
 export interface GroupDetailModalProps {
   open: boolean;
@@ -201,6 +203,11 @@ export default function GroupDetailModal({
   const targetType = sourceTypeOf(dataSources, detail?.targetId);
   const status = detail?.status || '';
   const liveStatuses = ['RUNNING', 'PAUSING', 'DEGRADED'];
+  // Tables that need the operator, named first: their errors used to sit at the bottom of the list.
+  const attention = (detail?.items || []).filter(
+    item => publishPaused(item) || ['FAILED', 'DDL_BLOCKED'].includes(item.status || '')
+  );
+  const attentionBlocking = Boolean(detail?.lastError) || attention.some(item => !publishPaused(item));
 
   return (
     <>
@@ -214,6 +221,32 @@ export default function GroupDetailModal({
       >
         {detail && (
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            {(attention.length > 0 || detail.lastError) && (
+              <Alert
+                type={attentionBlocking ? 'error' : 'warning'}
+                showIcon
+                title={attention.length > 0 ? `${attention.length} 张表需要处理` : '最近一次错误'}
+                description={
+                  <Space orientation="vertical" size={4}>
+                    {detail.lastError && <Typography.Text copyable>{detail.lastError}</Typography.Text>}
+                    {attention.map(item => (
+                      <Typography.Text key={String(item.itemId)}>
+                        <Typography.Text strong>{itemLabel(item, targetType)}</Typography.Text>
+                        {publishPaused(item)
+                          ? `：Kafka 桥接已暂停发布，表仍在运行，变更暂存在 raw topic 中等待发布。${bridgeStopReason(item.kafkaBridgeError)}`
+                          : `：${item.status ? itemStatusLabels[item.status] || item.status : '-'}${item.lastError ? `。${item.lastError}` : ''}`}
+                      </Typography.Text>
+                    ))}
+                    {attention.some(item => publishPaused(item)) && (
+                      <Typography.Text type="secondary">
+                        排除原因后桥接会自动重试（间隔逐次加倍，默认最长 5 分钟）；请在 raw topic
+                        的保留期内处理，超出后只能重新初始化该表。
+                      </Typography.Text>
+                    )}
+                  </Space>
+                }
+              />
+            )}
             <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }}>
               <Descriptions.Item label="任务组状态">{groupStatusLabel(detail.status)}</Descriptions.Item>
               <Descriptions.Item label="同步粒度">
@@ -332,7 +365,13 @@ export default function GroupDetailModal({
             </Space>
             {validationResult && (
               <Alert
-                type={validationResult.valid ? 'success' : 'error'}
+                type={
+                  !validationResult.valid
+                    ? 'error'
+                    : validationResult.items.some(item => compatibilityWarnings(item.targetCompatibility).length > 0)
+                      ? 'warning'
+                      : 'success'
+                }
                 showIcon
                 closable
                 onClose={() => setValidationResult(undefined)}
@@ -341,12 +380,22 @@ export default function GroupDetailModal({
                   <Descriptions size="small" column={1}>
                     <Descriptions.Item label="源连接">{validationResult.source.message}</Descriptions.Item>
                     <Descriptions.Item label="目标连接">{validationResult.target.message}</Descriptions.Item>
-                    {validationResult.items.map(item => (
-                      <Descriptions.Item key={String(item.itemId)} label={`${item.sourceTable} → ${item.targetTable}`}>
-                        <Tag color={item.passed ? 'success' : 'error'}>{item.passed ? '通过' : '失败'}</Tag>{' '}
-                        {item.message}
-                      </Descriptions.Item>
-                    ))}
+                    {validationResult.items.map(item => {
+                      // A passed table can still carry a warning to confirm (e.g. the Kafka record size).
+                      const warnings = item.passed ? compatibilityWarnings(item.targetCompatibility) : [];
+                      return (
+                        <Descriptions.Item
+                          key={String(item.itemId)}
+                          label={`${item.sourceTable} → ${item.targetTable}`}
+                        >
+                          <Tag color={!item.passed ? 'error' : warnings.length ? 'warning' : 'success'}>
+                            {!item.passed ? '失败' : warnings.length ? '需确认' : '通过'}
+                          </Tag>{' '}
+                          {item.message}
+                          {warnings.length > 0 && `；需确认：${warningLines(warnings).join('；')}`}
+                        </Descriptions.Item>
+                      );
+                    })}
                   </Descriptions>
                 }
               />
@@ -486,9 +535,13 @@ export default function GroupDetailModal({
               {detail.items.map(item => (
                 <Descriptions.Item key={String(item.itemId)} label={itemLabel(item, targetType)}>
                   <Space wrap size={8}>
-                    <Tag color={itemStatusColor(item.status)}>
-                      {item.status ? itemStatusLabels[item.status] || item.status : '-'}
-                    </Tag>
+                    {publishPaused(item) ? (
+                      <Tag color="warning">运行中·发布暂停</Tag>
+                    ) : (
+                      <Tag color={itemStatusColor(item.status)}>
+                        {item.status ? itemStatusLabels[item.status] || item.status : '-'}
+                      </Tag>
+                    )}
                     {item.engineJobId && <span>作业 {item.engineJobId}</span>}
                     {item.latestMetrics && (
                       <span>

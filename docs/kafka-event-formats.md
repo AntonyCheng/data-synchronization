@@ -20,6 +20,7 @@ SeaTunnel 引擎 ──写入──> raw topic（__ds_raw_{taskId}_v{configVersi
 
 - **消息 Key 恒为同步键 JSON 对象字符串**（如 `{"id":1}`），所有格式一致——按键稳定分区、单键保序。
 - 生产端 `acks=all` + 幂等发送；raw topic 位点仅在目标 topic 收到 broker ack 后提交。
+- **不跳过任何变更。** 引擎写不进 raw topic 的记录使作业失败（不再静默丢弃）；桥接发不出去的事件使该任务 / 表项的发布停在这条事件上并告警，之后的变更留在 raw topic 中、按序等待；raw topic 中已被保留策略删除、桥接却还没发布的记录，报告为位点越界并要求重新初始化。见 §10。
 - 引擎 HOCON 与配置指纹（`engine_config_hash`）**不包含输出格式**——切换格式不触碰引擎配置。
 - 修改格式与其它编辑一样提升 `configVersion`，下次启动使用新 raw topic（重新全量）；旧 raw topic 由平台清理（§9）。
 - **只发布选中的字段。** `FULL` 模式的引擎 `SELECT` 只读选中字段；MySQL-CDC 没有列投影，`FULL_CDC` / `INCREMENTAL` 的每条变更记录都是整行，桥接在发布前把 before / after 裁剪到任务（或任务组表项）保存的字段列表（按列名忽略大小写匹配，保持表中列序）。源表之后新增的列因此也不会出现在目标 topic 里：单表任务要编辑字段选择；任务组表项重新初始化时，原先全选的表项会跟随表结构纳入新列（`multi-table.md`）。raw topic 本身仍是整行，见 §9。
@@ -214,10 +215,43 @@ Kafka { … format = "COMPATIBLE_DEBEZIUM_JSON" … }
 - 列值是 Debezium 的编码：`DATETIME` 为 epoch 毫秒 / 微秒，`DATE` 为 epoch 天数，`TIME` 为微秒数，`TIMESTAMP` 为 UTC 时刻字符串，`DECIMAL` 为 JSON 数值。桥接（`KafkaRawRecordReader`）按 value schema 中每列的逻辑类型换算成 SeaTunnel 行格式时期发布的值，所以 value schema 必须开启。Debezium 把 `FLOAT` 扩成 double、把 `TINYINT` 报成 int16，单凭 schema 分不出 `FLOAT` / `DOUBLE` 和 `TINYINT(1)` / `TINYINT`，`datatype.propagate.source.type` 只为这两类列补上源类型。`FLOAT` 的值再按 Java 8 的 `Float.toString` 打印（`JavaEightFloats`）：Java 19 起的 `Float.toString` 对约 9% 的 float 位模式打印出不同的数字（绝大多数是 1e7～1e19 的整数值，如 `2285691904` Java 8 印 `2.2856919E9`、Java 19+ 印 `2.285692E9`），而桥接运行在 Java 21 上。已对全部 2^32 个位模式与 Java 8 逐一比对一致。`TIMESTAMP` 按数据源的服务器时区渲染，与生成配置时写入 `server-time-zone` 的是同一个值。
 - **实测对比（2026-09-25，本地栈 MySQL 8.0.45 + SeaTunnel 2.3.13）**：同一张表同时跑旧配置（`DEBEZIUM_JSON`）和新配置两个作业，读同样的行和同一段 binlog，覆盖有 / 无符号整数、`DECIMAL` 至 (65,30)、`FLOAT` / `DOUBLE`、含中文与 emoji 的 `CHAR` / `VARCHAR` / `TEXT`、`DATE`、`DATETIME(0/3/6)`、`TIMESTAMP(0/3/6)`、`TIME(0/3/6)`、`YEAR`、`BIT(1/8/64)`、`BOOLEAN`、`BLOB` / `BINARY`、`JSON`、`ENUM` / `SET`、NULL，初始装载、INSERT / UPDATE（含改主键）/ DELETE、事务、保存点暂停后恢复；另有唯一键表和服务器时区为 `Asia/Shanghai` 的 `TIMESTAMP` 表。两边经桥接发布的五种格式逐条逐字相同（消息 key 也相同），差别只有初始装载行的 `phase` / `op`，以及事件时间字段。录制的 raw 记录和旧桥接的发布结果在 `ruoyi-sync/src/test/resources/kafka/raw-format-fidelity/`，`KafkaRawFormatFidelityTest` 以此回归。
 - **体积**：value schema 随每条记录发送。实测平均每条 raw 记录：48 列的表 12.0 KB（旧格式 1.0 KB），6 列 3.2 KB（0.25 KB），3 列 2.4 KB（0.16 KB），约 10～15 倍。raw topic 的磁盘与网络占用相应增加；引擎的 `read_limit.bytes_per_second`（默认 10 MiB/s）按源端产出行的字节数限速，新格式下这一行就是整条 raw 记录，宽表会比以前更早触到字节限速：按每行 12 KB 估算，48 列的表约 870 行/秒，低于默认的 1000 行/秒（估算，未实测吞吐）。
-- **raw topic 的内容与保留**：raw topic 与目标 topic 在同一个 Kafka 集群，保存的是整行（包括未选中的字段，§1）。未选字段中有不应出现在该集群上的数据时，需在 broker 上限制 `__ds_raw_*` 的访问权限。平台以 1 分区 / 1 副本创建 raw topic，不设置主题级参数，保留期跟随 broker 默认（`log.retention.hours`，默认 168 小时），磁盘占用约为“保留期内的变更行数 × 单条体积”。平台删除不再使用的 raw topic：
+- **raw topic 的内容与保留**：raw topic 与目标 topic 在同一个 Kafka 集群，保存的是整行（包括未选中的字段，§1）。未选字段中有不应出现在该集群上的数据时，需在 broker 上限制 `__ds_raw_*` 的访问权限。平台以 1 分区 / 1 副本创建 raw topic，主题级只设置 `max.message.bytes`（与引擎的单条上限一致，§10），保留期跟随 broker 默认（`log.retention.hours`，默认 168 小时），磁盘占用约为“保留期内的变更行数 × 单条体积”。平台删除不再使用的 raw topic：
   - **登记**：桥接每次启动（操作员启动 / 恢复 / 重新初始化，以及对账、状态刷新、重启恢复补起的桥接）都把该任务或表项的 raw topic 登记到 `ds_kafka_raw_topic`（数据源、topic 名、owner、配置版本），topic 原本就存在也登记。升级前建的 raw topic 因此在其任务 / 表项下一次启动桥接时被接管；升级前 owner 就已删除的旧 topic 不在登记表里，平台不会删，需手工清理。
   - **何时不再使用**：`KafkaRawTopicJanitor` 每 `sync.kafka-bridge.raw-topic-cleanup-interval-ms`（默认 300000，即 5 分钟）检查一次登记表。登记的 topic 仍在使用，当且仅当 owner 仍存在、其目标仍是该数据源、按当前配置版本算出的 raw topic 名仍是它（表项看所属任务组的版本与目标）。所以三种情况会清理：任务 / 表项被删除（包括删除任务组、改端点后表项被重建），编辑提升了配置版本（旧版本的 topic），目标换到了别的数据源（原数据源上的 topic）。停止后原样重新启动的任务版本不变、沿用原 topic，不受影响。
   - **宽限期与删除**：首次发现不再使用时只记下时间，满 `sync.kafka-bridge.raw-topic-retire-grace`（默认 `10m`）后才删除。配置版本只在作业停止时才会变，但其他实例上的桥接 worker 要等各自的对账（30 秒）才退出，宽限期留足余量。owner 已被删除、或已改为写入其他 Kafka 数据源时，它在这个集群上的 consumer group `ds-task-{id}-bridge` 随 topic 一起删除（group 不存在或仍有成员不算错误）；owner 只是换了配置版本时，该 group 要继续读新 topic，保留。删除后登记再保留一个宽限期：期间 topic 若被残留的客户端重新建出来就再删一次，之后删除登记。桥接自己的 consumer 设置了 `allow.auto.create.topics=false`，不会重建 raw topic。
   - **只删登记过的 topic**：同一集群上可能还有另一套平台环境的 raw topic，命名规则相同，所以平台从不按 `__ds_raw_` 前缀匹配删除。清理同一时刻只在一个实例上执行（Redisson 锁，拿不到即跳过本轮），只写登记表。数据源被删除或改成非 Kafka 类型时，其登记直接移除（topic 已无法访问，留在原集群上）；集群不可达或删除失败（例如 broker 关闭了 `delete.topic.enable`）时，该数据源本轮记一条 WARN、登记保留、下轮重试，不影响其他数据源。
 - **GoldenDB 实测（2026-09-25，GoldenDB `V_ALL-DBV6.1.03.12SP1` 经平台）**：与本地 MySQL 同表同语句并跑 `FULL_CDC`，初始装载 3 行为 `SNAPSHOT`；GoldenDB 把 UPDATE 写成 binlog DELETE + INSERT，桥接合并为带前像的一条 `UPDATE`；改主键为旧 key 的 `DELETE` + 新 key 的 `INSERT`；未选字段不发布；以保存点暂停期间的变更在恢复后以 `CDC` 发布；列类型相同时两边 14 条事件逐字相同。
 - **升级与兼容**：引擎配置变了，已有 Kafka CDC 任务（单表与任务组表项）的配置指纹都会变化。运行中的作业不受影响，继续写旧格式；桥接逐条识别格式，旧格式照旧读取（初始装载仍是 `CDC`，事件时间仍是采集时间）。暂停后恢复会因指纹不符被拒：单表任务进入 `REINITIALIZE_REQUIRED`，任务组表项进入 `FAILED` 并提示重新初始化该表。重新初始化或停止后重新启动时提交新格式的作业，写入同一个 raw topic（桥接从已提交的位点继续，新旧格式的记录可以前后相接），新一轮初始装载为 `SNAPSHOT`。修改数据源的服务器时区同样要求重新初始化；在此之前若桥接重启（例如后端重启），`TIMESTAMP` 会按新时区渲染。
+
+## 10. 投递保证与故障处理（2026-11-08）
+
+链路上有三处可能出不去的单条记录：引擎写 raw topic、桥接发布到目标 topic、桥接读取 raw topic。三处都按"停住并报告，不跳过"处理。
+
+**单条消息大小。** Kafka 默认单条上限约 1 MB，而 raw 记录带着整份 value schema、UPDATE 还带前后两个镜像，一行带大 TEXT / BLOB / JSON 的数据很容易超过。
+
+- 引擎的 Kafka sink 使用 `max.request.size = sync.engine.kafka-max-record-bytes`（默认 16 MiB，下限 1 MiB）；raw topic 建出来时的 `max.message.bytes` 与之匹配，桥接每次启动时把更小的旧 raw topic 调大（集群策略不允许时记 WARN）。这一项不参与配置指纹：调大后，因大行失败的作业仍可从 checkpoint 恢复。
+- SeaTunnel 2.3.13 的 Kafka sink 原本对发送失败不做任何处理，超限记录被静默丢弃、作业照常运行、checkpoint 越过这一行。引擎镜像现在带补丁连接器（`deploy/local-stack/seatunnel/patch/`），发送失败会让下一次 checkpoint 失败，作业以 `FAILED` 结束，错误信息里写明原因（如 `RecordTooLargeException: The message is 20002525 bytes ... larger than 16777216 ...`）。处理方式：调大 `sync.engine.kafka-max-record-bytes`（必要时连同目标 topic 的 `max.message.bytes`），重启后端，然后"恢复"任务。
+- 桥接自己的 producer 也用同一个上限；发布前还会读取目标 topic 的 `max.message.bytes`，单条事件超过两者中较小的一个就不发送（见下）。
+- 任务 / 任务组校验里的"单条消息大小"检查项按字段类型估算一行最坏情况下的大小，列出可能超限的大字段。它不阻止启动，因为只有值真的那么大时才会出问题。
+
+**发布停在原地。** 桥接按 raw 顺序发布，遇到第一条发不出去的事件就停下：
+
+- 原因可能是事件超过目标 topic 的单条上限（发送前就判定，它和之后的事件都不发送）、broker 拒绝或超时、没有写权限，或 raw 记录无法解析。
+- 桥接把 raw 位点提交到这条事件之前，把原因写到任务 / 表项上（`kafka_bridge_error`），然后按 10 秒起、每次翻倍、最长 5 分钟的间隔重试同一条事件（`sync.kafka-bridge.retry-initial-backoff` / `retry-max-backoff`）。
+- 期间之后的变更都留在 raw topic，不发布、不重复；目标 topic 中只有停下之前的事件。原因排除后（例如调大 topic 的 `max.message.bytes`），下一次重试自动续传，记录随即清除。
+- 以前桥接线程直接退出，对账任务每 30 秒把它拉起；同一批里排在失败事件后面的事件每次都被重发，实测 75 秒内重复 6 次，失败的那条永远发不出去。
+- 停止期间任务 / 表项仍是 `RUNNING`（引擎作业正常）；`lastError` 显示原因和积压条数，每次停止发一条告警（`KAFKA_BRIDGE_STOPPED`，"Kafka 桥接已暂停发布"），端到端延迟从停止时刻起持续增长，不再停在最后一次成功时的值。积压条数也以数字记在 `kafka_bridge_backlog`，状态刷新把它计入积压指标。页面上的状态是"运行中·发布暂停"，详情最上方说明原因。
+
+**读取位点。** 桥接的 consumer 使用 `auto.offset.reset=none`，Kafka 给不出有效位点时由桥接自己判断，从不静默跳到最早的记录：
+
+- 平台在 raw topic 登记表中记录桥接已提交的位点（`ds_kafka_raw_topic.bridge_offset`，最多落后 5 秒）。consumer group 的位点过期时（暂停超过 broker 的 `offsets.retention.minutes`，默认 7 天），桥接从这个位点继续。
+- 从未消费过、也还没有记录被删除的 raw topic，从头开始。
+- 新一轮运行（启动、重新初始化）可以从最早保留的记录开始，因为它自己的初始装载会覆盖旧位点上缺失的内容（`reset_allowed`）。
+- 其余情况视为位点越界：桥接停在的位点早于 raw topic 最早保留的位点（中间的记录已被保留策略删除），或超出末尾（topic 被删除重建），或哪里都找不到位点、而 raw topic 已有记录被删除。这时原因以"Kafka raw topic 位点越界："开头。状态刷新把单表任务转为 `REINITIALIZE_REQUIRED`、把任务组表项隔离为 `FAILED`，并停掉它已经没人读的引擎作业，随后走原有告警。
+- 处理方式是重新初始化（任务组表项为"重新初始化该表"）。新一轮的桥接从最早保留的记录开始，先发出旧运行剩下的事件，再发出新的初始装载。
+- 手动"刷新状态"不会让 `REINITIALIZE_REQUIRED` 变回 `STOPPED`。
+
+实测（2026-11-08，本地栈 MySQL → Kafka）：
+- 目标 topic 单条上限 20 KB：30 KB 的事件使发布停在这条之前，之后的事件不发布也不重复；调大上限后约 70 秒内自动续传，每条恰好一次。
+- 1.5 MB 的行（以前被静默丢弃）完整发布；20 MB 的行使作业在 20 秒内以 `FAILED` 结束，并写明原因。把上限调到 32 MiB 后恢复，这行和其后的变更都送达。
+- 删除桥接尚未发布的 raw 记录后约 10 秒报告越界，任务转为 `REINITIALIZE_REQUIRED`；重新初始化后从最早保留的位点接上。

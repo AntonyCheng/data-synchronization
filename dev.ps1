@@ -258,9 +258,9 @@ function Invoke-Up {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $VendorScript | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "SeaTunnel vendor JAR provisioning failed (see output above)" }
 
-        Write-Step "building GoldenDB-patched MySQL-CDC connector"
+        Write-Step "building patched SeaTunnel connectors (GoldenDB binlog, Kafka sink delivery)"
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ConnectorPatchScript | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "GoldenDB connector patch build failed (see output above)" }
+        if ($LASTEXITCODE -ne 0) { throw "connector patch build failed (see output above)" }
 
         # --build so a rebuilt patched connector actually reaches the image; docker's
         # layer cache makes this a no-op when vendor/ and the Dockerfile are unchanged.

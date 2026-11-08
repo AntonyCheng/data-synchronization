@@ -1,6 +1,6 @@
 import { DeleteOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
 import { PageContainer, ProTable, type ActionType, type ProColumns } from '@ant-design/pro-components';
-import { Button, message, Modal, Space, Tag } from 'antd';
+import { Button, message, Modal, Space, Tag, Tooltip } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import type { DataSourceOptionVO } from '@/api/sync/data-source/types';
 import type { SyncTaskGroupQuery, SyncTaskGroupVO } from '@/api/sync/group/types';
@@ -11,6 +11,7 @@ import GroupDetailModal from '@/pages/sync/group/components/GroupDetailModal';
 import GroupFormModal from '@/pages/sync/group/components/GroupFormModal';
 import { groupStatusLabel, groupStatusLabels, useGroupPermissions } from '@/pages/sync/group/shared';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
+import { publishPaused } from '@/utils/syncBridge';
 
 /** Task group list. The form and the per-group console live in their own components. */
 export default function SyncTaskGroupPage() {
@@ -69,23 +70,34 @@ export default function SyncTaskGroupPage() {
     {
       title: '状态',
       dataIndex: 'status',
-      width: 120,
+      width: 200,
       valueEnum: groupStatusLabels,
-      render: (_, row) => (
-        <Tag
-          color={
-            row.status === 'RUNNING' || row.status === 'VALID'
-              ? 'success'
-              : row.status === 'DEGRADED'
-                ? 'warning'
-                : row.status === 'FAILED' || row.status === 'INVALID'
-                  ? 'error'
-                  : 'default'
-          }
-        >
-          {groupStatusLabel(row.status)}
-        </Tag>
-      )
+      render: (_, row) => {
+        // A table whose Kafka bridge stopped keeps the group RUNNING: say so next to it.
+        const paused = (row.items || []).filter(item => publishPaused(item));
+        return (
+          <Space size={4} wrap>
+            <Tag
+              color={
+                row.status === 'RUNNING' || row.status === 'VALID'
+                  ? 'success'
+                  : row.status === 'DEGRADED'
+                    ? 'warning'
+                    : row.status === 'FAILED' || row.status === 'INVALID'
+                      ? 'error'
+                      : 'default'
+              }
+            >
+              {groupStatusLabel(row.status)}
+            </Tag>
+            {paused.length > 0 && (
+              <Tooltip title={paused.map(item => `${item.sourceTable}：${item.kafkaBridgeError}`).join('；')}>
+                <Tag color="warning">{paused.length} 表发布暂停</Tag>
+              </Tooltip>
+            )}
+          </Space>
+        );
+      }
     },
     {
       title: '操作',

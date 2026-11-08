@@ -92,12 +92,19 @@ public class SyncTaskServiceImpl implements ISyncTaskService {
         return task;
     }
 
-    /** Latest engine metrics, and a notice on a RUNNING Kafka task this instance holds without a bridge. */
+    /**
+     * Latest engine metrics, a notice on a RUNNING Kafka task this instance holds without a bridge, and
+     * the Kafka lag of a stopped bridge counted on from the stop (the stored one froze there).
+     */
     private void attachRuntimeState(List<SyncTaskVo> tasks) {
         Map<Long, SyncMetricsSampleVo> latest = metricsService.latestForTasks(tasks.stream().map(SyncTaskVo::getTaskId).toList());
+        LocalDateTime now = LocalDateTime.now();
         tasks.forEach(task -> {
             task.setLatestMetrics(latest.get(task.getTaskId()));
             task.setLastError(kafkaTaskBridgeService.decorateLastError(task.getTaskId(), task.getLastError()));
+            if (SyncStatus.RUNNING.equals(task.getStatus())) {
+                task.setKafkaLagSeconds(KafkaTaskBridgeService.effectiveLagSeconds(task.getKafkaLagSeconds(), task.getKafkaBridgeErrorTime(), now));
+            }
         });
     }
 

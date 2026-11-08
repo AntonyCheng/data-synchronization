@@ -67,6 +67,18 @@ public class SyncTask extends BaseEntity {
     private LocalDateTime kafkaLastSourceEventTime;
     private LocalDateTime kafkaLastBrokerAckTime;
     private Long kafkaLagSeconds;
+    /**
+     * Why the Kafka bridge stopped publishing (null while it publishes) and since when. Written only
+     * by the bridge, like {@link #alertedStatus}: a lifecycle path saving the whole row must never
+     * write back a value it loaded before the bridge changed it.
+     */
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private String kafkaBridgeError;
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private LocalDateTime kafkaBridgeErrorTime;
+    /** Raw records waiting behind that stop, as counted at the bridge's last attempt (null = unknown). */
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private Long kafkaBridgeBacklog;
     private Long lastCheckSourceRows;
     private Long lastCheckTargetRows;
     private Long lastCheckDifference;

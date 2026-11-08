@@ -19,6 +19,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -58,8 +59,8 @@ class KafkaBridgeReconcilerTest {
         verify(bridge, times(1)).tryStartGroupItem(started.capture(), any(), argThat(source -> "src_db".equals(source.getDatabaseName())));
         assertEquals(5L, started.getValue().getTaskId());
         // Background starts never take the operator path that refuses when the pool is full.
-        verify(bridge, never()).start(any(), any(), any());
-        verify(bridge, never()).startGroupItem(any(), any(), any());
+        verify(bridge, never()).start(any(), any(), any(), anyBoolean());
+        verify(bridge, never()).startGroupItem(any(), any(), any(), anyBoolean());
     }
 
     @Test

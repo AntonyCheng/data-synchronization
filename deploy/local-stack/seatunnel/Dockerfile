@@ -7,11 +7,12 @@ RUN mkdir -p /opt/seatunnel/connectors/seatunnel /opt/seatunnel/checkpoint /opt/
        /opt/seatunnel/lib/postgresql-*.jar \
        /opt/seatunnel/lib/opengauss-jdbc-*.jar
 COPY vendor/connectors/ /opt/seatunnel/connectors/seatunnel/
-# GoldenDB Table_map compatibility. SeaTunnel 2.3.13 scans /opt/seatunnel/connectors/
-# (plugin-mapping.properties lives there), NOT connectors/seatunnel/, so the patched
-# jar has to overwrite the base image's own connector build in that directory. It is
-# derived from that same jar by build-patched-connector.ps1; see patch/README.md.
-# Holds only .gitkeep when the patch has not been built.
+# Patched connectors: MySQL-CDC reads GoldenDB's Table_map events, the Kafka sink fails
+# the job on a record it cannot deliver instead of dropping it. SeaTunnel 2.3.13 scans
+# /opt/seatunnel/connectors/ (plugin-mapping.properties lives there), NOT
+# connectors/seatunnel/, so each patched jar has to overwrite the base image's own
+# connector build in that directory. They are derived from those same jars by
+# build-patched-connector.ps1; see patch/README.md. Holds only .gitkeep when not built.
 COPY vendor/patched/ /opt/seatunnel/connectors/
 COPY vendor/drivers/ /opt/seatunnel/lib/
 COPY entrypoint.sh /opt/seatunnel/poc-entrypoint.sh

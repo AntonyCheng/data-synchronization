@@ -12,7 +12,9 @@ export const defaultForm: SyncTaskForm = {
   incrementalStartupMode: 'LATEST',
   fullDataMode: 'UPSERT',
   ddlPolicy: 'FAIL',
-  scheduleMode: 'ONCE',
+  // Never ONCE by default: that one starts the task the moment it is saved, before anyone saw its
+  // target check. REALTIME (started by hand) fits the default FULL_CDC mode; see defaultScheduleMode.
+  scheduleMode: 'REALTIME',
   targetSchema: 'public',
   kafkaOutputFormat: 'ENVELOPE',
   readLimitRowsPerSecond: 1000,
@@ -31,6 +33,25 @@ export const kafkaOutputFormatOptions = [
 
 export const kafkaOutputFormatLabel = (value?: string) =>
   kafkaOutputFormatOptions.find(option => option.value === value)?.label || value || '-';
+
+export const syncModeOptions = [
+  { label: '全量同步', value: 'FULL' },
+  { label: '纯增量', value: 'INCREMENTAL' },
+  { label: '全量 + CDC', value: 'FULL_CDC' }
+];
+
+export const scheduleModeOptions = [
+  { label: '保存后执行一次', value: 'ONCE' },
+  { label: 'Cron 定时执行', value: 'CRON' },
+  { label: '常驻实时（手动启动）', value: 'REALTIME' },
+  { label: '手动（不自动触发）', value: 'MANUAL' }
+];
+
+export const optionLabel = (options: { label: string; value: string }[], value?: string) =>
+  options.find(option => option.value === value)?.label || value || '-';
+
+/** The schedule a new task gets for its sync mode until the operator picks one: never one that starts on save. */
+export const defaultScheduleMode = (syncMode?: string) => (syncMode === 'FULL' ? 'MANUAL' : 'REALTIME');
 
 export const statusLabels: Record<string, string> = {
   DRAFT: '草稿',
@@ -51,8 +72,11 @@ export function sourceTypeOf(dataSources: DataSourceOptionVO[], sourceId?: strin
   return dataSources.find(item => String(item.sourceId) === String(sourceId))?.sourceType;
 }
 
-export function statusTag(status?: string, error?: string) {
-  const tag = (
+/** `paused` (see publishPaused) gets its own tag: a plain RUNNING tag looks healthy. */
+export function statusTag(status?: string, error?: string, paused = false) {
+  const tag = paused ? (
+    <Tag color="warning">运行中·发布暂停</Tag>
+  ) : (
     <Tag
       color={
         status === 'RUNNING'

@@ -1,4 +1,5 @@
 import type { SyncMetricsSample } from '@/api/sync/metrics/types';
+import type { TargetCompatibilityVO } from '@/api/sync/task/types';
 import type { PageQuery } from '@/api/types';
 
 export interface SyncTaskGroupItemForm {
@@ -44,6 +45,11 @@ export interface SyncTaskGroupItemVO extends SyncTaskGroupItemForm {
   status?: string;
   engineJobId?: string;
   lastError?: string;
+  /** Why the table's Kafka bridge stopped publishing (absent while it publishes) and since when. */
+  kafkaBridgeError?: string;
+  kafkaBridgeErrorTime?: string;
+  /** Raw records waiting behind that stop, counted at the bridge's last attempt. */
+  kafkaBridgeBacklog?: number;
   schemaHash?: string;
   lastCheckSourceRows?: number;
   lastCheckTargetRows?: number;
@@ -71,6 +77,7 @@ export interface SyncTaskGroupItemValidationResult {
   targetTable: string;
   passed: boolean;
   message: string;
+  targetCompatibility?: TargetCompatibilityVO;
 }
 
 export interface SyncTaskGroupValidationResult {

@@ -58,6 +58,11 @@ public class SyncTaskVo implements Serializable {
     private LocalDateTime kafkaLastSourceEventTime;
     private LocalDateTime kafkaLastBrokerAckTime;
     private Long kafkaLagSeconds;
+    /** Why the Kafka bridge stopped publishing (null while it publishes) and since when. */
+    private String kafkaBridgeError;
+    private LocalDateTime kafkaBridgeErrorTime;
+    /** Raw records waiting behind that stop, as counted at the bridge's last attempt. */
+    private Long kafkaBridgeBacklog;
     private Long lastCheckSourceRows;
     private Long lastCheckTargetRows;
     private Long lastCheckDifference;

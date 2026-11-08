@@ -122,7 +122,7 @@ class SeaTunnelJobServiceImplTest {
         assertEquals("", task.getLastError());
         assertEquals("RUNNING", result.getStatus());
         verify(taskMapper, times(2)).updateById(task); // resource-protection defaults, then RUNNING
-        verify(bridge, never()).start(any(), any(), any());
+        verify(bridge, never()).start(any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -160,7 +160,7 @@ class SeaTunnelJobServiceImplTest {
         assertThrows(ServiceException.class, () -> service.start(TASK_ID));
 
         InOrder order = inOrder(bridge, restClient);
-        order.verify(bridge).start(eq(task), eq(kafka), eq(mysql));
+        order.verify(bridge).start(eq(task), eq(kafka), eq(mysql), eq(true));
         order.verify(restClient).submit(anyString(), anyString(), isNull(), eq(false));
         order.verify(bridge).stop(TASK_ID);
         assertEquals("FAILED", task.getStatus());
@@ -171,7 +171,7 @@ class SeaTunnelJobServiceImplTest {
     void aFullBridgePoolRefusesAKafkaStartBeforeAnythingIsSubmitted() {
         SyncTask task = persisted(task("STOPPED", KAFKA_ID));
         doThrow(new ServiceException("Kafka 桥接容量已满（2/2）：请调大 sync.kafka-bridge.max-workers"))
-            .when(bridge).start(any(), any(), any());
+            .when(bridge).start(any(), any(), any(), anyBoolean());
 
         String refused = assertThrows(ServiceException.class, () -> service.start(TASK_ID)).getMessage();
 
@@ -187,7 +187,7 @@ class SeaTunnelJobServiceImplTest {
         task.setEngineConfigHash(fingerprint(task, kafka));
         when(restClient.checkpoints("job-1")).thenReturn(new SeaTunnelRestClient.CheckpointSnapshot("7", LocalDateTime.now(), "COMPLETED"));
         doThrow(new ServiceException("Kafka 桥接容量已满（2/2）：请调大 sync.kafka-bridge.max-workers"))
-            .when(bridge).start(any(), any(), any());
+            .when(bridge).start(any(), any(), any(), anyBoolean());
 
         String refused = assertThrows(ServiceException.class, () -> service.resume(TASK_ID)).getMessage();
 
@@ -213,7 +213,7 @@ class SeaTunnelJobServiceImplTest {
         assertEquals("RUNNING", status.getStatus());
         assertEquals("RUNNING", task.getStatus());
         assertEquals("", task.getLastError());
-        verify(bridge, never()).start(any(), any(), any());
+        verify(bridge, never()).start(any(), any(), any(), anyBoolean());
         verify(bridge, never()).stop(TASK_ID);
     }
 
@@ -301,12 +301,69 @@ class SeaTunnelJobServiceImplTest {
         service.refreshStatus(TASK_ID);
         // The heal of a job that already runs never takes the operator path that refuses when full.
         verify(bridge).tryStart(eq(task), eq(kafka), eq(mysql));
-        verify(bridge, never()).start(any(), any(), any());
+        verify(bridge, never()).start(any(), any(), any(), anyBoolean());
 
         when(restClient.status("job-1")).thenReturn(snapshot("DOING_SAVEPOINT", null, null));
         service.refreshStatus(TASK_ID);
         assertEquals("PAUSING", task.getStatus());
         verify(bridge).stop(TASK_ID);
+    }
+
+    @Test
+    void aStoppedBridgeShowsAsTheTasksErrorAndItsLagKeepsGrowing() {
+        SyncTask task = persisted(running(KAFKA_ID));
+        task.setKafkaLagSeconds(1L);
+        task.setKafkaBridgeError("Kafka 桥接已暂停发布：停在 raw offset 7，同步键 {\"id\":4} 的事件约 30158 字节，超过单条上限 20000 字节");
+        task.setKafkaBridgeErrorTime(LocalDateTime.now().minusMinutes(10));
+        task.setKafkaBridgeBacklog(3L);
+        when(restClient.status("job-1")).thenReturn(snapshot("RUNNING", null, "{\"SourceReceivedCount\":\"5\",\"SinkCommittedCount\":\"4\"}"));
+        when(restClient.checkpoints("job-1")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+        when(bridge.isRunning(TASK_ID)).thenReturn(true);
+
+        SeaTunnelJobStatus status = service.refreshStatus(TASK_ID);
+
+        // The engine job is healthy: the task stays RUNNING, and says why nothing reaches the topic.
+        assertEquals("RUNNING", status.getStatus());
+        assertTrue(task.getLastError().startsWith("Kafka 桥接已暂停发布：停在 raw offset 7，"), task.getLastError());
+        assertTrue(status.getKafkaLagSeconds() >= 600, "lag " + status.getKafkaLagSeconds());
+        assertEquals(status.getKafkaLagSeconds(), status.getCdcLagSeconds());
+        // The engine wrote all but one record to the raw topic; the 3 behind the stop are backlog too.
+        assertEquals(4L, status.getBacklogRows());
+    }
+
+    @Test
+    void aLostRawTopicPositionParksTheTaskForReinitializationAndStopsItsJob() {
+        SyncTask task = persisted(running(KAFKA_ID));
+        task.setKafkaBridgeError(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX + "桥接停在 __ds_raw_42_v1 的 offset 2，但它最早只保留到 offset 5");
+        when(restClient.status("job-1")).thenReturn(snapshot("RUNNING", null, null));
+        when(restClient.checkpoints("job-1")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+
+        SeaTunnelJobStatus status = service.refreshStatus(TASK_ID);
+
+        assertEquals("REINITIALIZE_REQUIRED", status.getStatus());
+        assertEquals("REINITIALIZE_REQUIRED", task.getStatus());
+        assertTrue(task.getLastError().startsWith(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX), task.getLastError());
+        // Nobody can read what the job writes any more: it is stopped without a savepoint, its bridge too.
+        verify(restClient).stop("job-1", false, true);
+        verify(bridge).stop(TASK_ID);
+        verify(bridge, never()).tryStart(any(), any(), any());
+    }
+
+    @Test
+    void aRefreshNeverTurnsAReinitializeRequirementIntoAStop() {
+        SyncTask task = persisted(running(KAFKA_ID));
+        task.setStatus("REINITIALIZE_REQUIRED");
+        task.setLastError(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX + "桥接停在 __ds_raw_42_v1 的 offset 2，但它最早只保留到 offset 4");
+        // The parked task's job was cancelled on purpose.
+        when(restClient.status("job-1")).thenReturn(snapshot("CANCELED", null, null));
+        when(restClient.checkpoints("job-1")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+
+        SeaTunnelJobStatus status = service.refreshStatus(TASK_ID);
+
+        assertEquals("REINITIALIZE_REQUIRED", status.getStatus());
+        assertEquals("REINITIALIZE_REQUIRED", task.getStatus());
+        assertTrue(task.getLastError().startsWith(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX), task.getLastError());
+        verify(taskMapper, never()).updateById(task);
     }
 
     @Test

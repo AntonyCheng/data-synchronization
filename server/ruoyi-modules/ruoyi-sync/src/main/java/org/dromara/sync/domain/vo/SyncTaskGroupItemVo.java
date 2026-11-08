@@ -40,6 +40,11 @@ public class SyncTaskGroupItemVo implements Serializable {
     private LocalDateTime lastCheckTime;
     private String lastCheckMessage;
     private String lastError;
+    /** Why the Kafka bridge stopped publishing (null while it publishes) and since when. */
+    private String kafkaBridgeError;
+    private LocalDateTime kafkaBridgeErrorTime;
+    /** Raw records waiting behind that stop, as counted at the bridge's last attempt. */
+    private Long kafkaBridgeBacklog;
 
     /** Newest engine metrics sample on record; null until the item has been polled at least once. */
     private SyncMetricsSampleVo latestMetrics;

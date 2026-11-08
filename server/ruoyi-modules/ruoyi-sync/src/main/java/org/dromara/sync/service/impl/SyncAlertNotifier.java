@@ -10,6 +10,7 @@ import org.dromara.sync.constant.SyncStatus;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupItem;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.SyncTaskGroupItemMapper;
 import org.dromara.sync.mapper.SyncTaskGroupMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
@@ -58,6 +59,13 @@ public class SyncAlertNotifier {
         SyncStatus.FAILED, "已被隔离（失败）",
         SyncStatus.DDL_BLOCKED, "因表结构变更暂停");
     private static final Set<String> WARNING_LEVEL = Set.of(SyncStatus.DEGRADED, SyncStatus.DDL_BLOCKED);
+    /**
+     * Not a status: a RUNNING Kafka task / table item whose bridge stopped publishing
+     * ({@code kafka_bridge_error}). The engine job is healthy, so nothing else would announce it,
+     * while every change behind the stop waits in the raw topic.
+     */
+    static final String BRIDGE_STOPPED = "KAFKA_BRIDGE_STOPPED";
+    private static final String BRIDGE_STOPPED_LABEL = "Kafka 桥接已暂停发布";
     /** A table's own notice only makes sense while its group is otherwise running. */
     private static final Set<String> LIVE_GROUP_STATUSES = Set.of(SyncStatus.RUNNING, SyncStatus.DEGRADED);
 
@@ -86,11 +94,13 @@ public class SyncAlertNotifier {
         int raised = 0;
 
         for (SyncTask task : taskMapper.selectAlertCandidates()) {
-            String due = TASK_LABELS.containsKey(task.getStatus()) ? task.getStatus() : "";
+            String due = TASK_LABELS.containsKey(task.getStatus()) ? task.getStatus()
+                : bridgeStopped(task.getStatus(), task.getKafkaBridgeError()) ? BRIDGE_STOPPED : "";
             if (due.equals(StringUtils.defaultIfBlank(task.getAlertedStatus(), ""))) continue;
             if (!due.isEmpty()) {
-                publish(messages, "同步任务「" + task.getTaskName() + "」" + TASK_LABELS.get(due), task.getLastError(),
-                    due, "/sync/task", data("TASK", task.getTaskId(), null, due));
+                boolean bridge = BRIDGE_STOPPED.equals(due);
+                publish(messages, "同步任务「" + task.getTaskName() + "」" + (bridge ? BRIDGE_STOPPED_LABEL : TASK_LABELS.get(due)),
+                    bridge ? stopDetail(task.getKafkaBridgeError()) : task.getLastError(), due, "/sync/task", data("TASK", task.getTaskId(), null, due));
                 raised++;
             }
             taskMapper.updateAlertedStatus(task.getTaskId(), due);
@@ -113,16 +123,35 @@ public class SyncAlertNotifier {
         for (SyncTaskGroupItem item : itemMapper.selectAlertCandidates()) {
             SyncTaskGroup group = groupOf.apply(item.getGroupId());
             boolean groupLive = group != null && LIVE_GROUP_STATUSES.contains(group.getStatus());
-            String due = groupLive && ITEM_LABELS.containsKey(item.getStatus()) ? item.getStatus() : "";
+            String due = !groupLive ? ""
+                : ITEM_LABELS.containsKey(item.getStatus()) ? item.getStatus()
+                : bridgeStopped(item.getStatus(), item.getKafkaBridgeError()) ? BRIDGE_STOPPED : "";
             if (due.equals(StringUtils.defaultIfBlank(item.getAlertedStatus(), ""))) continue;
             if (!due.isEmpty()) {
-                publish(messages, "任务组「" + group.getGroupName() + "」的表 " + item.getSourceTable() + " " + ITEM_LABELS.get(due),
-                    item.getLastError(), due, "/sync/group", data("GROUP_ITEM", item.getItemId(), item.getGroupId(), due));
+                boolean bridge = BRIDGE_STOPPED.equals(due);
+                publish(messages, "任务组「" + group.getGroupName() + "」的表 " + item.getSourceTable() + " "
+                        + (bridge ? BRIDGE_STOPPED_LABEL : ITEM_LABELS.get(due)),
+                    bridge ? stopDetail(item.getKafkaBridgeError()) : item.getLastError(), due, "/sync/group",
+                    data("GROUP_ITEM", item.getItemId(), item.getGroupId(), due));
                 raised++;
             }
             itemMapper.updateAlertedStatus(item.getItemId(), due);
         }
         return raised;
+    }
+
+    /**
+     * A RUNNING owner whose bridge recorded a stop. A lost raw-topic position is left out: the status
+     * refresh parks that owner within a pass, and its REINITIALIZE_REQUIRED / FAILED is announced then.
+     */
+    private static boolean bridgeStopped(String status, String bridgeError) {
+        return SyncStatus.RUNNING.equals(status) && StringUtils.isNotBlank(bridgeError)
+            && !KafkaTaskBridgeService.isRawTopicGap(bridgeError);
+    }
+
+    /** The stop reason without the words the headline already says. */
+    private static String stopDetail(String bridgeError) {
+        return StringUtils.removeStart(bridgeError, KafkaTaskBridgeService.STOPPED_PREFIX);
     }
 
     private static void publish(MessageService messages, String headline, String detail, String status, String path, Map<String, Object> data) {

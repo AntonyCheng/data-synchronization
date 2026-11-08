@@ -61,15 +61,33 @@ class EngineJobRunnerTest {
         assertThrows(ServiceException.class, () -> runner.submit(job, generated));
 
         InOrder order = inOrder(bridge, restClient);
-        order.verify(bridge).start(job.task(), job.target(), job.source());
+        order.verify(bridge).start(job.task(), job.target(), job.source(), true);
         order.verify(restClient).submit("ds-task-42", "env {}", null, false);
         order.verify(bridge).stop(OWNER);
+    }
+
+    /**
+     * Only a submit - a new run with its own initial load - may let the bridge start over at the
+     * earliest retained raw record when its old position is gone; a resume continues a savepoint, and
+     * a gap in what it reads is lost data.
+     */
+    @Test
+    void onlyASubmitStartsItsBridgeAsAFreshRun() {
+        EngineJobRunner.Job job = job("KAFKA", false);
+        when(restClient.submit(anyString(), anyString(), any(), anyBoolean())).thenReturn(new SeaTunnelRestClient.SubmitResult("job-1", "ds-task-42"));
+
+        runner.resume(job, generated, "job-1");
+        verify(bridge).start(job.task(), job.target(), job.source(), false);
+
+        EngineJobRunner.Job item = job("KAFKA", true);
+        runner.submit(item, generated);
+        verify(bridge).startGroupItem(item.task(), item.target(), item.source(), true);
     }
 
     @Test
     void aRefusedBridgeMeansNothingReachesTheEngine() {
         EngineJobRunner.Job job = job("KAFKA", true);
-        doThrow(new ServiceException("Kafka 桥接容量已满（64/64）")).when(bridge).startGroupItem(any(), any(), any());
+        doThrow(new ServiceException("Kafka 桥接容量已满（64/64）")).when(bridge).startGroupItem(any(), any(), any(), anyBoolean());
 
         assertThrows(ServiceException.class, () -> runner.submit(job, generated));
 
@@ -84,7 +102,7 @@ class EngineJobRunnerTest {
 
         assertEquals("job-1", runner.submit(job, generated));
 
-        verify(bridge, never()).start(any(), any(), any());
+        verify(bridge, never()).start(any(), any(), any(), anyBoolean());
     }
 
     @Test

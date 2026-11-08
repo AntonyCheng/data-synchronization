@@ -92,7 +92,7 @@ REDIS_PASSWORD=ruoyi123
 | `web/.env.development` | `dev.ps1` 的 `Initialize-Frontend` | `web/.env.example`（模板值已校正） |
 | `web/node_modules` | `dev.ps1` 的 `Initialize-Frontend` | `pnpm install` + `pnpm-lock.yaml` |
 | SeaTunnel 连接器 / JDBC 驱动 JAR | `dev.ps1 -Poc` 调 `deploy/local-stack/seatunnel/fetch-vendor.ps1` | Maven Central，按 `vendor/checksums.sha1` 校验 |
-| GoldenDB 兼容版 MySQL-CDC 连接器 | `dev.ps1 -Poc` 调 `deploy/local-stack/seatunnel/build-patched-connector.ps1` | 用 `patch/` 里的源码重编译，输出到 `vendor/patched/` |
+| 打过补丁的 MySQL-CDC（GoldenDB）与 Kafka 连接器 | `dev.ps1 -Poc` 调 `deploy/local-stack/seatunnel/build-patched-connector.ps1` | 用 `patch/<连接器>/` 里的源码重编译，输出到 `vendor/patched/` |
 
 这几样都在 `.gitignore` 里（`**/.env.development`、`node_modules`、`*.jar`），是**可复现产物**，不进仓库。
 
@@ -108,8 +108,10 @@ REDIS_PASSWORD=ruoyi123
   （`connector-cdc-mysql-2.3.13`、`connector-jdbc-2.3.13`、`mysql-connector-j-8.0.33`、`postgresql-42.7.5`）
   到 `deploy/local-stack/seatunnel/vendor/{connectors,drivers}/`。幂等，已存在且校验通过就跳过。
   - 离线 / Maven Central 拉不到时：从 Apache SeaTunnel 2.3.13 官方发行包的 `connectors/` 目录取对应 JAR，手动放进上述目录，以 `vendor/checksums.sha1` 为准校验。
-- 再跑 `deploy/local-stack/seatunnel/build-patched-connector.ps1`：编译 `patch/` 下的 `TableMapEventDataDeserializer.java`，跑自检（GoldenDB 真实事件 + 标准 MySQL 回归），把补丁类打进 `vendor/patched/connector-cdc-mysql-2.3.13.jar`。需要 PATH 上有 `javac`（JDK 21）。
-  - 这是为了兼容中兴 GoldenDB 非标准的 `Table_map` 事件（多 8 字节）。原理和取证见 `deploy/local-stack/seatunnel/patch/README.md`。对标准 MySQL 链路无影响。
+- 再跑 `deploy/local-stack/seatunnel/build-patched-connector.ps1`：逐个编译 `patch/<连接器>/`、跑自检，把补丁类打进 `vendor/patched/` 下对应的 jar。原版 jar 从基础镜像取（本地没有基础镜像时从现有引擎镜像取），并按 SHA-1 校验。需要 PATH 上有 `javac`（JDK 21），本地 Maven 仓库里有 `slf4j-api 1.7.36`（Kafka 自检要用）。
+  - `connector-cdc-mysql`：兼容中兴 GoldenDB 非标准的 `Table_map` 事件（多 8 字节）。自检用 GoldenDB 真实事件加标准 MySQL 回归。对标准 MySQL 链路无影响。
+  - `connector-kafka`：Kafka sink 发送失败时让作业失败，原版会静默丢弃超限记录。自检是一次没有 broker 的失败发送。
+  - 原理和取证见 `deploy/local-stack/seatunnel/patch/README.md`。
   - Dockerfile 在 `vendor/connectors/` 之后再 COPY `vendor/patched/`，让补丁包覆盖原包，避免类冲突；`vendor/connectors/` 保持原始状态，继续匹配 `checksums.sha1`。
 - 然后 `deploy/local-stack/compose.yml`（项目名 `data-sync-poc`）构建 `ds-poc-seatunnel` 镜像并拉起：源 MySQL、PostgreSQL/MySQL/Kafka 目标、SeaTunnel、kafka-ui。
 
@@ -151,7 +153,7 @@ REDIS_PASSWORD=ruoyi123
 | 后端起不来，报 socket / Redisson 路径错 | 确认用的是 JDK 21；脚本已把 socket 目录挪到 `.dev-runtime\jdk-sockets` |
 | `dbs-mysql` 拉不下来 | 网络问题，按 §2 建 `platform/.env` 回退镜像版本 |
 | `.\dev.ps1 up -Poc` 报 "vendor JAR provisioning failed" | Maven Central 拉不到；按 §4 的离线兜底手动放 JAR |
-| `.\dev.ps1 up -Poc` 报 "GoldenDB connector patch build failed" | PATH 上没有 `javac`（装 JDK 21），或自检没过——自检没过说明补丁逻辑有问题，别忽略 |
+| `.\dev.ps1 up -Poc` 报 "connector patch build failed" | PATH 上没有 `javac`（装 JDK 21）、本地 Maven 仓库缺 `slf4j-api 1.7.36`，或自检没过——自检没过说明补丁逻辑有问题，别忽略 |
 | 元数据迁移报错 | 看是哪个 `ry_sync_migration_*.sql`；迁移是幂等的，可重跑 `deploy/migrate-platform-schema.ps1` |
 | 数据源列表为空 | 正常，§5，需在 UI 重新登记 |
 
@@ -163,6 +165,6 @@ REDIS_PASSWORD=ruoyi123
 - 前端全部 `web/src`、`web/config`、`web/vite.config.ts`、`web/package.json` + `pnpm-lock.yaml`
 - 元数据库 schema：`ry_vue.sql` + `ry_sync.sql` + 全部 `ry_sync_migration_*.sql`
 - 编排脚本：`dev.ps1`、`server/script/bin/*.ps1`、`deploy/migrate-platform-schema.ps1`、`deploy/local-stack/seatunnel/fetch-vendor.ps1`
-- 引擎栈 compose、SeaTunnel `Dockerfile` / `entrypoint.sh` / `config/seatunnel.yaml` / `vendor/checksums.sha1` / `patch/`（GoldenDB 兼容补丁源码 + 自检）、源/目标库 init SQL
+- 引擎栈 compose、SeaTunnel `Dockerfile` / `entrypoint.sh` / `config/seatunnel.yaml` / `vendor/checksums.sha1` / `patch/`（GoldenDB 与 Kafka 连接器补丁源码 + 自检）、源/目标库 init SQL
 - 离线交付模板：`deploy/offline/`、`deploy/build-offline-package.ps1`
 - Redis 配置：`server/script/docker/redis/conf/redis.conf`

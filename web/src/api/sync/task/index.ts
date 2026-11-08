@@ -43,6 +43,11 @@ export function validateSyncTask(id: string | number) {
   return request<R<TaskValidationResult>>({ url: `/sync/task/${id}/validate`, method: 'post' });
 }
 
+/** The wizard's check of a configuration that is not saved yet; nothing is persisted. */
+export function checkDraftTargetCompatibility(data: SyncTaskForm) {
+  return request<R<TargetCompatibilityVO>>({ url: '/sync/task/target-compatibility', method: 'post', data });
+}
+
 export function checkTargetCompatibility(id: string | number) {
   return request<R<TargetCompatibilityVO>>({ url: `/sync/task/${id}/target-compatibility`, method: 'post' });
 }

@@ -250,7 +250,7 @@ export default function MetricsHistoryPanel({ load, defaultMinutes = 60 }: Metri
           <Space orientation="vertical" size={4} style={{ width: '100%' }}>
             <Typography.Text strong>吞吐（行/秒）</Typography.Text>
             <ReactECharts option={throughputOption} notMerge style={{ height: 220 }} />
-            <Typography.Text strong>积压（源端已读取 − 目标已提交，行）</Typography.Text>
+            <Typography.Text strong>积压（源端已读取 − 目标已提交，行；Kafka 桥接暂停发布时另加待发布的记录）</Typography.Text>
             <ReactECharts option={backlogOption} notMerge style={{ height: 180 }} />
             {hasLag && (
               <>

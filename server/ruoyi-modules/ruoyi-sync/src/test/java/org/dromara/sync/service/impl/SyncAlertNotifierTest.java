@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupItem;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.SyncTaskGroupItemMapper;
 import org.dromara.sync.mapper.SyncTaskGroupMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
@@ -20,6 +21,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -94,6 +96,40 @@ class SyncAlertNotifierTest {
         verify(itemMapper).updateAlertedStatus(71L, "DDL_BLOCKED");
         verify(itemMapper, never()).updateAlertedStatus(81L, "FAILED"); // the group's own notice covers it
         verify(itemMapper).updateAlertedStatus(72L, "");
+    }
+
+    @Test
+    void aStoppedKafkaBridgeIsAnnouncedOnceWhileItsOwnerRuns() {
+        SyncTask stopped = task(1L, "RUNNING", "", "");
+        stopped.setKafkaBridgeError("Kafka 桥接已暂停发布：停在 raw offset 7，同步键 {\"id\":4} 的事件约 30158 字节，超过单条上限 20000 字节");
+        SyncTask alreadyTold = task(2L, "RUNNING", SyncAlertNotifier.BRIDGE_STOPPED, "");
+        alreadyTold.setKafkaBridgeError("still stopped");
+        SyncTask publishesAgain = task(3L, "RUNNING", SyncAlertNotifier.BRIDGE_STOPPED, "");
+        SyncTask gap = task(4L, "RUNNING", "", "");
+        gap.setKafkaBridgeError(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX + "桥接停在 offset 2");
+        when(taskMapper.selectAlertCandidates()).thenReturn(List.of(stopped, alreadyTold, publishesAgain, gap));
+        SyncTaskGroup live = group(7L, "RUNNING", "");
+        when(groupMapper.selectAlertCandidates()).thenReturn(List.of());
+        when(groupMapper.selectById(7L)).thenReturn(live);
+        SyncTaskGroupItem table = item(71L, 7L, "RUNNING", "", "");
+        table.setKafkaBridgeError("Kafka 桥接已暂停发布：TopicAuthorizationException：Not authorized");
+        when(itemMapper.selectAlertCandidates()).thenReturn(List.of(table));
+
+        assertEquals(2, notifier.notifyOnce());
+
+        ArgumentCaptor<PushPayloadDTO> sent = ArgumentCaptor.forClass(PushPayloadDTO.class);
+        verify(messages, times(2)).publishAll(sent.capture());
+        assertEquals("同步任务「t1」Kafka 桥接已暂停发布：停在 raw offset 7，同步键 {\"id\":4} 的事件约 30158 字节，超过单条上限 20000 字节",
+            sent.getAllValues().get(0).getMessage());
+        assertEquals("error", ((Map<?, ?>) sent.getAllValues().get(0).getData()).get("level"));
+        assertEquals("任务组「g7」的表 t71 Kafka 桥接已暂停发布：TopicAuthorizationException：Not authorized",
+            sent.getAllValues().get(1).getMessage());
+        verify(taskMapper).updateAlertedStatus(1L, SyncAlertNotifier.BRIDGE_STOPPED);
+        verify(taskMapper, never()).updateAlertedStatus(eq(2L), any());
+        verify(taskMapper).updateAlertedStatus(3L, "");
+        // A lost raw-topic position is parked by the status refresh and announced as REINITIALIZE_REQUIRED then.
+        verify(taskMapper, never()).updateAlertedStatus(eq(4L), any());
+        verify(itemMapper).updateAlertedStatus(71L, SyncAlertNotifier.BRIDGE_STOPPED);
     }
 
     @Test

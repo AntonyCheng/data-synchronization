@@ -45,4 +45,13 @@ public interface IDataSourceMetadataService {
     TargetCompatibilityVo checkTargetCompatibility(Long sourceId, Long targetId, String sourceTable,
                                                     String targetSchema, String targetTable,
                                                     String selectedColumns, String syncKeyColumns);
+
+    /**
+     * The check of a task configuration that is not saved yet - what the wizard shows before
+     * creating or saving a task. {@code syncMode} decides how a Kafka record is sized (FULL reads
+     * the selected columns, CDC always the whole row; null counts as CDC).
+     */
+    TargetCompatibilityVo checkTargetCompatibility(Long sourceId, Long targetId, String sourceTable,
+                                                    String targetSchema, String targetTable,
+                                                    String selectedColumns, String syncKeyColumns, String syncMode);
 }

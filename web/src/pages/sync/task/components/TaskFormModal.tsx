@@ -1,11 +1,13 @@
+import { LoadingOutlined } from '@ant-design/icons';
 import { ModalForm, ProFormDependency, ProFormDigit, ProFormSelect, ProFormText } from '@ant-design/pro-components';
 import { Alert, AutoComplete, Button, Descriptions, Divider, Form, message, Radio, Select, Space } from 'antd';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { DataSourceMetadataVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
-import type { SyncTaskForm, SyncTaskVO } from '@/api/sync/task/types';
+import type { SyncTaskForm, SyncTaskVO, TargetCompatibilityVO } from '@/api/sync/task/types';
 import { createKafkaTopic, getDataSourceMetadata } from '@/api/sync/data-source';
-import { addSyncTask, getSyncTask, updateSyncTask } from '@/api/sync/task';
+import { addSyncTask, checkDraftTargetCompatibility, getSyncTask, updateSyncTask } from '@/api/sync/task';
 import ColumnSelector from '@/components/sync/ColumnSelector';
+import CompatibilityChecks, { compatibilityAlertType, compatibilityTitle } from '@/components/sync/CompatibilityChecks';
 import {
   jumpToMissing,
   SourceProbeResult,
@@ -16,11 +18,16 @@ import {
 import { useSourceProbe, useTargetObjects } from '@/components/sync/useSourceProbe';
 import {
   defaultForm,
+  defaultScheduleMode,
   kafkaOutputFormatLabel,
   kafkaOutputFormatOptions,
   mappingRisks,
+  optionLabel,
+  scheduleModeOptions,
   sourceLabel,
-  sourceTypeOf
+  sourceTypeOf,
+  syncModeOptions,
+  useTaskPermissions
 } from '@/pages/sync/task/shared';
 import { reliableUniqueKeys, syncKeyOptions } from '@/utils/syncKeys';
 import { defaultKafkaTopic } from '@/utils/syncNaming';
@@ -74,6 +81,15 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
   const [topicMode, setTopicMode] = useState<'EXISTING' | 'CREATE'>('EXISTING');
   const [topicCreateLoading, setTopicCreateLoading] = useState(false);
   const [sourceMetadata, setSourceMetadata] = useState<DataSourceMetadataVO>();
+  const permissions = useTaskPermissions();
+  // The target check of the last step, run on the values not saved yet.
+  const [draftCheck, setDraftCheck] = useState<TargetCompatibilityVO>();
+  const [draftCheckLoading, setDraftCheckLoading] = useState(false);
+  const [draftCheckFailed, setDraftCheckFailed] = useState(false);
+  const draftCheckToken = useRef(0);
+  const syncModeValue = Form.useWatch('syncMode', { form, preserve: true });
+  const scheduleModeValue = Form.useWatch('scheduleMode', { form, preserve: true });
+  const startsOnSave = scheduleModeValue === 'ONCE';
 
   const taskId = task?.taskId;
 
@@ -81,6 +97,10 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
     if (!open) return;
     setWizardStep(0);
     setDirty(false);
+    draftCheckToken.current += 1;
+    setDraftCheck(undefined);
+    setDraftCheckFailed(false);
+    setDraftCheckLoading(false);
     resetMetadataState();
     resetTargetTables();
     form.resetFields();
@@ -206,6 +226,48 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
     setWizardStep(current => Math.min(current + 1, LAST_STEP));
   };
 
+  /** The request body for the form's values: what a save sends, and what the last step's target check checks. */
+  const toPayload = (allValues: SyncTaskForm) => {
+    const targetType = sourceTypeOf(dataSources, allValues.targetId);
+    return {
+      ...allValues,
+      selectedColumns: columnList(allValues.selectedColumns).join(','),
+      targetSchema: targetType === 'POSTGRESQL' ? allValues.targetSchema : undefined,
+      kafkaOutputFormat: targetType === 'KAFKA' ? allValues.kafkaOutputFormat : undefined
+    };
+  };
+
+  /**
+   * The target check before the task exists: the warnings it raises (a Kafka record that may
+   * outgrow the topic's limit, a target table that does not fit) used to show only in the detail
+   * console, after the task had been created - and with the default schedule, already started.
+   */
+  const runDraftCheck = async () => {
+    const allValues = form.getFieldsValue(true) as SyncTaskForm;
+    if (!permissions.canValidate || !allValues.sourceId || !allValues.targetId || !allValues.sourceTable) return;
+    const token = ++draftCheckToken.current;
+    setDraftCheckLoading(true);
+    setDraftCheckFailed(false);
+    try {
+      const result = await checkDraftTargetCompatibility(toPayload(allValues));
+      if (token !== draftCheckToken.current) return;
+      setDraftCheck(result.data);
+    } catch {
+      if (token !== draftCheckToken.current) return;
+      setDraftCheck(undefined);
+      setDraftCheckFailed(true);
+    } finally {
+      if (token === draftCheckToken.current) setDraftCheckLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // Entering the last step, and again when the mode changes there: FULL sizes a Kafka record
+    // from the selected columns, CDC from the whole row.
+    if (open && wizardStep === LAST_STEP) void runDraftCheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, wizardStep, syncModeValue]);
+
   const submitForm = async (values: SyncTaskForm) => {
     // Step panels unmount their controls; use the full form store so preserved
     // values from earlier steps are included in the final payload.
@@ -236,18 +298,14 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
       message.error('纯增量任务必须先通过 CDC 前置检查，已返回第 1 步「数据源」，请重新选择源数据源');
       return false;
     }
-    const targetType = sourceTypeOf(dataSources, allValues.targetId);
-    const payload = {
-      ...allValues,
-      selectedColumns: selectedColumns.join(','),
-      targetSchema: targetType === 'POSTGRESQL' ? allValues.targetSchema : undefined,
-      kafkaOutputFormat: targetType === 'KAFKA' ? allValues.kafkaOutputFormat : undefined
-    };
+    const payload = toPayload(allValues);
     setSubmitLoading(true);
     try {
       if (allValues.taskId) await updateSyncTask(payload);
       else await addSyncTask(payload);
-      message.success(allValues.taskId ? '任务保存成功' : '任务创建成功');
+      message.success(
+        `${allValues.taskId ? '任务保存成功' : '任务创建成功'}${allValues.scheduleMode === 'ONCE' ? '，调度器即将启动它' : ''}`
+      );
       close();
       onSaved();
       return true;
@@ -285,7 +343,9 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
             lastStep={LAST_STEP}
             busy={probe.loading}
             submitting={submitLoading}
-            submitText={taskId ? '确认保存' : '确认创建'}
+            submitText={
+              taskId ? (startsOnSave ? '确认保存并启动' : '确认保存') : startsOnSave ? '确认创建并启动' : '确认创建'
+            }
             onCancel={confirmClose}
             onPrev={() => setWizardStep(current => current - 1)}
             onNext={() => void nextWizardStep()}
@@ -504,12 +564,15 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
           <ProFormSelect
             name="syncMode"
             label="同步模式"
-            options={[
-              { label: '全量同步', value: 'FULL' },
-              { label: '纯增量', value: 'INCREMENTAL' },
-              { label: '全量 + CDC', value: 'FULL_CDC' }
-            ]}
+            options={syncModeOptions}
             rules={[{ required: true }]}
+            fieldProps={{
+              // A new task's schedule follows the mode until the operator picks one.
+              onChange: value => {
+                if (!taskId && !form.isFieldTouched('scheduleMode'))
+                  form.setFieldValue('scheduleMode', defaultScheduleMode(value as string));
+              }
+            }}
           />
           <Form.Item
             noStyle
@@ -589,17 +652,20 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
           <ProFormSelect
             name="scheduleMode"
             label="调度模式"
-            options={[
-              { label: '保存后执行一次', value: 'ONCE' },
-              { label: 'Cron 定时执行', value: 'CRON' },
-              { label: '常驻实时（手动启动）', value: 'REALTIME' },
-              { label: '手动（不自动触发）', value: 'MANUAL' }
-            ]}
+            options={scheduleModeOptions}
             rules={[{ required: true }]}
           />
           <Form.Item noStyle shouldUpdate={(prev, current) => prev.scheduleMode !== current.scheduleMode}>
             {({ getFieldValue }) =>
-              getFieldValue('scheduleMode') === 'CRON' ? (
+              getFieldValue('scheduleMode') === 'ONCE' ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  title={taskId ? '保存后会立即启动任务' : '创建后会立即启动任务'}
+                  description="「保存后执行一次」在保存的同时交给调度器启动：全量读取源表并开始写入目标端。想先看过目标检查、再在任务详情里手动启动，请选择「常驻实时（手动启动）」或「手动」。"
+                />
+              ) : getFieldValue('scheduleMode') === 'CRON' ? (
                 <ProFormText
                   name="cronExpression"
                   label="Cron 表达式"
@@ -687,7 +753,9 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                       {targetType === 'POSTGRESQL' ? `${values.targetSchema || 'public'} / ` : ''}
                       {values.targetTable || '-'}
                     </Descriptions.Item>
-                    <Descriptions.Item label="同步模式">{values.syncMode || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="同步模式">
+                      {optionLabel(syncModeOptions, values.syncMode)}
+                    </Descriptions.Item>
                     {targetType === 'KAFKA' && (
                       <Descriptions.Item label="输出格式">
                         {kafkaOutputFormatLabel(values.kafkaOutputFormat)}
@@ -695,13 +763,54 @@ export default function TaskFormModal({ open, task, dataSources, onClose, onSave
                     )}
                     <Descriptions.Item label="同步键">{values.syncKeyColumns || '-'}</Descriptions.Item>
                     <Descriptions.Item label="字段数">{columnList(values.selectedColumns).length}</Descriptions.Item>
-                    <Descriptions.Item label="调度">{values.scheduleMode || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="调度">
+                      {values.scheduleMode === 'ONCE'
+                        ? '保存后立即启动一次'
+                        : values.scheduleMode === 'CRON'
+                          ? `Cron 定时：${values.cronExpression || '-'}`
+                          : optionLabel(scheduleModeOptions, values.scheduleMode)}
+                    </Descriptions.Item>
                   </Descriptions>
                   {timeWarning && <Alert type="warning" showIcon title={timeWarning} style={{ marginTop: 12 }} />}
                 </>
               );
             }}
           </Form.Item>
+          {permissions.canValidate &&
+            (draftCheckLoading ? (
+              <Alert
+                type="info"
+                showIcon
+                icon={<LoadingOutlined />}
+                title="正在检查目标兼容性…"
+                style={{ marginTop: 12 }}
+              />
+            ) : draftCheck ? (
+              <Alert
+                type={compatibilityAlertType(draftCheck)}
+                showIcon
+                style={{ marginTop: 12 }}
+                title={`目标检查：${compatibilityTitle(draftCheck)}`}
+                description={<CompatibilityChecks result={draftCheck} />}
+                action={
+                  <Button size="small" onClick={() => void runDraftCheck()}>
+                    重新检查
+                  </Button>
+                }
+              />
+            ) : draftCheckFailed ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 12 }}
+                title="目标检查没有完成：可以先保存，启动前在任务详情里点「目标兼容性」再检查"
+                action={
+                  <Button size="small" onClick={() => void runDraftCheck()}>
+                    重新检查
+                  </Button>
+                }
+              />
+            ) : null)}
         </>
       )}
     </ModalForm>

@@ -6,6 +6,7 @@ import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.SyncTaskGroup;
 import org.dromara.sync.domain.SyncTaskGroupItem;
+import org.dromara.sync.support.SyncText;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -218,6 +219,37 @@ class SeaTunnelJobConfigGeneratorTest {
         assertFalse(cdc.matchesFingerprint(PRE_ZONE_FINGERPRINTS.get("POSTGRESQL FULL_CDC")),
             "the binlog position was recorded under Asia/Shanghai: a zone change needs a reinitialize");
         assertFalse(cdc.matchesFingerprint(null));
+    }
+
+    /**
+     * The Kafka sink's {@code max.request.size} follows {@code sync.engine.kafka-max-record-bytes} but is
+     * not fingerprinted: raising it must not strand the savepoint of a job that failed on a large row,
+     * and jobs fingerprinted before the entry existed keep resuming.
+     */
+    @Test
+    void theKafkaRecordLimitIsConfiguredButNotFingerprinted() {
+        SeaTunnelProperties raisedLimit = new SeaTunnelProperties();
+        raisedLimit.setKafkaMaxRecordBytes(64 * 1024 * 1024);
+        for (String mode : List.of("FULL_CDC", "INCREMENTAL", "FULL")) {
+            SeaTunnelJobConfigGenerator.GeneratedConfig defaults = SeaTunnelJobConfigGenerator.generate(
+                goldenTask(mode), mysql(), kafka(), new SeaTunnelProperties(), COLUMNS);
+            SeaTunnelJobConfigGenerator.GeneratedConfig raised = SeaTunnelJobConfigGenerator.generate(
+                goldenTask(mode), mysql(), kafka(), raisedLimit, COLUMNS);
+            assertTrue(defaults.config().contains(
+                "kafka.config = { acks = \"all\", enable.idempotence = \"true\", max.request.size = \"16777216\" }"), mode);
+            assertTrue(raised.config().contains("max.request.size = \"67108864\""), mode);
+            assertEquals(defaults.fingerprint(), raised.fingerprint(), mode);
+
+            String beforeTheEntry = defaults.redactedConfig().replace(", max.request.size = \"16777216\"", "");
+            assertTrue(beforeTheEntry.contains("kafka.config = { acks = \"all\", enable.idempotence = \"true\" }"), mode);
+            assertEquals(SyncText.sha256Hex(beforeTheEntry), defaults.fingerprint(), mode + ": the config as generated before the entry");
+            assertTrue(raised.matchesFingerprint(SyncText.sha256Hex(beforeTheEntry)), mode);
+        }
+        // Kafka's own default is the floor: a smaller setting must not make the engine refuse ordinary rows.
+        SeaTunnelProperties tiny = new SeaTunnelProperties();
+        tiny.setKafkaMaxRecordBytes(1000);
+        assertTrue(SeaTunnelJobConfigGenerator.generate(goldenTask("FULL_CDC"), mysql(), kafka(), tiny, COLUMNS)
+            .config().contains("max.request.size = \"1048576\""));
     }
 
     @Test

@@ -25,7 +25,12 @@ import {
 } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import type { DataSourceCdcPrecheckVO, DataSourceOptionVO } from '@/api/sync/data-source/types';
-import type { SeaTunnelJobStatus, SyncTaskVO, TaskValidationResult } from '@/api/sync/task/types';
+import type {
+  SeaTunnelJobStatus,
+  SyncTaskVO,
+  TargetCompatibilityCheckItemVO,
+  TaskValidationResult
+} from '@/api/sync/task/types';
 import { checkDataSourceCdc } from '@/api/sync/data-source';
 import { syncPhaseLabel } from '@/api/sync/metrics/types';
 import {
@@ -43,14 +48,24 @@ import {
   stopSyncTask,
   validateSyncTask
 } from '@/api/sync/task';
+import CompatibilityChecks, {
+  compatibilityAlertType,
+  compatibilityTitle,
+  compatibilityWarnings,
+  warningLines
+} from '@/components/sync/CompatibilityChecks';
 import MetricsHistoryPanel from '@/components/sync/MetricsHistoryPanel';
 import {
   diagnosticMessage,
   kafkaOutputFormatLabel,
+  optionLabel,
   sourceTypeOf,
   statusTag,
+  syncModeOptions,
   useTaskPermissions
 } from '@/pages/sync/task/shared';
+import { confirmTitleSafe } from '@/utils/modal';
+import { bridgeStopReason, publishPaused } from '@/utils/syncBridge';
 
 export interface TaskDetailModalProps {
   open: boolean;
@@ -159,6 +174,80 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
     }
   };
 
+  /**
+   * A Kafka task's start and reinitialize begin a new run, so the target check runs first: the
+   * warnings it leaves open (a row that may outgrow the topic's record limit) need a confirmation.
+   * Null when the check itself failed - the request layer has already said why.
+   */
+  const targetWarnings = async (): Promise<TargetCompatibilityCheckItemVO[] | null> => {
+    if (!detail || sourceTypeOf(dataSources, detail.targetId) !== 'KAFKA' || !permissions.canValidate) return [];
+    try {
+      const result = await checkTargetCompatibility(detail.taskId);
+      setCompatibilityResult(result.data);
+      const warnings = compatibilityWarnings(result.data);
+      if (warnings.length) setCompatibilityVisible(true);
+      return warnings;
+    } catch {
+      return null;
+    }
+  };
+
+  const warningList = (warnings: TargetCompatibilityCheckItemVO[]) => (
+    <ul style={{ paddingInlineStart: 18, marginBottom: 0 }}>
+      {warningLines(warnings).map(line => (
+        <li key={line}>{line}</li>
+      ))}
+    </ul>
+  );
+
+  const start = async () => {
+    if (!detail || busyAction) return;
+    setBusyAction('start');
+    const warnings = await targetWarnings();
+    setBusyAction(undefined);
+    if (warnings === null) return;
+    if (
+      warnings.length > 0 &&
+      !(await confirmTitleSafe('启动前请确认目标检查的提示', {
+        content: warningList(warnings),
+        okText: '仍要启动',
+        cancelText: '取消',
+        width: 560
+      }))
+    )
+      return;
+    await runAction('start', startSyncTask);
+  };
+
+  const reinitialize = async () => {
+    if (!detail || busyAction) return;
+    setBusyAction('reinitialize');
+    const warnings = await targetWarnings();
+    setBusyAction(undefined);
+    if (warnings === null) return;
+    const confirmed = await confirmTitleSafe('重新初始化同步任务', {
+      content: (
+        <>
+          {detail.syncMode === 'FULL_CDC'
+            ? '此操作会丢弃旧 checkpoint/savepoint，重新执行全量并继续 CDC。目标端将按当前全量数据模式处理，是否继续？'
+            : '此操作会丢弃旧恢复状态并重新执行全量，是否继续？'}
+          {warnings.length > 0 && (
+            <>
+              <Typography.Paragraph strong style={{ marginTop: 12, marginBottom: 4 }}>
+                目标检查还有需要确认的提示：
+              </Typography.Paragraph>
+              {warningList(warnings)}
+            </>
+          )}
+        </>
+      ),
+      okText: '确认重新初始化',
+      cancelText: '取消',
+      width: warnings.length > 0 ? 560 : undefined
+    });
+    if (confirmed) await runAction('reinitialize', reinitializeSyncTask);
+  };
+
   const remove = async () => {
     if (!detail) return;
     setBusyAction('delete');
@@ -184,7 +273,12 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
       setCdcVisible(Boolean(result.data.cdcPrecheck));
       setCompatibilityResult(result.data.targetCompatibility);
       setCompatibilityVisible(Boolean(result.data.targetCompatibility));
-      message[result.data.valid ? 'success' : 'error'](result.data.message);
+      const warned = result.data.valid && compatibilityWarnings(result.data.targetCompatibility).length > 0;
+      message[result.data.valid ? (warned ? 'warning' : 'success') : 'error'](
+        warned && result.data.targetCompatibility
+          ? `${result.data.message}；${compatibilityTitle(result.data.targetCompatibility)}`
+          : result.data.message
+      );
       await refreshListAndDetail(detail.taskId);
     } finally {
       setBusyAction(undefined);
@@ -211,7 +305,8 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
       const result = await checkTargetCompatibility(detail.taskId);
       setCompatibilityResult(result.data);
       setCompatibilityVisible(true);
-      message[result.data?.passed ? 'success' : 'error'](result.data?.message || '目标兼容性检查完成');
+      if (!result.data) message.success('目标兼容性检查完成');
+      else message[compatibilityAlertType(result.data)](compatibilityTitle(result.data));
     } finally {
       setBusyAction(undefined);
     }
@@ -294,11 +389,45 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
     >
       {detail && (
         <Space direction="vertical" size={18} style={{ width: '100%' }}>
+          {/* What needs the operator comes first: below the charts it went unseen. */}
+          {publishPaused(detail) ? (
+            <Alert
+              type="warning"
+              showIcon
+              title="Kafka 桥接已暂停发布：任务仍在运行，变更暂存在 raw topic 中等待发布"
+              description={
+                <Space orientation="vertical" size={4}>
+                  <Typography.Text copyable={{ text: detail.kafkaBridgeError }}>
+                    {bridgeStopReason(detail.kafkaBridgeError)}
+                  </Typography.Text>
+                  <Typography.Text type="secondary">
+                    {`自 ${detail.kafkaBridgeErrorTime || '-'} 起暂停${
+                      detail.kafkaBridgeBacklog != null
+                        ? `，待发布 ${detail.kafkaBridgeBacklog} 条（按最近一次重试统计）`
+                        : ''
+                    }。排除原因后桥接会自动重试（间隔逐次加倍，默认最长 5 分钟），暂停任务再恢复可立即重试；请在 raw topic 的保留期内处理，超出后只能重新初始化。`}
+                  </Typography.Text>
+                </Space>
+              }
+            />
+          ) : (
+            detail.lastError && (
+              <Alert
+                type="error"
+                showIcon
+                title="最近一次错误"
+                description={<Typography.Text copyable>{detail.lastError}</Typography.Text>}
+              />
+            )
+          )}
+          {detail.lastSkipReason && (
+            <Alert type="warning" showIcon title="最近一次调度未执行" description={detail.lastSkipReason} />
+          )}
           <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }}>
-            <Descriptions.Item label="任务状态">{statusTag(detail.status, detail.lastError)}</Descriptions.Item>
-            <Descriptions.Item label="同步模式">
-              {detail.syncMode === 'FULL_CDC' ? '全量 + CDC' : detail.syncMode || '-'}
+            <Descriptions.Item label="任务状态">
+              {statusTag(detail.status, detail.lastError, publishPaused(detail))}
             </Descriptions.Item>
+            <Descriptions.Item label="同步模式">{optionLabel(syncModeOptions, detail.syncMode)}</Descriptions.Item>
             <Descriptions.Item label="调度模式">
               {detail.scheduleMode === 'CRON'
                 ? `定时 Cron${detail.cronExpression ? ` (${detail.cronExpression})` : ''}`
@@ -392,17 +521,6 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
           <MetricsHistoryPanel
             load={minutes => getSyncTaskMetrics(detail.taskId, minutes).then(result => result.data)}
           />
-          {detail.lastError && (
-            <Alert
-              type="error"
-              showIcon
-              title="最近一次错误"
-              description={<Typography.Text copyable>{detail.lastError}</Typography.Text>}
-            />
-          )}
-          {detail.lastSkipReason && (
-            <Alert type="warning" showIcon title="最近一次调度未执行" description={detail.lastSkipReason} />
-          )}
           <Divider titlePlacement="left" plain>
             准备与诊断
           </Divider>
@@ -519,30 +637,22 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
           {compatibilityResult && compatibilityVisible && (
             <Alert
               style={{ width: '100%' }}
-              type={compatibilityResult.passed ? 'success' : 'error'}
+              type={compatibilityAlertType(compatibilityResult)}
               showIcon
-              title={diagnosticMessage(compatibilityResult.message, () => setCompatibilityVisible(false))}
-              description={
-                <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
-                  <Descriptions.Item label="源表">{compatibilityResult.sourceTable}</Descriptions.Item>
-                  <Descriptions.Item label="目标表">{compatibilityResult.targetTable}</Descriptions.Item>
-                  {compatibilityResult.checks?.map(item => (
-                    <Descriptions.Item key={item.code} label={item.label}>
-                      <Tag color={item.passed ? 'success' : item.required ? 'error' : 'warning'}>
-                        {item.passed ? '通过' : '未通过'}
-                      </Tag>{' '}
-                      {item.actual || '-'} {item.message}
-                      {item.suggestion ? `；处理建议：${item.suggestion}` : ''}
-                    </Descriptions.Item>
-                  ))}
-                </Descriptions>
-              }
+              title={diagnosticMessage(compatibilityTitle(compatibilityResult), () => setCompatibilityVisible(false))}
+              description={<CompatibilityChecks result={compatibilityResult} />}
             />
           )}
           {validationResult && validationVisible && (
             <Alert
               style={{ width: '100%' }}
-              type={validationResult.valid ? 'success' : 'error'}
+              type={
+                !validationResult.valid
+                  ? 'error'
+                  : compatibilityWarnings(validationResult.targetCompatibility).length > 0
+                    ? 'warning'
+                    : 'success'
+              }
               showIcon
               title={diagnosticMessage(validationResult.message, () => setValidationVisible(false))}
               description={
@@ -560,9 +670,13 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
                   )}
                   {validationResult.targetCompatibility && (
                     <Descriptions.Item label="目标表兼容性">
-                      {validationResult.targetCompatibility.passed
-                        ? '通过'
-                        : validationResult.targetCompatibility.message}
+                      {!validationResult.targetCompatibility.passed
+                        ? validationResult.targetCompatibility.message
+                        : compatibilityWarnings(validationResult.targetCompatibility).length > 0
+                          ? `通过；需确认：${compatibilityWarnings(validationResult.targetCompatibility)
+                              .map(check => check.label)
+                              .join('、')}（详见「目标兼容性」）`
+                          : '通过'}
                     </Descriptions.Item>
                   )}
                 </Descriptions>
@@ -666,7 +780,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
                 icon={<PlayCircleOutlined />}
                 loading={busyAction === 'start'}
                 disabled={actionDisabled}
-                onClick={() => runAction('start', startSyncTask)}
+                onClick={() => void start()}
               >
                 启动任务
               </Button>
@@ -689,18 +803,7 @@ export default function TaskDetailModal({ open, task, dataSources, onClose, onCh
                 icon={<ReloadOutlined />}
                 loading={busyAction === 'reinitialize'}
                 disabled={actionDisabled}
-                onClick={() =>
-                  Modal.confirm({
-                    title: '重新初始化同步任务',
-                    content:
-                      detail.syncMode === 'FULL_CDC'
-                        ? '此操作会丢弃旧 checkpoint/savepoint，重新执行全量并继续 CDC。目标端将按当前全量数据模式处理，是否继续？'
-                        : '此操作会丢弃旧恢复状态并重新执行全量，是否继续？',
-                    okText: '确认重新初始化',
-                    cancelText: '取消',
-                    onOk: () => runAction('reinitialize', reinitializeSyncTask)
-                  })
-                }
+                onClick={() => void reinitialize()}
               >
                 重新初始化
               </Button>

@@ -170,6 +170,10 @@ sync:
     max-read-limit-bytes-per-second: ${SEATUNNEL_MAX_READ_LIMIT_BYTES_PER_SECOND:1073741824}
     max-snapshot-parallelism: ${SEATUNNEL_MAX_SNAPSHOT_PARALLELISM:4}
     max-source-connection-limit: ${SEATUNNEL_MAX_SOURCE_CONNECTION_LIMIT:8}
+    # 平台写入 Kafka 的单条记录上限（字节，下限 1 MiB）：引擎写 raw topic 的 max.request.size、raw topic 的
+    # max.message.bytes、桥接 producer 的上限；目标 topic 自身的 max.message.bytes 另外生效。超过时引擎作业失败
+    # （不会被静默丢弃），调大后重启后端即可恢复任务——它不进配置指纹，不影响 savepoint。
+    kafka-max-record-bytes: ${SYNC_ENGINE_KAFKA_MAX_RECORD_BYTES:16777216}
   metrics:
     # 每次成功的引擎状态轮询（30s 对账 + 手动刷新）落一条采样到 ds_sync_metrics_sample
     retention-days: ${SYNC_METRICS_RETENTION_DAYS:7}
@@ -193,6 +197,10 @@ sync:
     # 发现 raw topic 不再被使用后，再等这么久才删除（其他实例上的桥接 worker 可能还在读，30 秒内会被对账停掉）；
     # 删除后登记再保留同样时长，期间 topic 若被残留客户端重新建出会再删一次。
     raw-topic-retire-grace: ${SYNC_KAFKA_BRIDGE_RAW_TOPIC_RETIRE_GRACE:10m}
+    # 桥接遇到发不出去的事件（超过目标 topic 单条上限、broker/ACL 错误、raw 记录无法解析）时停在这条事件上，
+    # 记录原因并告警，按此间隔重试同一条（每次翻倍，最长 retry-max-backoff）；之后的变更留在 raw topic，不跳过。
+    retry-initial-backoff: ${SYNC_KAFKA_BRIDGE_RETRY_INITIAL_BACKOFF:10s}
+    retry-max-backoff: ${SYNC_KAFKA_BRIDGE_RETRY_MAX_BACKOFF:5m}
   orphan-sweep:
     # 提交超时会丢失应答，但引擎通常已接单。作业名确定性（ds-task-<id>），据此把引擎上
     # 仍在运行、平台却没有 jobId 的作业重新接管，避免"幽灵作业"与重复提交双写。

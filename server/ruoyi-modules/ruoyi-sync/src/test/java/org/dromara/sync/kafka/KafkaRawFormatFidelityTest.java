@@ -7,10 +7,10 @@ import org.apache.kafka.clients.consumer.MockConsumer;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.common.TopicPartition;
 import org.dromara.sync.config.KafkaBridgeProperties;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
-import org.dromara.sync.mapper.KafkaRawTopicMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -33,8 +33,13 @@ import java.util.zip.GZIPInputStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.when;
 
 /**
  * The published events do not change when a Kafka CDC task's engine job switches its raw topic from
@@ -178,10 +183,17 @@ class KafkaRawFormatFidelityTest {
     private List<String[]> publish(List<String> raw, String sourceTable, String keys, String zone, int expectedMessages)
         throws InterruptedException {
         KafkaEventProducer producer = mock(KafkaEventProducer.class);
+        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong()))
+            .thenReturn(KafkaEventProducer.PublishOutcome.success(List.of()));
         bridge = new KafkaTaskBridgeService(new KafkaEventNormalizer(mapper), producer, mapper, new KafkaBridgeProperties(),
-            mock(KafkaRawTopicMapper.class)) {
+            new SeaTunnelProperties(), mock(KafkaBridgeStateStore.class)) {
             @Override
             void ensureTopics(SyncTask task, DataSource target, String ownerType) {
+            }
+
+            @Override
+            long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+                return -1;
             }
 
             @Override
@@ -203,7 +215,7 @@ class KafkaRawFormatFidelityTest {
         kafka.setSourceType("KAFKA");
         kafka.setHost("kafka.example");
         kafka.setPort(9092);
-        bridge.start(task, kafka, source);
+        bridge.start(task, kafka, source, true);
 
         int formats = KafkaOutputFormat.values().length;
         long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();

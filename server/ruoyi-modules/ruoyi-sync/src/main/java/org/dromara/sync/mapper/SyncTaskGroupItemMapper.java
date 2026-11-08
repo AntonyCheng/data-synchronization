@@ -38,7 +38,27 @@ public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupIte
     default List<SyncTaskGroupItem> selectAlertCandidates() {
         return selectList(new LambdaQueryWrapper<SyncTaskGroupItem>()
             .in(SyncTaskGroupItem::getStatus, SyncStatus.FAILED, SyncStatus.DDL_BLOCKED)
+            .or(w -> w.isNotNull(SyncTaskGroupItem::getKafkaBridgeError).ne(SyncTaskGroupItem::getKafkaBridgeError, ""))
             .or(w -> w.isNotNull(SyncTaskGroupItem::getAlertedStatus).ne(SyncTaskGroupItem::getAlertedStatus, "")));
+    }
+
+    /** The Kafka bridge's own record of why it stopped publishing, since when and what waits behind it; see SyncTask#kafkaBridgeError. */
+    default int updateKafkaBridgeError(Long itemId, String error, LocalDateTime since, Long backlog) {
+        return update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
+            .eq(SyncTaskGroupItem::getItemId, itemId)
+            .set(SyncTaskGroupItem::getKafkaBridgeError, error)
+            .set(SyncTaskGroupItem::getKafkaBridgeErrorTime, since)
+            .set(SyncTaskGroupItem::getKafkaBridgeBacklog, backlog));
+    }
+
+    /** Clears the bridge's stop record; a no-op write when there is none. */
+    default int clearKafkaBridgeError(Long itemId) {
+        return update(null, new LambdaUpdateWrapper<SyncTaskGroupItem>()
+            .eq(SyncTaskGroupItem::getItemId, itemId)
+            .isNotNull(SyncTaskGroupItem::getKafkaBridgeError)
+            .set(SyncTaskGroupItem::getKafkaBridgeError, null)
+            .set(SyncTaskGroupItem::getKafkaBridgeErrorTime, null)
+            .set(SyncTaskGroupItem::getKafkaBridgeBacklog, null));
     }
 
     default int updateAlertedStatus(Long itemId, String alertedStatus) {

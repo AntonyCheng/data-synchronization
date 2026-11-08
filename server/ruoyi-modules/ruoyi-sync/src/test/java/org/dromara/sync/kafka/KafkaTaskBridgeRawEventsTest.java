@@ -7,10 +7,10 @@ import org.apache.kafka.clients.consumer.MockConsumer;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.common.TopicPartition;
 import org.dromara.sync.config.KafkaBridgeProperties;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaOutputFormat;
 import org.dromara.sync.domain.SyncTask;
-import org.dromara.sync.mapper.KafkaRawTopicMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -28,11 +28,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Phase labelling of a real bridge worker fed raw records of the format CDC jobs were generated with
@@ -133,10 +137,17 @@ class KafkaTaskBridgeRawEventsTest {
     /** Runs a real worker over {@code rawValues} and returns everything it handed the producer. */
     @SuppressWarnings("unchecked")
     private List<KafkaEventNormalizer.NormalizedEvent> bridgeAndCollect(List<String> rawValues, int expectedPublishes) {
+        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong()))
+            .thenReturn(KafkaEventProducer.PublishOutcome.success(List.of()));
         bridge = new KafkaTaskBridgeService(new KafkaEventNormalizer(mapper), producer, mapper, new KafkaBridgeProperties(),
-            mock(KafkaRawTopicMapper.class)) {
+            new SeaTunnelProperties(), mock(KafkaBridgeStateStore.class)) {
             @Override
             void ensureTopics(SyncTask task, DataSource target, String ownerType) {
+            }
+
+            @Override
+            long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+                return -1;
             }
 
             @Override
@@ -144,11 +155,11 @@ class KafkaTaskBridgeRawEventsTest {
                 return new RawTopic(rawValues);
             }
         };
-        bridge.start(task(), kafka(), mysql());
+        bridge.start(task(), kafka(), mysql(), true);
 
         ArgumentCaptor<List<KafkaEventNormalizer.NormalizedEvent>> published = ArgumentCaptor.forClass(List.class);
         verify(producer, timeout(5000).times(expectedPublishes)).publishForTask(
-            eq(TASK_ID), anyString(), eq("customer-events"), published.capture(), eq(KafkaOutputFormat.ENVELOPE));
+            eq(TASK_ID), anyString(), eq("customer-events"), published.capture(), eq(KafkaOutputFormat.ENVELOPE), anyLong());
         return published.getAllValues().stream().flatMap(List::stream).toList();
     }
 

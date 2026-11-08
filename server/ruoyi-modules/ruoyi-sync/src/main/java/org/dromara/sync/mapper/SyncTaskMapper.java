@@ -38,7 +38,27 @@ public interface SyncTaskMapper extends BaseMapperPlus<SyncTask, SyncTaskVo> {
     default List<SyncTask> selectAlertCandidates() {
         return selectList(new LambdaQueryWrapper<SyncTask>()
             .in(SyncTask::getStatus, SyncStatus.FAILED, SyncStatus.REINITIALIZE_REQUIRED)
+            .or(w -> w.isNotNull(SyncTask::getKafkaBridgeError).ne(SyncTask::getKafkaBridgeError, ""))
             .or(w -> w.isNotNull(SyncTask::getAlertedStatus).ne(SyncTask::getAlertedStatus, "")));
+    }
+
+    /** The Kafka bridge's own record of why it stopped publishing, since when and what waits behind it; see SyncTask#kafkaBridgeError. */
+    default int updateKafkaBridgeError(Long taskId, String error, LocalDateTime since, Long backlog) {
+        return update(null, new LambdaUpdateWrapper<SyncTask>()
+            .eq(SyncTask::getTaskId, taskId)
+            .set(SyncTask::getKafkaBridgeError, error)
+            .set(SyncTask::getKafkaBridgeErrorTime, since)
+            .set(SyncTask::getKafkaBridgeBacklog, backlog));
+    }
+
+    /** Clears the bridge's stop record; a no-op write when there is none. */
+    default int clearKafkaBridgeError(Long taskId) {
+        return update(null, new LambdaUpdateWrapper<SyncTask>()
+            .eq(SyncTask::getTaskId, taskId)
+            .isNotNull(SyncTask::getKafkaBridgeError)
+            .set(SyncTask::getKafkaBridgeError, null)
+            .set(SyncTask::getKafkaBridgeErrorTime, null)
+            .set(SyncTask::getKafkaBridgeBacklog, null));
     }
 
     default int updateAlertedStatus(Long taskId, String alertedStatus) {

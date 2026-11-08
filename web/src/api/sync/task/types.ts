@@ -49,6 +49,11 @@ export interface SyncTaskVO extends SyncTaskForm {
   kafkaLastSourceEventTime?: string;
   kafkaLastBrokerAckTime?: string;
   kafkaLagSeconds?: number;
+  /** Why the Kafka bridge stopped publishing (absent while it publishes) and since when. */
+  kafkaBridgeError?: string;
+  kafkaBridgeErrorTime?: string;
+  /** Raw records waiting behind that stop, counted at the bridge's last attempt. */
+  kafkaBridgeBacklog?: number;
   lastCheckSourceRows?: number;
   lastCheckTargetRows?: number;
   lastCheckDifference?: number;

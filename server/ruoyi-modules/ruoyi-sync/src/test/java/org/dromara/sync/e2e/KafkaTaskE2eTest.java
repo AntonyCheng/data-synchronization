@@ -86,6 +86,11 @@ class KafkaTaskE2eTest extends E2eSupport {
 
         Map<String, Object> body = taskBody(displayName("kafka"), table, kafkaTargetId, null, topic, "FULL_CDC");
         body.put("kafkaOutputFormat", "ENVELOPE");
+        // What the wizard shows before the task exists: the same check, record size included.
+        JsonNode draft = platform.post("/sync/task/target-compatibility", body);
+        assertTrue(draft.path("passed").asBoolean(), "draft target compatibility: " + draft);
+        assertTrue(draft.path("checks").valueStream().anyMatch(check -> "kafka_message_size".equals(text(check, "code"))),
+            "the draft check sizes the Kafka record: " + draft);
         long taskId = createTask(body);
         taskIdHolder.set(taskId);
 

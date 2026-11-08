@@ -92,6 +92,14 @@ public class SyncTaskController extends BaseController {
         return R.ok(syncTaskService.validate(taskId));
     }
 
+    /** The wizard's check of a configuration before it is created or saved; nothing is persisted. */
+    @SaCheckPermission("sync:task:validate")
+    @PostMapping("/target-compatibility")
+    public R<TargetCompatibilityVo> draftTargetCompatibility(@RequestBody SyncTaskBo bo) {
+        return R.ok(metadataService.checkTargetCompatibility(bo.getSourceId(), bo.getTargetId(), bo.getSourceTable(),
+            bo.getTargetSchema(), bo.getTargetTable(), bo.getSelectedColumns(), bo.getSyncKeyColumns(), bo.getSyncMode()));
+    }
+
     @SaCheckPermission("sync:task:validate")
     @Log(title = "目标兼容性检查", businessType = BusinessType.OTHER)
     @PostMapping("/{taskId}/target-compatibility")

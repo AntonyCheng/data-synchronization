@@ -4,7 +4,7 @@
 
 ## 调度模式
 
-`ds_sync_task.schedule_mode` 支持 `MANUAL`、`ONCE`、`CRON`、`REALTIME`。`MANUAL` 兼容迁移前任务；`ONCE` 保存后触发一次；`CRON` 使用 Spring 六位 Cron（秒、分、时、日、月、周）；`REALTIME` 表示常驻 CDC，需首次手动启动且不由 Cron 重复触发。
+`ds_sync_task.schedule_mode` 支持 `MANUAL`、`ONCE`、`CRON`、`REALTIME`。`MANUAL` 兼容迁移前任务；`ONCE` 保存后触发一次；`CRON` 使用 Spring 六位 Cron（秒、分、时、日、月、周）；`REALTIME` 表示常驻 CDC，需首次手动启动且不由 Cron 重复触发。创建向导的默认调度为 `REALTIME`（全量任务为 `MANUAL`），不是 `ONCE`：`ONCE` 在保存的同时启动任务，操作员还没看到目标检查。
 
 调度器每 15 秒扫描到期任务。每个任务复用启动锁 `sync:task:start:{taskId}`（与手动启动同一把锁），锁获取失败不重复提交。运行中（`RUNNING`/`PAUSING`）的任务不会并发启动，写入 `last_skip_reason` 后推进下一次 Cron 时间。触发时间写入 `last_trigger_time`，页面展示 `next_run_time` 和最近跳过原因。
 

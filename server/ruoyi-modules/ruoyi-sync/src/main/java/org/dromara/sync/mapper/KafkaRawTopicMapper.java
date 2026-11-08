@@ -47,6 +47,28 @@ public interface KafkaRawTopicMapper extends BaseMapperPlus<KafkaRawTopic, Kafka
             .set(KafkaRawTopic::getDeletedTime, null));
     }
 
+    default KafkaRawTopic selectByTopic(Long dataSourceId, String topicName) {
+        return selectOne(new LambdaQueryWrapper<KafkaRawTopic>()
+            .eq(KafkaRawTopic::getDataSourceId, dataSourceId)
+            .eq(KafkaRawTopic::getTopicName, topicName));
+    }
+
+    /** See {@link KafkaRawTopic#getBridgeOffset()}. */
+    default int updateBridgeOffset(Long dataSourceId, String topicName, long offset) {
+        return update(null, new LambdaUpdateWrapper<KafkaRawTopic>()
+            .eq(KafkaRawTopic::getDataSourceId, dataSourceId)
+            .eq(KafkaRawTopic::getTopicName, topicName)
+            .set(KafkaRawTopic::getBridgeOffset, offset));
+    }
+
+    /** See {@link KafkaRawTopic#getResetAllowed()}. */
+    default int updateResetAllowed(Long dataSourceId, String topicName, boolean allowed) {
+        return update(null, new LambdaUpdateWrapper<KafkaRawTopic>()
+            .eq(KafkaRawTopic::getDataSourceId, dataSourceId)
+            .eq(KafkaRawTopic::getTopicName, topicName)
+            .set(KafkaRawTopic::getResetAllowed, allowed ? "1" : "0"));
+    }
+
     default int deleteByDataSource(Long dataSourceId) {
         return delete(new LambdaQueryWrapper<KafkaRawTopic>().eq(KafkaRawTopic::getDataSourceId, dataSourceId));
     }

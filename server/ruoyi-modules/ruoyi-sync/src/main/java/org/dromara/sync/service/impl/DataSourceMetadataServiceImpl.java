@@ -2,9 +2,15 @@ package org.dromara.sync.service.impl;
 
 import lombok.RequiredArgsConstructor;
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.Config;
+import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.constant.DataSourceType;
+import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
@@ -19,6 +25,7 @@ import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
 import org.dromara.sync.support.JdbcUrls;
+import org.dromara.sync.support.KafkaMessageSizes;
 import org.dromara.sync.support.SourceTimeZones;
 import org.dromara.sync.support.SyncColumnSelectionValidator;
 import org.dromara.sync.support.SyncText;
@@ -55,8 +62,12 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         "binlog_expire_logs_days", "time_zone", "system_time_zone"
     );
 
+    /** Kafka's own default {@code message.max.bytes}: what an output topic accepts unless configured otherwise. */
+    private static final long KAFKA_DEFAULT_MAX_MESSAGE_BYTES = 1_048_588L;
+
     private final DataSourceMapper dataSourceMapper;
     private final SyncTaskMapper syncTaskMapper;
+    private final SeaTunnelProperties seaTunnelProperties;
 
     @Override
     public List<String> queryDatabases(Long sourceId) {
@@ -190,6 +201,16 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
     public TargetCompatibilityVo checkTargetCompatibility(Long sourceId, Long targetId, String sourceTable,
                                                            String targetSchema, String targetTable,
                                                            String selectedColumns, String syncKeyColumns) {
+        return checkTargetCompatibility(sourceId, targetId, sourceTable, targetSchema, targetTable, selectedColumns, syncKeyColumns, null);
+    }
+
+    @Override
+    public TargetCompatibilityVo checkTargetCompatibility(Long sourceId, Long targetId, String sourceTable,
+                                                           String targetSchema, String targetTable,
+                                                           String selectedColumns, String syncKeyColumns, String syncMode) {
+        if (sourceId == null || targetId == null || StringUtils.isBlank(sourceTable)) {
+            throw new ServiceException("请先选择源数据源、目标数据源和源表");
+        }
         SyncTask task = new SyncTask();
         task.setTaskId(0L);
         task.setSourceId(sourceId);
@@ -199,6 +220,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         task.setTargetTable(targetTable);
         task.setSelectedColumns(selectedColumns);
         task.setSyncKeyColumns(syncKeyColumns);
+        task.setSyncMode(syncMode);
         return checkTargetCompatibility(task);
     }
 
@@ -289,6 +311,7 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
         boolean keysPresent = !selection.syncKeyColumns().isEmpty();
         boolean topicVisible = false;
         int partitionCount = 0;
+        long topicMaxMessageBytes = -1;
         String topicDetail = topicPresent ? task.getTargetTable() : "未填写";
         if (topicPresent) {
             try (AdminClient admin = KafkaAdminClients.open(target)) {
@@ -299,23 +322,63 @@ public class DataSourceMetadataServiceImpl implements IDataSourceMetadataService
                     topicVisible = true;
                     partitionCount = description.partitions().size();
                     topicDetail = task.getTargetTable() + "（" + partitionCount + " 个分区）";
+                    topicMaxMessageBytes = topicMaxMessageBytes(admin, task.getTargetTable());
                 }
             } catch (Exception ex) {
                 topicDetail = task.getTargetTable() + "（不可见或无权限）";
             }
         }
         result.getChecks().add(new DataSourceCheckItemVo("kafka_topic", "目标 topic", true, topicVisible,
-            topicDetail, "请选择当前凭证可见的 topic，或在任务向导中先创建新 topic"));
+            topicDetail, topicVisible ? "当前凭证可见" : "请选择当前凭证可见的 topic，或在任务向导中先创建新 topic"));
         result.getChecks().add(new DataSourceCheckItemVo("kafka_partitions", "topic 分区", true,
             topicVisible && partitionCount > 0, topicVisible ? Integer.toString(partitionCount) : "未读取",
             "至少需要一个可用分区；同一同步键将稳定路由到同一分区"));
         result.getChecks().add(new DataSourceCheckItemVo("partition_key", "分区同步键", true, keysPresent,
             keysPresent ? String.join(", ", selection.syncKeyColumns()) : "无", "同一同步键将稳定路由到同一分区"));
+        result.getChecks().add(messageSizeCheck(sourceMetadata, selection.selectedColumns(),
+            !SyncMode.isFull(task.getSyncMode()), topicMaxMessageBytes));
         result.setTargetExists(topicVisible);
         result.setPassed(topicVisible && partitionCount > 0 && keysPresent);
         result.setMessage(result.isPassed() ? "Kafka topic、分区与可靠分区键检查通过，启动时将确认生产 ACL"
             : "Kafka 任务需要可见的目标 topic、至少一个分区和可靠同步键");
         return result;
+    }
+
+    /**
+     * Not required - a row only fails once it really is that large - but named before the start: a
+     * record above the raw limit ({@code sync.engine.kafka-max-record-bytes}) fails the engine job, an
+     * event above the output topic's {@code max.message.bytes} holds that table's bridge. Neither is
+     * dropped, and both need an operator. A task group without a mode is estimated as CDC.
+     */
+    private DataSourceCheckItemVo messageSizeCheck(DataSourceMetadataVo sourceMetadata, List<String> selectedColumns,
+                                                   boolean cdc, long topicMaxMessageBytes) {
+        long rawLimit = Math.max(1024 * 1024, seaTunnelProperties.getKafkaMaxRecordBytes());
+        long targetLimit = Math.min(rawLimit, topicMaxMessageBytes > 0 ? topicMaxMessageBytes : KAFKA_DEFAULT_MAX_MESSAGE_BYTES);
+        KafkaMessageSizes.Estimate estimate = KafkaMessageSizes.estimate(sourceMetadata.getColumns(), selectedColumns, cdc);
+        boolean fits = estimate.rawRecordBytes() <= rawLimit && estimate.eventBytes() <= targetLimit;
+        String limits = "目标 topic 单条上限 " + KafkaMessageSizes.human(targetLimit)
+            + (topicMaxMessageBytes > 0 ? "" : "（未读到 topic 配置，按 Kafka 默认值）") + "，raw topic 单条上限 " + KafkaMessageSizes.human(rawLimit);
+        String actual = "事件最大约 " + KafkaMessageSizes.human(estimate.eventBytes()) + "，raw 记录最大约 " + KafkaMessageSizes.human(estimate.rawRecordBytes())
+            + (estimate.largeColumns().isEmpty() ? "" : "；大字段 " + String.join(", ", estimate.largeColumns()));
+        DataSourceCheckItemVo check = new DataSourceCheckItemVo("kafka_message_size", "单条消息大小", false, fits, actual,
+            fits ? "按字段类型估算，单行生成的消息不会超过上限（" + limits + "）"
+                : "字段值足够大时单条消息会超过上限（" + limits + "）：超过 raw 上限使引擎作业失败，超过目标 topic 上限使该表的桥接暂停发布并告警，都不会丢弃变更");
+        check.setSuggestion(fits ? "无需修改" : "确认这些字段的实际最大值，必要时调大目标 topic 的 max.message.bytes 与 sync.engine.kafka-max-record-bytes"
+            + (cdc ? "；CDC 的 raw 记录总是整行，不选这些字段只能缩小发布的事件" : "，或不选这些字段"));
+        return check;
+    }
+
+    /** The topic's {@code max.message.bytes}, or -1 when it cannot be read. */
+    private static long topicMaxMessageBytes(AdminClient admin, String topic) {
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
+        try {
+            Config config = admin.describeConfigs(List.of(resource)).all().get(10, TimeUnit.SECONDS).get(resource);
+            ConfigEntry entry = config == null ? null : config.get(TopicConfig.MAX_MESSAGE_BYTES_CONFIG);
+            return entry == null || StringUtils.isBlank(entry.value()) ? -1 : Long.parseLong(entry.value().trim());
+        } catch (Exception ex) {
+            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
+            return -1;
+        }
     }
 
     private boolean tableExists(DataSource source, String schema, String table) {

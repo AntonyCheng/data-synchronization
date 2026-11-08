@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -48,6 +49,14 @@ public final class SeaTunnelJobConfigGenerator {
      */
     static final String FULL_SOURCE_TIME_OPTIONS = "serverTimezone=UTC&preserveInstants=false";
     static final String LEGACY_FULL_SOURCE_TIME_OPTIONS = "serverTimezone=UTC";
+
+    /**
+     * The Kafka sink's {@code max.request.size} entry ({@code sync.engine.kafka-max-record-bytes}). It is
+     * left out of the fingerprint: a record-size limit says nothing about what a checkpoint holds, so
+     * raising it must not strand the savepoint of a job that failed on a large row - and configs from
+     * before the entry existed keep their fingerprints.
+     */
+    private static final Pattern UNFINGERPRINTED_KAFKA_OPTIONS = Pattern.compile(", max\\.request\\.size = \"\\d+\"");
 
     /**
      * Debezium's {@code datatype.propagate.source.type} for Kafka CDC jobs: regular expressions over
@@ -223,7 +232,7 @@ public final class SeaTunnelJobConfigGenerator {
             .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
             .append("    format = \"COMPATIBLE_DEBEZIUM_JSON\"\n")
             .append("    semantics = \"AT_LEAST_ONCE\"\n")
-            .append("    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n")
+            .append(kafkaProducerConfig(properties))
             .append("  }\n}\n");
         return builder.toString();
     }
@@ -238,9 +247,21 @@ public final class SeaTunnelJobConfigGenerator {
             .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
             .append("    format = \"JSON\"\n")
             .append("    semantics = \"AT_LEAST_ONCE\"\n")
-            .append("    kafka.config = { acks = \"all\", enable.idempotence = \"true\" }\n")
+            .append(kafkaProducerConfig(properties))
             .append("  }\n}\n");
         return builder.toString();
+    }
+
+    /**
+     * The engine's Kafka producer. Idempotent with {@code acks=all}; {@code max.request.size} lifts
+     * Kafka's 1 MB default to {@code sync.engine.kafka-max-record-bytes}. The connector's own sender
+     * used to drop a record the producer refused without a trace (the job kept running and its
+     * checkpoints moved past the row); the patched connector fails the job instead (see
+     * {@code deploy/local-stack/seatunnel/patch/README.md}).
+     */
+    private static String kafkaProducerConfig(SeaTunnelProperties properties) {
+        return "    kafka.config = { acks = \"all\", enable.idempotence = \"true\", max.request.size = \""
+            + Math.max(1024 * 1024, properties.getKafkaMaxRecordBytes()) + "\" }\n";
     }
 
     private static String buildFullConfig(SyncTask task, DataSource source, DataSource target,
@@ -657,7 +678,7 @@ public final class SeaTunnelJobConfigGenerator {
          * (endpoints, columns, keys, limits) still does.
          */
         public String fingerprint() {
-            return SyncText.sha256Hex(redactedConfig);
+            return SyncText.sha256Hex(fingerprinted(redactedConfig));
         }
 
         /**
@@ -668,12 +689,18 @@ public final class SeaTunnelJobConfigGenerator {
          */
         public boolean matchesFingerprint(String stored) {
             if (stored == null) return false;
-            for (String form : List.of(redactedConfig, config)) {
+            for (String text : List.of(redactedConfig, config)) {
+                String form = fingerprinted(text);
                 if (stored.equals(SyncText.sha256Hex(form)) || stored.equals(SyncText.sha256Hex(beforeFullSourcePreserveInstants(form)))) {
                     return true;
                 }
             }
             return false;
+        }
+
+        /** {@code text} without the options that are not part of the fingerprint ({@link #UNFINGERPRINTED_KAFKA_OPTIONS}). */
+        static String fingerprinted(String text) {
+            return UNFINGERPRINTED_KAFKA_OPTIONS.matcher(text).replaceAll("");
         }
 
         /** {@code text} with the FULL source URL's time options as they were before {@code preserveInstants=false}. */

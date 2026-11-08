@@ -14,10 +14,13 @@ import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartitionInfo;
 import org.dromara.sync.config.KafkaBridgeProperties;
+import org.dromara.sync.config.SeaTunnelProperties;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.KafkaRawTopic;
 import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.mapper.KafkaRawTopicMapper;
+import org.dromara.sync.mapper.SyncTaskGroupItemMapper;
+import org.dromara.sync.mapper.SyncTaskMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -70,7 +73,7 @@ class KafkaTaskBridgeRawTopicTest {
         cluster("customer-events");
         bridge = bridge();
 
-        bridge.start(task(1L, 3), kafka(), source());
+        bridge.start(task(1L, 3), kafka(), source(), true);
 
         verify(admin).createTopics(anyCollection());
         KafkaRawTopic row = registered();
@@ -87,7 +90,7 @@ class KafkaTaskBridgeRawTopicTest {
         cluster("customer-events", "__ds_raw_70_v4");
         bridge = bridge();
 
-        bridge.startGroupItem(task(70L, 4), kafka(), source());
+        bridge.startGroupItem(task(70L, 4), kafka(), source(), true);
 
         verify(admin, never()).createTopics(anyCollection());
         KafkaRawTopic row = registered();
@@ -116,7 +119,7 @@ class KafkaTaskBridgeRawTopicTest {
         when(rawTopicMapper.registerIfAbsent(any())).thenThrow(new IllegalStateException("metadata database unavailable"));
         bridge = bridge();
 
-        bridge.start(task(1L, 1), kafka(), source());
+        bridge.start(task(1L, 1), kafka(), source(), true);
 
         assertTrue(bridge.isRunning(1L));
     }
@@ -126,7 +129,7 @@ class KafkaTaskBridgeRawTopicTest {
         cluster("customer-events");
         bridge = bridge();
 
-        bridge.start(task(1L, 1), kafka(), source());
+        bridge.start(task(1L, 1), kafka(), source(), true);
 
         for (int i = 0; i < 500 && consumers.isEmpty(); i++) Thread.sleep(10);
         Properties consumer = consumers.getFirst();
@@ -143,7 +146,8 @@ class KafkaTaskBridgeRawTopicTest {
 
     private KafkaTaskBridgeService bridge() {
         return new KafkaTaskBridgeService(mock(KafkaEventNormalizer.class), mock(KafkaEventProducer.class),
-            JsonMapper.builder().build(), new KafkaBridgeProperties(), rawTopicMapper) {
+            JsonMapper.builder().build(), new KafkaBridgeProperties(), new SeaTunnelProperties(),
+            new KafkaBridgeStateStore(rawTopicMapper, mock(SyncTaskMapper.class), mock(SyncTaskGroupItemMapper.class))) {
 
             @Override
             AdminClient openAdmin(String bootstrapServers) {

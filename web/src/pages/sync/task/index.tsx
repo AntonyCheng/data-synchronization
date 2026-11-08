@@ -11,6 +11,7 @@ import TaskDetailModal from '@/pages/sync/task/components/TaskDetailModal';
 import TaskFormModal from '@/pages/sync/task/components/TaskFormModal';
 import { statusLabels, statusTag, useTaskPermissions } from '@/pages/sync/task/shared';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
+import { publishPaused } from '@/utils/syncBridge';
 
 /** Task list. The wizard and the per-task console live in their own components. */
 export default function SyncTaskPage() {
@@ -79,9 +80,9 @@ export default function SyncTaskPage() {
     {
       title: '状态',
       dataIndex: 'status',
-      width: 110,
+      width: 140,
       valueEnum: statusLabels,
-      render: (_, row) => statusTag(row.status, row.lastError)
+      render: (_, row) => statusTag(row.status, row.lastError, publishPaused(row))
     },
     {
       title: '吞吐 / 积压',
@@ -91,7 +92,11 @@ export default function SyncTaskPage() {
       render: (_, row) =>
         row.latestMetrics ? (
           <Tooltip
-            title={`采样 ${row.latestMetrics.sampledAt}${row.latestMetrics.cdcLagSeconds == null ? '' : `，端到端延迟 ${row.latestMetrics.cdcLagSeconds} 秒`}`}
+            title={`采样 ${row.latestMetrics.sampledAt}${row.latestMetrics.cdcLagSeconds == null ? '' : `，端到端延迟 ${row.latestMetrics.cdcLagSeconds} 秒`}${
+              publishPaused(row) && row.kafkaBridgeBacklog != null
+                ? `；积压含 Kafka 桥接暂停后待发布的 ${row.kafkaBridgeBacklog} 条（按最近一次重试统计）`
+                : ''
+            }`}
           >
             {row.latestMetrics.sinkQps == null
               ? '-'

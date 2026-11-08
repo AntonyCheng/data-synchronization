@@ -15,6 +15,7 @@ import org.dromara.sync.domain.vo.DataSourceCdcPrecheckVo;
 import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
+import org.dromara.sync.domain.vo.SyncTaskGroupItemStatus;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
 import org.dromara.sync.engine.EngineJobRunner;
@@ -39,6 +40,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -406,7 +408,7 @@ class SyncTaskGroupServiceImplTest {
 
         assertTrue(refused.contains("checkpoint/savepoint"), refused);
         verify(restClient, never()).submit(anyString(), anyString(), anyString(), anyBoolean());
-        verify(bridge, never()).startGroupItem(any(), any(), any());
+        verify(bridge, never()).startGroupItem(any(), any(), any(), anyBoolean());
         assertTrue(failed.getLastError().contains("checkpoint/savepoint"));
     }
 
@@ -838,7 +840,7 @@ class SyncTaskGroupServiceImplTest {
         assertTrue(refused.contains("本次需要 2 个"), refused);
         verify(bridge).requireCapacity(List.of(11L, 12L));
         verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
-        verify(bridge, never()).startGroupItem(any(), any(), any());
+        verify(bridge, never()).startGroupItem(any(), any(), any(), anyBoolean());
         assertEquals("PAUSED", first.getStatus());
         assertEquals("PAUSED", second.getStatus());
     }
@@ -851,7 +853,7 @@ class SyncTaskGroupServiceImplTest {
         items.add(first);
         items.add(second);
         doThrow(new ServiceException("Kafka 桥接容量已满（64/64）：请调大 sync.kafka-bridge.max-workers"))
-            .when(bridge).startGroupItem(argThat(task -> task.getTaskId() == 12L), any(), any());
+            .when(bridge).startGroupItem(argThat(task -> task.getTaskId() == 12L), any(), any(), anyBoolean());
 
         SyncTaskGroupOperationResult result = service.start(GROUP_ID);
 
@@ -881,7 +883,37 @@ class SyncTaskGroupServiceImplTest {
         assertEquals("RUNNING", item.getStatus());
         assertEquals("RUNNING", group.getStatus());
         verify(bridge, times(4)).tryStartGroupItem(any(), any(), eq(mysql));
-        verify(bridge, never()).startGroupItem(any(), any(), any());
+        verify(bridge, never()).startGroupItem(any(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    void aTableWhoseBridgeLostItsRawTopicPositionIsIsolatedWhileItsSiblingsRun() {
+        SyncTaskGroup group = persisted(group("RUNNING", "MULTI_TABLE", KAFKA_ID));
+        SyncTaskGroupItem lost = runningItem(11L, "customers", "job-a");
+        lost.setKafkaBridgeError(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX + "桥接停在 __ds_raw_11_v1 的 offset 2，但它最早只保留到 offset 5");
+        SyncTaskGroupItem stopped = runningItem(12L, "orders", "job-b");
+        stopped.setKafkaBridgeError("Kafka 桥接已暂停发布：停在 raw offset 9，TopicAuthorizationException：Not authorized");
+        stopped.setKafkaBridgeErrorTime(LocalDateTime.now().minusMinutes(5));
+        stopped.setKafkaBridgeBacklog(4L);
+        items.add(lost);
+        items.add(stopped);
+        when(restClient.status(anyString())).thenAnswer(inv -> new SeaTunnelRestClient.JobSnapshot(inv.getArgument(0), "x", "RUNNING", null, null));
+        when(restClient.checkpoints(anyString())).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+        when(bridge.isRunning(anyLong())).thenReturn(true);
+
+        SyncTaskGroupStatus status = service.refreshStatus(GROUP_ID);
+
+        // Only 重新初始化该表 repairs the lost table; its job is stopped, the other table keeps running.
+        assertEquals("FAILED", lost.getStatus());
+        assertTrue(lost.getLastError().startsWith(KafkaTaskBridgeService.RAW_TOPIC_GAP_PREFIX), lost.getLastError());
+        verify(restClient).stop("job-a", false, true);
+        verify(bridge).stop(11L);
+        assertEquals("RUNNING", stopped.getStatus());
+        assertTrue(stopped.getLastError().startsWith("Kafka 桥接已暂停发布：停在 raw offset 9，"), stopped.getLastError());
+        SyncTaskGroupItemStatus stoppedStatus = status.getItems().stream().filter(item -> item.getItemId() == 12L).findFirst().orElseThrow();
+        assertTrue(stoppedStatus.getCdcLagSeconds() >= 300, "lag " + stoppedStatus.getCdcLagSeconds());
+        assertEquals(4L, stoppedStatus.getBacklogRows());
+        assertEquals("DEGRADED", group.getStatus());
     }
 
     // ------------------------------------------------------------------ table-level reinitialize

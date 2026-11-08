@@ -61,6 +61,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -733,8 +734,23 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             item.setStatus(ddlBlocked ? SyncStatus.DDL_BLOCKED : observed.platformStatus());
             String bridgeError = null;
             if (kafkaGroup) {
-                if (SyncStatus.RUNNING.equals(item.getStatus())) bridgeError = runner.healBridge(GroupItemOperations.job(group, item, source, target));
-                else runner.dropBridge(item.getItemId());
+                if (SyncStatus.RUNNING.equals(item.getStatus())) {
+                    if (KafkaTaskBridgeService.isRawTopicGap(item.getKafkaBridgeError())) {
+                        // Events the bridge never published cannot be read any more: only 重新初始化该表
+                        // repairs the table, so it is isolated - and its job, filling a raw topic nobody
+                        // reads, goes. The other tables keep running.
+                        runner.discard(item.getItemId(), true, item.getEngineJobId());
+                        isolateItem(item, item.getKafkaBridgeError());
+                        itemStatus.setEngineStatus(snapshot.status());
+                        itemStatus.setStatus(SyncStatus.FAILED);
+                        itemStatus.setErrorMessage(item.getLastError());
+                        return SyncStatus.FAILED;
+                    }
+                    bridgeError = StringUtils.defaultIfBlank(runner.healBridge(GroupItemOperations.job(group, item, source, target)),
+                        item.getKafkaBridgeError());
+                } else {
+                    runner.dropBridge(item.getItemId());
+                }
             }
             item.setLastError(SyncText.truncateForColumn(StringUtils.defaultIfBlank(snapshot.errorMessage(),
                 StringUtils.defaultIfBlank(bridgeError, StringUtils.defaultIfBlank(observed.checkpointError(), "")))));
@@ -749,6 +765,16 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             itemStatus.setStatus(item.getStatus());
             itemStatus.setErrorMessage(StringUtils.isBlank(item.getLastError()) ? null : item.getLastError());
             EngineJobStates.applyMetrics(itemStatus, snapshot, group.getSyncMode());
+            if (kafkaGroup && itemStatus.getCdcLagSeconds() == null && SyncStatus.RUNNING.equals(item.getStatus())
+                && item.getKafkaBridgeErrorTime() != null) {
+                // A stopped bridge: the events behind the stop have been waiting at least since it.
+                itemStatus.setCdcLagSeconds(KafkaTaskBridgeService.effectiveLagSeconds(null, item.getKafkaBridgeErrorTime(), LocalDateTime.now()));
+                itemStatus.setMetricsMessage(null);
+            }
+            if (kafkaGroup && SyncStatus.RUNNING.equals(item.getStatus())) {
+                itemStatus.setBacklogRows(KafkaTaskBridgeService.effectiveBacklogRows(itemStatus.getBacklogRows(),
+                    item.getKafkaBridgeErrorTime(), item.getKafkaBridgeBacklog()));
+            }
             metricsService.recordGroupItem(item, snapshot.status(), itemStatus);
             return item.getStatus();
         } catch (RuntimeException ex) {

@@ -19,6 +19,7 @@ import org.dromara.sync.engine.EngineJobStates;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
 import org.dromara.sync.engine.SourceColumns;
+import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
 import org.dromara.sync.service.IDataSourceMetadataService;
@@ -94,7 +95,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             EngineJobRunner.Job job = job(task);
             // A refusal here (output topic, bridge capacity) happens before the engine is involved,
             // so the task stays as it was; only a failure from here on can have left a job behind.
-            runner.preflight(job);
+            runner.preflight(job, true);
             submissionStarted = true;
             String jobId = runner.submit(job, generated);
             markRunning(task, jobId, generated);
@@ -135,6 +136,13 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             return markFailed(task, jobId, lost.error());
         }
         EngineJobRunner.Poll.Observed observed = (EngineJobRunner.Poll.Observed) poll;
+        if (SyncStatus.REINITIALIZE_REQUIRED.equals(task.getStatus()) && !SyncStatus.RUNNING.equals(observed.platformStatus())) {
+            // Only a reinitialize leaves REINITIALIZE_REQUIRED. The job is usually gone by then - a lost
+            // binlog position failed it, a lost raw-topic position had it cancelled - and mapping a
+            // cancelled job to STOPPED on a manual refresh dropped the requirement and its reason.
+            if (kafka) runner.dropBridge(taskId);
+            return statusOf(task, jobId, observed.snapshot().status(), SyncStatus.REINITIALIZE_REQUIRED, task.getLastError());
+        }
         if (observed.checkpointBoundary()) return markReinitializeRequired(task, jobId, observed.checkpointError());
         SeaTunnelRestClient.JobSnapshot snapshot = observed.snapshot();
         SeaTunnelRestClient.CheckpointSnapshot checkpoint = observed.checkpoint();
@@ -145,8 +153,18 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             // Raw events buffered during a pause are consumed after resume - offsets are only
             // committed after the broker acked the normalized event. An alive job whose bridge
             // died (or was torn down by an earlier failed poll) is healed right here.
-            if (SyncStatus.RUNNING.equals(platformStatus)) bridgeError = runner.healBridge(job(task));
-            else runner.dropBridge(taskId);
+            if (SyncStatus.RUNNING.equals(platformStatus)) {
+                if (KafkaTaskBridgeService.isRawTopicGap(task.getKafkaBridgeError())) {
+                    // The bridge found its raw-topic position gone: events it never published cannot be
+                    // read any more, so only a new initial load repairs the target - parked like a
+                    // binlog position the engine lost. The job would only keep filling a topic nobody reads.
+                    runner.discard(taskId, true, jobId);
+                    return markReinitializeRequired(task, jobId, task.getKafkaBridgeError());
+                }
+                bridgeError = StringUtils.defaultIfBlank(runner.healBridge(job(task)), task.getKafkaBridgeError());
+            } else {
+                runner.dropBridge(taskId);
+            }
         }
         if (SyncStatus.FAILED.equals(platformStatus) && EngineJobStates.isRecoveryBoundaryError(snapshot.errorMessage())) {
             return markReinitializeRequired(task, jobId, snapshot.errorMessage());
@@ -174,10 +192,14 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             StringUtils.isBlank(snapshot.errorMessage()) ? null : SyncText.truncateForColumn(snapshot.errorMessage()));
         copyKafkaMetrics(result, task);
         EngineJobStates.applyMetrics(result, snapshot, task.getSyncMode());
-        if (kafka && result.getCdcLagSeconds() == null && task.getKafkaLagSeconds() != null) {
+        if (kafka && result.getCdcLagSeconds() == null && result.getKafkaLagSeconds() != null) {
             // The bridge measures source event time -> broker ack: the end-to-end lag of a Kafka target.
-            result.setCdcLagSeconds(task.getKafkaLagSeconds());
+            result.setCdcLagSeconds(result.getKafkaLagSeconds());
             result.setMetricsMessage(null);
+        }
+        if (kafka && SyncStatus.RUNNING.equals(platformStatus)) {
+            result.setBacklogRows(KafkaTaskBridgeService.effectiveBacklogRows(result.getBacklogRows(),
+                task.getKafkaBridgeErrorTime(), task.getKafkaBridgeBacklog()));
         }
         metricsService.recordTask(task, snapshot.status(), result);
         return result;
@@ -260,7 +282,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         if (refusal != null) throw refuseResume(task, jobId, refusal);
         EngineJobRunner.Job job = job(task);
         // Refused before the engine is involved (bridge capacity, output topic): the task stays PAUSED.
-        runner.preflight(job);
+        runner.preflight(job, false);
         try {
             runner.resume(job, generated, jobId);
             markRunning(task);
@@ -504,7 +526,9 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         result.setKafkaLastOffset(task.getKafkaLastOffset());
         result.setKafkaLastSourceEventTime(task.getKafkaLastSourceEventTime());
         result.setKafkaLastBrokerAckTime(task.getKafkaLastBrokerAckTime());
-        result.setKafkaLagSeconds(task.getKafkaLagSeconds());
+        // The stored lag froze at the last event that went out; behind a stopped bridge it keeps growing.
+        result.setKafkaLagSeconds(KafkaTaskBridgeService.effectiveLagSeconds(task.getKafkaLagSeconds(),
+            SyncStatus.RUNNING.equals(task.getStatus()) ? task.getKafkaBridgeErrorTime() : null, LocalDateTime.now()));
     }
 
     private static SeaTunnelJobOperationResult operation(SyncTask task, String message) {

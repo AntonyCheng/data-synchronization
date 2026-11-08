@@ -126,12 +126,14 @@ public class EngineJobRunner implements DisposableBean {
      * target, the output-topic precheck and the bridge capacity - done by starting the bridge.
      * {@link #submit} / {@link #resume} do it themselves when it has not happened; a caller calls
      * it first when it must tell "refused, nothing ran" (leave the owner as it was) from "the
-     * submit failed" (the engine may have accepted the job).
+     * submit failed" (the engine may have accepted the job). {@code freshRun}: what follows is a
+     * {@link #submit} (a new run with its own initial load), not a {@link #resume} - only then may the
+     * bridge start over at the earliest retained raw record when its old position is gone.
      */
-    public void preflight(Job job) {
+    public void preflight(Job job, boolean freshRun) {
         if (!job.kafka()) return;
-        if (job.groupItem()) bridge.startGroupItem(job.task(), job.target(), job.source());
-        else bridge.start(job.task(), job.target(), job.source());
+        if (job.groupItem()) bridge.startGroupItem(job.task(), job.target(), job.source(), freshRun);
+        else bridge.start(job.task(), job.target(), job.source(), freshRun);
     }
 
     /**
@@ -155,7 +157,7 @@ public class EngineJobRunner implements DisposableBean {
 
     private SeaTunnelRestClient.SubmitResult submitWithBridge(Job job, SeaTunnelJobConfigGenerator.GeneratedConfig generated,
                                                               String jobId, boolean withSavepoint) {
-        if (job.kafka() && !bridge.isRunning(job.ownerId())) preflight(job);
+        if (job.kafka() && !bridge.isRunning(job.ownerId())) preflight(job, !withSavepoint);
         try {
             return restClient.submit(generated.jobName(), generated.config(), jobId, withSavepoint);
         } catch (RuntimeException ex) {

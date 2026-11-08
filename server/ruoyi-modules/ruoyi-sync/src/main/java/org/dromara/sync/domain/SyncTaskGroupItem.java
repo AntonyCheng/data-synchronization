@@ -40,6 +40,13 @@ public class SyncTaskGroupItem {
     private LocalDateTime lastCheckTime;
     private String lastCheckMessage;
     private String lastError;
+    /** Why the Kafka bridge stopped publishing and since when; see {@code SyncTask#kafkaBridgeError}. */
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private String kafkaBridgeError;
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private LocalDateTime kafkaBridgeErrorTime;
+    @TableField(updateStrategy = FieldStrategy.NEVER)
+    private Long kafkaBridgeBacklog;
     /**
      * Status the alert notifier last raised a notice for ("" when none is open); see SyncAlertNotifier.
      * Written only by the notifier's own {@code updateAlertedStatus}: every lifecycle path saves the
