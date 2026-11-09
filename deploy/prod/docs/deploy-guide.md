@@ -179,7 +179,7 @@ sudo bash scripts/install.sh
 
 1. 检查 Docker 与 Compose 版本、CPU 架构、.env 的必填项与取值格式、数据目录剩余空间；
 2. 导入 images/ 中的镜像（已存在则跳过）；
-3. 启动 MySQL 与 Redis，执行 migrate：空库时导入初始数据，并执行全部结构迁移；
+3. 启动 MySQL 与 Redis，执行 migrate：空库时导入初始数据，执行全部结构迁移，并做生产加固（删除演示账号等，见第 9 章）；
 4. 把管理员 admin 的出厂口令替换为 ADMIN_INITIAL_PASSWORD（只在首次安装时生效）；
 5. 启动引擎、后端与 Web，等待全部容器健康；
 6. 运行自检 scripts/verify.sh，并打印访问地址。
@@ -381,6 +381,7 @@ bash scripts/uninstall.sh --purge-data --remove-images     # 彻底删除，数�
 
 ## 9 安全建议
 
+- 安装包已做的加固：删除上游初始化数据中的演示账号 test、test1（出厂口令 666666），隐藏上游示例菜单（测试菜单、AI 会话、PLUS 官网）；后端监控端点（actuator）只开放不带详情的健康检查，Web 入口拒绝外部访问 /prod-api/actuator。升级时同样执行。
 - 只开放 Web 端口；生产环境启用 HTTPS（3.3）。
 - .env 权限设为 600，只有运维人员可读；凭证主密钥离线另存。
 - 首次登录后立即修改 admin 口令；为每位使用者在「系统管理 → 用户管理」中建立独立账号，按需分配角色。

@@ -204,7 +204,8 @@ Invoke-Native 'Caddyfile check' { docker run --rm "data-sync/web:$Version" caddy
 
 # ---------------------------------------------------------------- 5. package directory
 Step "package $pkg"
-foreach ($f in 'compose.yml', 'compose.https.yml', 'caddy\Caddyfile', 'caddy\Caddyfile.https', 'seatunnel\seatunnel.yaml', 'database\migrate.sh') {
+foreach ($f in 'compose.yml', 'compose.https.yml', 'caddy\Caddyfile', 'caddy\Caddyfile.https', 'seatunnel\seatunnel.yaml',
+    'database\migrate.sh', 'database\prod-hardening.sql', 'database\prod-fresh-install.sql') {
     Copy-Text (Join-Path $prod $f) (Join-Path $pkg $f)
 }
 Copy-Text (Join-Path $prod 'env.example') (Join-Path $pkg '.env.example')

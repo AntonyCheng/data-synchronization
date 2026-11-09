@@ -154,6 +154,10 @@ services:
       # 并删除不再有任务使用的作业目录（引擎自己不会删除）。
       SYNC_ENGINE_CHECKPOINT_DIR: /opt/seatunnel/checkpoint
       LOGGING_LEVEL_ORG_DROMARA: ${LOG_LEVEL:-info}
+      # 监控端点只开放 health 且不带详情：上游默认开放全部 actuator 端点（含 heapdump、env），
+      # 只用出厂的 Basic 认证 ruoyi / 123456 保护。Web 入口另外拒绝 /prod-api/actuator。
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health
+      MANAGEMENT_ENDPOINT_HEALTH_SHOWDETAILS: never
       # 平台不使用 Snail AI；关掉它的 OpenAPI 客户端，免得启动时去连不存在的 8900 端口。
       SNAILAI_OPENAPI_ENABLED: "false"
     volumes:

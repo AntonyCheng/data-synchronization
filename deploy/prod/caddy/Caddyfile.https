@@ -13,6 +13,10 @@
 		Referrer-Policy strict-origin-when-cross-origin
 		Strict-Transport-Security "max-age=31536000"
 	}
+	# 后端监控端点（actuator）不对外开放。
+	handle /prod-api/actuator* {
+		respond 404
+	}
 	handle_path /prod-api/* {
 		reverse_proxy datasync-backend:8080 {
 			flush_interval -1

@@ -167,7 +167,7 @@ deploy\migrate-platform-schema.ps1
 deployment for Linux x86_64 into `deploy\release\data-sync-<ver>\` + `.tar`: images `data-sync/backend|seatunnel|web`
 built from images already on the host (no registry access; the engine image is slimmed to the connectors the
 jobs use and must carry the vendor/patched jars), compose + `.env.example`, `scripts/` (install / verify / dc /
-backup / restore / upgrade / uninstall), the metadata seed + migrations, and the Word manuals generated from
+backup / restore / upgrade / uninstall), the metadata seed + migrations (plus `database/prod-hardening.sql`, run by `migrate.sh` on every install / upgrade: drops the seeded demo accounts test / test1 while they still have the factory password, and `prod-fresh-install.sql` hiding the upstream demo menus), and the Word manuals generated from
 `deploy/prod/docs/*.md`. See `deploy/prod/README.md`.
 
 ### Local engine stack (isolated, from repo root)

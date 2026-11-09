@@ -12,6 +12,10 @@
 		X-Frame-Options SAMEORIGIN
 		Referrer-Policy strict-origin-when-cross-origin
 	}
+	# 后端监控端点（actuator）不对外开放。
+	handle /prod-api/actuator* {
+		respond 404
+	}
 	handle_path /prod-api/* {
 		# 消息中心使用 SSE 长连接，立即刷新响应。
 		reverse_proxy datasync-backend:8080 {
