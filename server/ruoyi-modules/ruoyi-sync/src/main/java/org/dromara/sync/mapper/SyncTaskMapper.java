@@ -9,6 +9,8 @@ import org.dromara.sync.domain.vo.SyncTaskVo;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Synchronization task mapper.
@@ -19,6 +21,14 @@ public interface SyncTaskMapper extends BaseMapperPlus<SyncTask, SyncTaskVo> {
     default List<SyncTask> selectActive() {
         return selectList(new LambdaQueryWrapper<SyncTask>()
             .in(SyncTask::getStatus, SyncStatus.RUNNING, SyncStatus.PAUSING));
+    }
+
+    /** Every engine job id a task still points at: the jobs whose checkpoints must be kept. */
+    default Set<String> selectEngineJobIds() {
+        return selectList(new LambdaQueryWrapper<SyncTask>()
+            .select(SyncTask::getEngineJobId)
+            .isNotNull(SyncTask::getEngineJobId).ne(SyncTask::getEngineJobId, ""))
+            .stream().map(SyncTask::getEngineJobId).collect(Collectors.toSet());
     }
 
     /** Tasks that use the data source on either side. */

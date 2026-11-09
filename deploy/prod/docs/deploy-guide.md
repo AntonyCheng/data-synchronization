@@ -262,7 +262,7 @@ scripts/dc.sh 是 docker compose 的快捷方式，自动带上 .env 与 HTTPS �
 | 引擎日志 | ${DATA_DIR}/seatunnel/logs/ |
 | 容器标准输出 | bash scripts/dc.sh logs <服务名>（每个容器最多保留 5 × 100 MB） |
 | 元数据库 | ${DATA_DIR}/mysql/ |
-| 引擎 checkpoint | ${DATA_DIR}/seatunnel/checkpoint/（每个作业保留最近 10 份；后端只读挂载它，引擎重启后据此恢复任务，不要手工删除） |
+| 引擎 checkpoint | ${DATA_DIR}/seatunnel/checkpoint/（每个作业保留最近 10 份；后端挂载它，引擎重启后据此恢复任务，并自动删除不再使用的作业目录；不要手工删除） |
 | 备份 | ${DATA_DIR}/backups/（默认位置） |
 
 ### 4.4 资源调整

@@ -31,6 +31,8 @@ public class SyncLocks {
     public static final String GROUP_LOCK_PREFIX = "sync:group:lock:";
     /** Held by the one instance running the Kafka raw-topic cleanup pass. */
     public static final String RAW_TOPIC_CLEANUP_LOCK = "sync:kafka:raw-topic-cleanup";
+    /** Held by the one instance running the engine checkpoint cleanup pass. */
+    public static final String CHECKPOINT_CLEANUP_LOCK = "sync:engine:checkpoint-cleanup";
     private static final long WAIT_SECONDS = 10;
 
     private final RedissonClient redissonClient;

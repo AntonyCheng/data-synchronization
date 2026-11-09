@@ -33,13 +33,23 @@ public class SeaTunnelProperties {
 
     /**
      * The engine's checkpoint storage directory as this process sees it - the engine's
-     * {@code checkpoint.storage} namespace (one sub-directory per job id), mounted read-only into
-     * the backend by the production deployment. The engine keeps no job state across a restart
-     * while these files stay, so they are what a resume restores from once the engine no longer
-     * remembers the job ({@code EngineCheckpointFiles}). Blank or not readable: such a resume is
-     * refused as before - never resumed from an unknown position.
+     * {@code checkpoint.storage} namespace (one sub-directory per job id), mounted into the backend
+     * by the production deployment. The engine keeps no job state across a restart while these
+     * files stay, so they are what a resume restores from once the engine no longer remembers the
+     * job ({@code EngineCheckpointFiles}); the directories of jobs the platform gave up are deleted
+     * here ({@code EngineCheckpointJanitor}) - the engine never deletes them. Blank or not readable:
+     * such a resume is refused as before - never resumed from an unknown position - and nothing is
+     * cleaned.
      */
     private String checkpointDir = "";
+
+    /**
+     * How long a checkpoint directory no task or group item references must have gone unwritten
+     * before {@code EngineCheckpointJanitor} deletes it. A running job writes one every
+     * {@link #checkpointIntervalMs}; the grace also covers a job just submitted whose id is not
+     * saved on its owner yet.
+     */
+    private Duration checkpointRetireGrace = Duration.ofHours(1);
 
     /** Maximum source snapshot throughput for generated jobs. */
     private int readLimitRowsPerSecond = 1000;

@@ -42,7 +42,7 @@ public class SyncSchedulingConfig {
     public static final String SCHEDULER = "syncScheduler";
 
     /** One thread per background pass of the module; see the class comment. */
-    public static final int DEFAULT_POOL_SIZE = 10;
+    public static final int DEFAULT_POOL_SIZE = 11;
 
     @Bean(name = SCHEDULER, autowireCandidate = false)
     public ScheduledExecutorFactoryBean syncScheduler(

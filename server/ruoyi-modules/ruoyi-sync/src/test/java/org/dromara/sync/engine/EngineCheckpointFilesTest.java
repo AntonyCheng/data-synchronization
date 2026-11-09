@@ -8,8 +8,13 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /** What counts as a checkpoint on disk - the evidence a resume needs once the engine forgot the job. */
@@ -64,5 +69,40 @@ class EngineCheckpointFilesTest {
         properties.setCheckpointDir(" " + dir + " ");
 
         assertEquals(3L, new EngineCheckpointFiles(properties).latestCheckpointId("9"));
+    }
+
+    @Test
+    void theJobDirectoriesTheirLastWriteAndTheirDeletion() throws IOException {
+        Path job = Files.createDirectories(dir.resolve("1171952871948877825"));
+        Path file = Files.writeString(job.resolve("1794180593644-606-1-41.ser"), "state");
+        Files.createDirectories(dir.resolve("not a job id"));
+        Files.writeString(dir.resolve("stray.txt"), "x");
+        Instant written = Instant.parse("2026-11-01T00:00:00Z");
+        Files.setLastModifiedTime(file, FileTime.from(written));
+        Files.setLastModifiedTime(job, FileTime.from(written.minusSeconds(60)));
+        EngineCheckpointFiles files = new EngineCheckpointFiles(dir);
+
+        assertTrue(files.visible());
+        assertEquals(List.of("1171952871948877825"), files.jobIds());
+        assertEquals(written, files.lastWritten("1171952871948877825"));
+        assertNull(files.lastWritten("404"));
+
+        assertTrue(files.delete("1171952871948877825"));
+        assertFalse(Files.exists(job));
+        assertFalse(files.delete("1171952871948877825"));
+        assertTrue(Files.exists(dir.resolve("stray.txt")), "only the job's own directory goes");
+    }
+
+    @Test
+    void nothingIsListedOrDeletedOutsideAVisibleStorage() throws IOException {
+        Files.createDirectories(dir.resolve("outside"));
+        EngineCheckpointFiles files = new EngineCheckpointFiles(dir.resolve("storage"));
+
+        assertFalse(files.visible());
+        assertEquals(List.of(), files.jobIds());
+        assertEquals(List.of(), EngineCheckpointFiles.none().jobIds());
+        Files.createDirectories(dir.resolve("storage"));
+        assertFalse(files.delete("../outside"));
+        assertTrue(Files.exists(dir.resolve("outside")));
     }
 }

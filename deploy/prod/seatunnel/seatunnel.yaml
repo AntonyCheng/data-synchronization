@@ -1,6 +1,6 @@
 # SeaTunnel Zeta 引擎配置（单节点）。checkpoint 写在容器的 /opt/seatunnel/checkpoint，
-# 即宿主机 ${DATA_DIR}/seatunnel/checkpoint：任务的暂停 / 恢复依赖它。引擎重启后不保留作业，后端只读挂载这个目录，
-# 从各作业最近的 checkpoint 自动接着同步（见部署手册 4.2），所以它属于必须备份、不能手工清理的数据。
+# 即宿主机 ${DATA_DIR}/seatunnel/checkpoint：任务的暂停 / 恢复依赖它。引擎重启后不保留作业，后端挂载这个目录，
+# 从各作业最近的 checkpoint 自动接着同步（见部署手册 4.2），并清理不再有任务使用的作业目录。它属于必须备份、不能手工清理的数据。
 # http.port 只在容器网络内使用（后端通过 http://datasync-engine:8080 调用），不要对外发布。
 seatunnel:
   engine:

@@ -10,10 +10,20 @@ import org.dromara.sync.domain.vo.SyncTaskGroupItemVo;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public interface SyncTaskGroupItemMapper extends BaseMapperPlus<SyncTaskGroupItem, SyncTaskGroupItemVo> {
 
     /** All table items of a group in creation order. */
+    /** Every engine job id a group item still points at: the jobs whose checkpoints must be kept. */
+    default Set<String> selectEngineJobIds() {
+        return selectList(new LambdaQueryWrapper<SyncTaskGroupItem>()
+            .select(SyncTaskGroupItem::getEngineJobId)
+            .isNotNull(SyncTaskGroupItem::getEngineJobId).ne(SyncTaskGroupItem::getEngineJobId, ""))
+            .stream().map(SyncTaskGroupItem::getEngineJobId).collect(Collectors.toSet());
+    }
+
     default List<SyncTaskGroupItem> selectByGroupId(Long groupId) {
         return selectList(new LambdaQueryWrapper<SyncTaskGroupItem>()
             .eq(SyncTaskGroupItem::getGroupId, groupId)

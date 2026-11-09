@@ -150,14 +150,15 @@ services:
       SYNC_CREDENTIAL_ENCRYPTION_ENABLED: "true"
       SYNC_CREDENTIAL_ENCRYPTION_PASSWORD: ${CREDENTIAL_KEY:?CREDENTIAL_KEY 未设置}
       SYNC_ENGINE_KAFKA_MAX_RECORD_BYTES: ${KAFKA_MAX_RECORD_BYTES:-16777216}
-      # 引擎的 checkpoint 目录（下面只读挂载）：引擎重启后不保留作业，平台据此从 checkpoint 自动恢复任务。
+      # 引擎的 checkpoint 目录（下面挂载）：引擎重启后不保留作业，平台据此从 checkpoint 自动恢复任务，
+      # 并删除不再有任务使用的作业目录（引擎自己不会删除）。
       SYNC_ENGINE_CHECKPOINT_DIR: /opt/seatunnel/checkpoint
       LOGGING_LEVEL_ORG_DROMARA: ${LOG_LEVEL:-info}
       # 平台不使用 Snail AI；关掉它的 OpenAPI 客户端，免得启动时去连不存在的 8900 端口。
       SNAILAI_OPENAPI_ENABLED: "false"
     volumes:
       - ${DATA_DIR:-./data}/backend/logs:/ruoyi/server/logs
-      - ${DATA_DIR:-./data}/seatunnel/checkpoint:/opt/seatunnel/checkpoint:ro
+      - ${DATA_DIR:-./data}/seatunnel/checkpoint:/opt/seatunnel/checkpoint
     ulimits:
       nofile:
         soft: 65535

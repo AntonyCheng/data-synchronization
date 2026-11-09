@@ -732,7 +732,7 @@ DELETE + INSERT、未选字段不发布、保存点暂停恢复后补发，列�
 - 文件型 IMap 的 WAL 只追加、从不压缩，每次启动还要全部读入重放。checkpoint 编号、指标、checkpoint 概览每 5 秒写一次，长期运行下磁盘和启动时间会无限增长。
 
 **修复**（平台侧）：
-- `EngineCheckpointFiles` 只读引擎 checkpoint 目录（`sync.engine.checkpoint-dir`；生产包把 `${DATA_DIR}/seatunnel/checkpoint` 只读挂进后端；开发环境默认指向本地引擎栈的目录）。
+- `EngineCheckpointFiles` 读取引擎 checkpoint 目录（`sync.engine.checkpoint-dir`；生产包把 `${DATA_DIR}/seatunnel/checkpoint` 挂进后端；开发环境默认指向本地引擎栈的目录）。
 - `EngineJobRunner.resumeRefusal` 在引擎接口查不到 checkpoint 时，以磁盘上该作业的 checkpoint 文件为证据。两处都没有仍然拒绝：带 savepoint 提交而没有 checkpoint 时，引擎会静默从头开始。
 - job-info 没有状态时，轮询结果为 `Poll.Forgotten`：
   - 单表任务和任务组表项：RUNNING 的以原作业号从 checkpoint 自动重新提交；
@@ -750,10 +750,25 @@ DELETE + INSERT、未选字段不发布、保存点暂停恢复后补发，列�
 
 Kafka 目标按至少一次处理：从 checkpoint 继续时，最后一个 checkpoint 周期（5 秒）内的变更可能重复发布。以上测试中没有出现重复。手册已按此改写。
 
+### 清理被放弃作业的 checkpoint 目录（2026-11-09）
+
+**问题**：引擎只在作业以 FINISHED / CANCELED 结束时删除它的 checkpoint；对不在运行的作业（已暂停、已失败、被重启的引擎遗忘）执行 stop/cancel，在引擎侧什么也不做。所以下面几种情况会把 checkpoint 目录永久留在数据目录里：
+- 中止已暂停或失败的任务；
+- 从失败、已停止状态重新初始化；
+- 删除这类任务；
+- 引擎重启后重新初始化。
+
+**修复**：新增后台任务 `EngineCheckpointJanitor`：
+- 每小时运行一次，同一时刻只在一个实例上运行；
+- 删除同时满足以下条件的作业目录：没有任务或表项的 `engine_job_id` 引用它，闲置超过 `sync.engine.checkpoint-retire-grace`（1 小时），引擎也没有报告它在运行或暂停中；
+- 引擎不应答时，本轮结束，不删除任何目录；
+- 生产包里后端对 checkpoint 目录的挂载改为可写；
+- 模块调度线程数从 10 调到 11；
+- 新增 7 个单测，共 309 个。
+
 ### 仍开放的待办（2026-11-08）
 
 生产就绪评估中与环境无关、尚未处理的（A 档余项与 B 档）：
-- 引擎重启后被丢弃的旧作业（重新初始化时引擎已不认识它）的 checkpoint 目录不会被引擎删除，会留在数据目录中，需要时手工清理；
 - GoldenDB CDC 变更回归（需要写权限）；
 - 压测与资源基线；
 - Kafka 认证（SASL/SSL）与多 broker 地址；
