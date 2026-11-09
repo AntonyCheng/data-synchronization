@@ -91,6 +91,9 @@ mybatis-plus:
 
 sync:
   engine:
+    # The local engine stack's checkpoint storage (deploy/local-stack/runtime), relative to server/ruoyi-admin
+    # where the dev backend runs; another working directory finds nothing and engine-restart recovery is off.
+    checkpoint-dir: ${SYNC_ENGINE_CHECKPOINT_DIR:../../deploy/local-stack/runtime/seatunnel/checkpoint}
     # The Java backend reaches POC services through host ports; SeaTunnel runs
     # in Docker and must use the compose-network endpoints instead.
     connection-endpoint-overrides:

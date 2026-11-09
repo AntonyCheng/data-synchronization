@@ -248,9 +248,10 @@ scripts/dc.sh 是 docker compose 的快捷方式，自动带上 .env 与 HTTPS �
 ### 4.2 重启的影响
 
 - 重启 backend、web、redis：不影响正在运行的同步作业。后端启动后自动与引擎对账、恢复 Kafka 发布桥接，重启期间产生的变更随后按顺序补发。
-- 重启 seatunnel（引擎）：服务器重启、修改引擎配置（如 ENGINE_HEAP）、升级和恢复备份都会重启引擎。当前版本的引擎重启后不保留作业状态，原来的作业不能从断点继续：运行中的任务和任务组在 1~2 分钟内变为「失败」并告警；对它们执行「恢复任务」会被拒绝（提示「没有可用的 checkpoint/savepoint」），任务转为「需重新初始化」。重启前先「暂停」也一样不能恢复。
-- 引擎重启后的处理：单表任务执行「重新初始化」，任务组在详情中对每张表执行「重新初始化该表」。重新初始化会重新全量同步，然后继续 CDC，停机期间的变更都包含在新的全量数据中。MySQL / PostgreSQL 目标按同步键覆盖写入；Kafka 目标会再次发布全量数据（phase 为 SNAPSHOT），下游按同步键幂等处理即可。
-- 因此要尽量减少引擎重启。计划内的维护（服务器重启、调整引擎内存、升级）请安排在业务低峰，并提前评估大表的全量耗时：维护前在页面上「中止」运行中的任务和任务组，维护后再「启动」，任务会重新全量后继续 CDC。
+- 重启 seatunnel（引擎）：服务器重启、修改引擎配置（如 ENGINE_HEAP）、升级和恢复备份都会重启引擎。引擎本身不保留作业，但每个作业的 checkpoint（同步进度，默认每 5 秒一份）保存在数据目录中。引擎恢复后的下一轮对账（约 30 秒）里，平台把运行中的任务和任务组的各张表从各自最近的 checkpoint 自动接着同步，不重新全量，期间源库的变更都会补上。Kafka 目标可能重复发布最后一个 checkpoint 周期内的少量变更，下游按同步键幂等处理即可。
+- 引擎停机超过约 90 秒时，平台会先把任务标为「失败」并告警；引擎恢复后执行「恢复任务」（任务组「恢复」或「恢复该表」），同样从 checkpoint 继续。已暂停的任务照常「恢复」。
+- 只有 checkpoint 已不在（数据目录中的 checkpoint 被删除或丢失）时，任务才会转为「需重新初始化」：平台不会从未知位点重启作业。
+- 计划内的维护（服务器重启、调整引擎内存、升级）建议先在页面上「暂停」运行中的任务和任务组，完成后再「恢复」。暂停会保存 savepoint 并干净停止，恢复后不会重复发布。
 - 服务器重启后，所有容器随 Docker 自动启动（restart: unless-stopped）。请确认 Docker 服务已设为开机自启：systemctl enable docker。
 
 ### 4.3 日志与数据位置
@@ -261,7 +262,7 @@ scripts/dc.sh 是 docker compose 的快捷方式，自动带上 .env 与 HTTPS �
 | 引擎日志 | ${DATA_DIR}/seatunnel/logs/ |
 | 容器标准输出 | bash scripts/dc.sh logs <服务名>（每个容器最多保留 5 × 100 MB） |
 | 元数据库 | ${DATA_DIR}/mysql/ |
-| 引擎 checkpoint | ${DATA_DIR}/seatunnel/checkpoint/（每个作业保留最近 10 份） |
+| 引擎 checkpoint | ${DATA_DIR}/seatunnel/checkpoint/（每个作业保留最近 10 份；后端只读挂载它，引擎重启后据此恢复任务，不要手工删除） |
 | 备份 | ${DATA_DIR}/backups/（默认位置） |
 
 ### 4.4 资源调整
@@ -269,7 +270,7 @@ scripts/dc.sh 是 docker compose 的快捷方式，自动带上 .env 与 HTTPS �
 在 .env 中调整后执行 bash scripts/dc.sh up -d 生效（只重建被修改的容器）：
 
 - BACKEND_HEAP：后端堆内存，默认 2g；
-- ENGINE_HEAP：引擎堆内存，默认 4g。修改它会重建引擎容器，等同于重启引擎（见 4.2）：请先中止运行中的任务和任务组，生效后再启动。
+- ENGINE_HEAP：引擎堆内存，默认 4g。修改它会重建引擎容器，等同于重启引擎（见 4.2），建议先暂停运行中的任务，生效后再恢复。
 
 ### 4.5 定期检查
 
@@ -288,7 +289,7 @@ scripts/backup.sh 生成一个带时间戳的备份目录，包含：
 | 文件 | 内容 |
 |---|---|
 | metadata.sql.gz | 元数据库逻辑导出（一致性快照，不锁表，平台运行中可执行） |
-| seatunnel-checkpoint.tar.gz | 引擎 checkpoint（同步进度） |
+| seatunnel-checkpoint.tar.gz | 引擎 checkpoint：任务暂停、恢复以及引擎重启后接着同步所依赖的进度 |
 | env.backup | .env 副本，含全部口令与凭证主密钥 |
 | backup-info.txt | 版本、时间、主机、当时运行中的任务数 |
 
@@ -314,7 +315,7 @@ bash scripts/restore.sh /data/data-sync/backups/data-sync-20261108-023000 --with
 
 恢复脚本会核对备份中的 CREDENTIAL_KEY 与当前 .env 是否一致（不一致时数据源口令无法解密，脚本会停下），停止 Web、后端与引擎，导入备份，执行结构迁移后重新启动并自检。
 
-恢复会重启引擎，所以恢复前处于运行中或已暂停的任务都需要重新初始化（见 4.2）。恢复后登录平台，按《操作手册》7.6「恢复后检查」逐个处理。
+恢复会重启引擎：备份时处于运行中的任务，平台会从 checkpoint 自动接着同步（见 4.2）。带 --with-checkpoint 时进度回到备份时刻，之后的源库变更会重新同步一遍（Kafka 目标会重复发布这段时间的变更，按同步键幂等处理）；不带时沿用数据目录中现有的 checkpoint。恢复后登录平台，按《操作手册》7.6「恢复后检查」确认各任务状态。
 
 整机迁移（换服务器）的步骤：在新服务器上解压同版本安装包 → 把备份中的 env.backup 复制为 .env（按新服务器修改 DATA_DIR）→ 执行 install.sh → 执行 restore.sh --with-checkpoint。
 
@@ -322,7 +323,7 @@ bash scripts/restore.sh /data/data-sync/backups/data-sync-20261108-023000 --with
 
 ### 6.1 升级步骤
 
-1. 在业务低峰进行。升级会重启引擎，升级后的任务都要重新全量（见 4.2）。在页面上「中止」全部运行中的任务与任务组，确认都变为「已停止」，并记下它们；
+1. 在页面上暂停全部运行中的任务与任务组，确认都变为「已暂停」（升级会重启引擎，暂停可以干净停止，见 4.2）；
 2. 上传并解压新版本安装包到新目录（例如 /opt/data-sync-1.1.0），校验 SHA256SUMS；
 3. 在新目录中执行：
 
@@ -331,9 +332,9 @@ cd /opt/data-sync-1.1.0
 sudo bash scripts/upgrade.sh /opt/data-sync-1.0.0
 ```
 
-升级脚本会：复制旧目录的 .env、证书与 compose.override.yml 并改为新版本号 → 自动备份 → 导入新镜像 → 迁移元数据库 → 用新镜像重建容器 → 自检。仍有运行中的任务时脚本会停下提示（--force 可跳过，运行中的任务之后要重新初始化）。
+升级脚本会：复制旧目录的 .env、证书与 compose.override.yml 并改为新版本号 → 自动备份 → 导入新镜像 → 迁移元数据库 → 用新镜像重建容器 → 自检。仍有运行中的任务时脚本会停下提示（--force 可跳过，运行中的任务在引擎重启后由平台从 checkpoint 自动接着同步）。
 
-4. 登录平台，逐个「启动」第 1 步中止的任务与任务组，它们会重新全量后继续 CDC。
+4. 登录平台，逐个「恢复」第 1 步暂停的任务与任务组，它们从 savepoint 接着同步。
 
 > 注意：升级要求 .env 中的 DATA_DIR 为绝对路径，这样新旧安装目录共用同一份数据。
 
@@ -343,7 +344,7 @@ sudo bash scripts/upgrade.sh /opt/data-sync-1.0.0
 
 1. 在新目录执行 bash scripts/dc.sh down；
 2. 用升级时自动生成的备份恢复元数据库：在旧目录执行 bash scripts/restore.sh <升级前的备份目录> --with-checkpoint（迁移后的结构对旧版本不一定兼容，必须恢复备份）；
-3. 旧目录中 bash scripts/verify.sh 确认正常，然后在页面上启动或重新初始化各任务（见 4.2）。
+3. 旧目录中 bash scripts/verify.sh 确认正常，然后按《操作手册》7.6「恢复后检查」确认各任务状态。
 
 ## 7 卸载
 
@@ -370,7 +371,8 @@ bash scripts/uninstall.sh --purge-data --remove-images     # 彻底删除，数�
 | Kafka 连接失败或任务启动时报 broker 不可达 | 服务器解析不了 advertised.listeners 中的地址 | 在 /etc/hosts 中加入 broker 主机名，或让 Kafka 使用 IP 作为 advertised.listeners |
 | 任务显示「运行中·发布暂停」 | 事件超过目标 topic 单条上限、无写权限、broker 故障 | 见《操作手册》7.1 |
 | 任务变为「需重新初始化」 | binlog 已被清理、raw topic 中未发布的变更超过保留期被删除、配置改动 | 见《操作手册》7.2 |
-| 服务器或引擎重启后任务「失败」，「恢复任务」提示没有可用的 checkpoint/savepoint | 引擎重启后不保留作业状态 | 按 4.2 重新初始化（任务组逐表「重新初始化该表」） |
+| 服务器或引擎重启后任务「失败」 | 引擎停机超过约 90 秒 | 引擎恢复后执行「恢复任务」，从 checkpoint 继续（见 4.2） |
+| 引擎重启后任务「需重新初始化」，提示引擎中已没有作业且没有可用的 checkpoint | 数据目录中该作业的 checkpoint 已不在 | 执行「重新初始化」（任务组逐表「重新初始化该表」） |
 | 删除的 topic 又出现了 | Kafka 开启了 auto.create.topics.enable | 按 2.4 关闭自动建 topic 后再删除 |
 | 磁盘使用率高 | 日志、备份、checkpoint 增长 | 清理旧备份（backup.sh 自动保留最近 7 份）；检查 ${DATA_DIR}/backend/logs |
 | 同步延迟持续增大 | 源库写入量超过限速、引擎内存不足、目标端处理慢 | 查看任务详情的吞吐与积压；适当提高任务的「最大行数/秒」；调大 ENGINE_HEAP |

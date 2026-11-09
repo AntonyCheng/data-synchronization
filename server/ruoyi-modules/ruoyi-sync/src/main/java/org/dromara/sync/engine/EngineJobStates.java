@@ -25,6 +25,9 @@ public final class EngineJobStates {
     /** A FULL_CDC job past startup: Zeta exposes no snapshot-complete signal, so the phase cannot be told apart. */
     public static final String PHASE_MIXED = "MIXED";
 
+    /** Engine status reported for a job the engine has no record of (it restarted since; see {@code EngineJobRunner.Poll.Forgotten}). */
+    public static final String UNKNOWN_JOB = "UNKNOWN_JOB";
+
     private EngineJobStates() {
     }
 

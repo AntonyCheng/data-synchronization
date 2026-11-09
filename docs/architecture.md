@@ -57,5 +57,11 @@ RuoYi-Vue-Plus 后端
 - **checkpoint 存储**：`hdfs` 存储插件写本地文件系统（`file:///opt/seatunnel/checkpoint/`，本地引擎栈挂载到
   `deploy/local-stack/runtime/seatunnel/checkpoint`），间隔 5 秒、超时 60 秒、保留 10 个
   （`deploy/local-stack/seatunnel/config/seatunnel.yaml`）。
+- **引擎重启后从 checkpoint 接着同步**：Zeta 不持久化作业（2.3.13 的文件型 IMap 落盘在 `engine_checkpoint_monitor` 上启动失败，
+  且其 WAL 只追加不压缩），重启后不再认识任何作业，`/jobs/checkpoints` 也为空；但 checkpoint 文件只在作业以 FINISHED / CANCELED
+  结束时才删除，重启后仍在。平台只读访问 checkpoint 目录（`sync.engine.checkpoint-dir`，生产包把它挂进后端容器）：
+  状态轮询发现引擎已没有某个运行中作业时，以原 `jobId` 带 `isStartWithSavePoint=true` 自动重新提交，从最近的 checkpoint 继续；
+  恢复检查在引擎接口查不到 checkpoint 时也以这些文件为证据。没有文件就不提交（带 savepoint 提交而无 checkpoint 时引擎会静默从头开始），
+  任务转为需重新初始化。
 - **不做自动 DDL**：任务组检测到源表结构漂移时以 savepoint 暂停该表（`DDL_BLOCKED`），目标端修复并通过兼容性检查后恢复；
   或"重新初始化该表"按源表当前结构重建，整表选择的表项自动纳入新增列（[ddl-change-management.md](ddl-change-management.md)）。

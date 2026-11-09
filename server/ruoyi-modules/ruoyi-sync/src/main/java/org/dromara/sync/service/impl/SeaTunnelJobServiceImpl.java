@@ -1,6 +1,7 @@
 package org.dromara.sync.service.impl;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.sync.config.ResourceProtectionPolicy;
@@ -45,6 +46,7 @@ import java.util.Set;
  * Single-table task lifecycle against SeaTunnel: preview, start, status reconciliation,
  * pause/resume with savepoint, stop and reinitialize. Credentials never reach API callers.
  */
+@Slf4j
 @RequiredArgsConstructor
 @Service
 public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
@@ -135,6 +137,7 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
             if (kafka) runner.dropBridge(taskId);
             return markFailed(task, jobId, lost.error());
         }
+        if (poll instanceof EngineJobRunner.Poll.Forgotten) return recoverForgotten(task, jobId, kafka);
         EngineJobRunner.Poll.Observed observed = (EngineJobRunner.Poll.Observed) poll;
         if (SyncStatus.REINITIALIZE_REQUIRED.equals(task.getStatus()) && !SyncStatus.RUNNING.equals(observed.platformStatus())) {
             // Only a reinitialize leaves REINITIALIZE_REQUIRED. The job is usually gone by then - a lost
@@ -203,6 +206,52 @@ public class SeaTunnelJobServiceImpl implements ISeaTunnelJobService {
         }
         metricsService.recordTask(task, snapshot.status(), result);
         return result;
+    }
+
+    /**
+     * The engine has no record of the job: it restarted, and keeps none of its jobs across a
+     * restart. A RUNNING task goes on from its newest checkpoint under the same job id; a Kafka
+     * bridge keeps its raw-topic position, so the target may see the changes of the last checkpoint
+     * interval once more (consumers apply by key). Without a checkpoint to go on from, or with a
+     * changed configuration, it is parked for a reinitialize - what a manual resume would conclude.
+     * A PAUSING task's savepoint may not have completed: it is PAUSED, and its resume restores from
+     * the newest checkpoint there is. Any other status stays - forgetting a paused, failed or
+     * finished job changes nothing about it, and its resume checks the checkpoint files itself.
+     */
+    private SeaTunnelJobStatus recoverForgotten(SyncTask task, String jobId, boolean kafka) {
+        String forgotten = "引擎中已没有作业 " + jobId + "（引擎重启过）";
+        if (SyncStatus.PAUSING.equals(task.getStatus())) {
+            if (kafka) runner.dropBridge(task.getTaskId());
+            task.setStatus(SyncStatus.PAUSED);
+            task.setLastError(forgotten + "，暂停时的 savepoint 可能未完成，恢复时从最近的 checkpoint 继续");
+            syncTaskMapper.updateById(task);
+            return statusOf(task, jobId, EngineJobStates.UNKNOWN_JOB, SyncStatus.PAUSED, task.getLastError());
+        }
+        if (!SyncStatus.RUNNING.equals(task.getStatus())) {
+            return statusOf(task, jobId, EngineJobStates.UNKNOWN_JOB, task.getStatus(), task.getLastError());
+        }
+        SeaTunnelJobConfigGenerator.GeneratedConfig generated;
+        String refusal;
+        try {
+            generated = generate(task);
+            refusal = runner.resumeRefusal(generated, task.getEngineConfigHash(), jobId);
+        } catch (RuntimeException ex) {
+            if (kafka) runner.dropBridge(task.getTaskId());
+            return markFailed(task, jobId, forgotten + "，未能检查可恢复的 checkpoint：" + SyncText.safeMessage(ex, "未知错误"));
+        }
+        if (refusal != null) {
+            if (kafka) runner.dropBridge(task.getTaskId());
+            return markReinitializeRequired(task, jobId, forgotten + "：" + refusal);
+        }
+        try {
+            runner.resume(job(task), generated, jobId);
+        } catch (RuntimeException ex) {
+            if (kafka) runner.dropBridge(task.getTaskId());
+            return markFailed(task, jobId, forgotten + "，从 checkpoint 自动恢复失败：" + SyncText.safeMessage(ex, "未知错误"));
+        }
+        log.warn("Sync task {} resumed from its checkpoint: the engine no longer knew job {} (engine restarted)", task.getTaskId(), jobId);
+        markRunning(task);
+        return statusOf(task, jobId, "RUNNING", SyncStatus.RUNNING, null);
     }
 
     @Override

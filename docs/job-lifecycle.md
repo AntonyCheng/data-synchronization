@@ -14,7 +14,10 @@
 - HOCON 配置通过 `POST /submit-job?format=hocon&jobName=...` 的纯文本请求体提交，不把配置文件落到平台磁盘。
 - 暂停使用 `stop-job` 的 `isStopWithSavePoint=true`；恢复使用相同 `jobId`、相同配置和 `isStartWithSavePoint=true`。
 - 平台元数据库只保存 `engine_job_id`、配置指纹、最近检查点摘要和错误信息，不保存包含密码的明文引擎配置。
-- 引擎返回状态统一映射到平台状态；引擎不可达或作业不存在时必须显示异常，不得伪造为运行中。
+- 引擎返回状态统一映射到平台状态；引擎不可达时必须显示异常，不得伪造为运行中。
+- 引擎重启后不再认识任何作业（job-info 只返回作业号）：运行中的任务由状态刷新以原 `jobId` 从最近的 checkpoint 自动重新提交，
+  checkpoint 以引擎接口或引擎 checkpoint 目录中的文件（`sync.engine.checkpoint-dir`）为准；两处都没有时转为需重新初始化，
+  不从未知位点重启。
 - 只操作 `test/` 隔离 POC 的 SeaTunnel、MySQL 和 PostgreSQL 容器，不能触碰现有业务容器。
 
 ## 实施步骤

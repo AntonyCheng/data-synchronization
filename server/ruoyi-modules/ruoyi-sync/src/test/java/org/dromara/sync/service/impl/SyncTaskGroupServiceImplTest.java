@@ -18,6 +18,7 @@ import org.dromara.sync.domain.vo.SyncTaskGroupOperationResult;
 import org.dromara.sync.domain.vo.SyncTaskGroupItemStatus;
 import org.dromara.sync.domain.vo.SyncTaskGroupStatus;
 import org.dromara.sync.domain.vo.TargetCompatibilityVo;
+import org.dromara.sync.engine.EngineCheckpointFiles;
 import org.dromara.sync.engine.EngineJobRunner;
 import org.dromara.sync.engine.SeaTunnelRestClient;
 import org.dromara.sync.engine.SourceColumns;
@@ -34,6 +35,7 @@ import org.dromara.sync.support.TableSchemaSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.InOrder;
 import org.mockito.invocation.Invocation;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -44,6 +46,9 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
@@ -286,6 +291,42 @@ class SyncTaskGroupServiceImplTest {
         assertEquals("DEGRADED", status.getStatus());
         assertEquals("DEGRADED", group.getStatus());
         verify(metrics, times(2)).recordGroupItem(any(), anyString(), any());
+    }
+
+    /**
+     * After an engine restart every table's job is forgotten. A RUNNING table with its checkpoint on
+     * disk goes on from it under the same job id; one without is isolated for 重新初始化该表 - never
+     * resubmitted from scratch - and a paused table stays paused, its savepoint on disk.
+     */
+    @Test
+    void afterAnEngineRestartEachRunningTableGoesOnFromItsCheckpointOrIsIsolated(@TempDir Path dir) throws IOException {
+        SyncTaskGroup group = persisted(group("RUNNING", "MULTI_TABLE", POSTGRES_ID));
+        SyncTaskGroupItem resumable = runningItem(11L, "customers", "job-a");
+        resumable.setEngineConfigHash(fingerprint(group, resumable, postgres));
+        SyncTaskGroupItem lost = runningItem(12L, "orders", "job-b");
+        lost.setEngineConfigHash(fingerprint(group, lost, postgres));
+        SyncTaskGroupItem paused = runningItem(13L, "items", "job-c");
+        paused.setStatus("PAUSED");
+        items.add(resumable);
+        items.add(lost);
+        items.add(paused);
+        for (String job : List.of("job-a", "job-b", "job-c")) {
+            when(restClient.status(job)).thenReturn(new SeaTunnelRestClient.JobSnapshot(job, null, null, null, null));
+        }
+        when(restClient.checkpoints(anyString())).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+        Files.writeString(Files.createDirectories(dir.resolve("job-a")).resolve("1794180593644-606-1-41.ser"), "state");
+
+        SyncTaskGroupStatus status = seeing(dir).refreshStatus(GROUP_ID);
+
+        assertEquals("RUNNING", resumable.getStatus());
+        verify(restClient).submit(anyString(), anyString(), eq("job-a"), eq(true));
+        assertEquals("FAILED", lost.getStatus());
+        assertTrue(lost.getLastError().contains("引擎重启过"), lost.getLastError());
+        assertEquals("PAUSED", paused.getStatus());
+        verify(restClient, never()).submit(anyString(), anyString(), eq("job-b"), anyBoolean());
+        verify(restClient, never()).submit(anyString(), anyString(), eq("job-c"), anyBoolean());
+        assertEquals("DEGRADED", status.getStatus());
+        assertEquals("DEGRADED", group.getStatus());
     }
 
     @Test
@@ -1137,6 +1178,17 @@ class SyncTaskGroupServiceImplTest {
         result.setPassed(passed);
         result.setMessage(passed ? "目标表结构兼容" : "目标表存在必须修复的兼容性问题");
         return result;
+    }
+
+    /** The same service, its runner seeing the engine's checkpoint storage under {@code dir}. */
+    private SyncTaskGroupServiceImpl seeing(Path dir) {
+        EngineJobRunner seeingRunner = new EngineJobRunner(restClient, bridge, new EngineCheckpointFiles(dir));
+        GroupItemOperations ops = new GroupItemOperations(itemMapper, metadataService, properties, seeingRunner);
+        SyncTaskGroupDiscoveryServiceImpl discovery = new SyncTaskGroupDiscoveryServiceImpl(groupMapper, itemMapper,
+            dataSourceService, metadataService, bridge, ops, locks, groupProperties);
+        return new SyncTaskGroupServiceImpl(groupMapper, itemMapper, ddlEventMapper, dataSourceService, metadataService, discovery,
+            properties, new ResourceProtectionPolicy(properties), bridge, metrics, locks, new TransactionTemplate(transactionManager),
+            seeingRunner, ops, groupProperties);
     }
 
     private String fingerprint(SyncTaskGroup group, SyncTaskGroupItem item, DataSource target) {

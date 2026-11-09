@@ -41,10 +41,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       torn down again when the submit fails;</li>
  *   <li>a job is resumed only with the configuration its savepoint was taken with, and only
  *       when a savepoint exists at all - resuming without one silently re-snapshots the table,
- *       which duplicates every event on a Kafka target;</li>
+ *       which duplicates every event on a Kafka target. The engine's own checkpoint overview is
+ *       asked first; once the engine has forgotten the job (it keeps no job state across a
+ *       restart) the checkpoint files it left on disk are the evidence ({@link EngineCheckpointFiles});</li>
  *   <li>one failed status poll is not proof the job died: it is given up only after
  *       {@link #STATUS_FAILURE_TOLERANCE} consecutive failures, or at once when the engine
- *       says its recovery state is gone.</li>
+ *       says its recovery state is gone; a job the engine answers it has no record of is
+ *       {@link Poll.Forgotten} - the engine restarted - which the lifecycles resume from its
+ *       checkpoint instead of failing it.</li>
  * </ul>
  * Owner ids are task ids or group item ids; both are snowflake ids, so they never collide in the
  * shared failure counter.
@@ -61,6 +65,7 @@ public class EngineJobRunner implements DisposableBean {
 
     private final SeaTunnelRestClient restClient;
     private final KafkaTaskBridgeService bridge;
+    private final EngineCheckpointFiles checkpointFiles;
     /** Runs the polls of {@link #pollAll}; {@code ownedPool} when this runner created it. */
     private final Executor pollExecutor;
     private final ExecutorService ownedPool;
@@ -70,18 +75,30 @@ public class EngineJobRunner implements DisposableBean {
 
     /** The application's runner: {@link #pollAll} fans out on its own bounded, daemon pool. */
     @Autowired
-    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, SeaTunnelProperties properties) {
-        this(restClient, bridge, boundedPool(properties.getPollParallelism()));
+    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, SeaTunnelProperties properties,
+                           EngineCheckpointFiles checkpointFiles) {
+        this(restClient, bridge, checkpointFiles, boundedPool(properties.getPollParallelism()));
+    }
+
+    /** Polls on the calling thread, one after another - deterministic, for tests. No checkpoint files visible. */
+    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge) {
+        this(restClient, bridge, EngineCheckpointFiles.none());
     }
 
     /** Polls on the calling thread, one after another - deterministic, for tests. */
-    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge) {
-        this(restClient, bridge, Runnable::run);
+    public EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, EngineCheckpointFiles checkpointFiles) {
+        this(restClient, bridge, checkpointFiles, Runnable::run);
     }
 
     EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, Executor pollExecutor) {
+        this(restClient, bridge, EngineCheckpointFiles.none(), pollExecutor);
+    }
+
+    EngineJobRunner(SeaTunnelRestClient restClient, KafkaTaskBridgeService bridge, EngineCheckpointFiles checkpointFiles,
+                    Executor pollExecutor) {
         this.restClient = restClient;
         this.bridge = bridge;
+        this.checkpointFiles = checkpointFiles;
         this.pollExecutor = pollExecutor;
         this.ownedPool = pollExecutor instanceof ExecutorService pool ? pool : null;
     }
@@ -170,7 +187,12 @@ public class EngineJobRunner implements DisposableBean {
      * Why {@code jobId} cannot be resumed with {@code generated}, or {@code null} when it can.
      * A refusal is final for this job - the caller parks it for a rebuild (REINITIALIZE_REQUIRED
      * for a task, FAILED + 重新初始化该表 for a table). A checkpoint read that fails for any other
-     * reason (engine unreachable) is thrown: that is not an answer about the savepoint.
+     * reason (engine unreachable, checkpoint directory unreadable) is thrown: that is not an answer
+     * about the savepoint.
+     *
+     * <p>The engine's checkpoint overview lives in its memory only, so after an engine restart it is
+     * empty even for a job whose savepoint was taken a minute earlier; the checkpoint files the
+     * engine wrote are still on disk, and they are what the resume restores from.
      */
     public String resumeRefusal(SeaTunnelJobConfigGenerator.GeneratedConfig generated, String storedFingerprint, String jobId) {
         if (StringUtils.isNotBlank(storedFingerprint) && !generated.matchesFingerprint(storedFingerprint)) {
@@ -183,7 +205,7 @@ public class EngineJobRunner implements DisposableBean {
             if (EngineJobStates.isRecoveryBoundaryError(ex.getMessage())) return ex.getMessage();
             throw ex;
         }
-        if (checkpoint.id() == null) {
+        if (checkpoint.id() == null && checkpointFiles.latestCheckpointId(jobId) == null) {
             return "没有可用的 checkpoint/savepoint，不能从未知位点恢复，请重新初始化";
         }
         return null;
@@ -216,7 +238,7 @@ public class EngineJobRunner implements DisposableBean {
     // ------------------------------------------------------------------ status
 
     /** Outcome of one status poll. */
-    public sealed interface Poll permits Poll.Observed, Poll.Unreachable, Poll.Lost, Poll.Boundary {
+    public sealed interface Poll permits Poll.Observed, Poll.Unreachable, Poll.Lost, Poll.Boundary, Poll.Forgotten {
 
         /**
          * The engine answered. {@code checkpointError} is set when only the checkpoint read failed;
@@ -240,6 +262,15 @@ public class EngineJobRunner implements DisposableBean {
 
         /** The engine says the job's recovery state (checkpoint / binlog position) is gone. */
         record Boundary(String error) implements Poll {
+        }
+
+        /**
+         * The engine answered but has no record of the job at all: it restarted since (it keeps no
+         * job state across a restart), the job's checkpoints - unless it ended FINISHED or CANCELED -
+         * still on disk. Not a failure of the job: a RUNNING owner is resumed from its checkpoint
+         * ({@link EngineJobRunner#resumeRefusal} decides whether it can be), any other keeps its status.
+         */
+        record Forgotten() implements Poll {
         }
     }
 
@@ -281,6 +312,7 @@ public class EngineJobRunner implements DisposableBean {
             pollFailureStreak.remove(ownerId);
             return new Poll.Lost(ex.getMessage());
         }
+        if (StringUtils.isBlank(snapshot.status())) return new Poll.Forgotten();
         SeaTunnelRestClient.CheckpointSnapshot checkpoint = SeaTunnelRestClient.CheckpointSnapshot.empty();
         String checkpointError = null;
         boolean checkpointBoundary = false;

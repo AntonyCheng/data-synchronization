@@ -3,6 +3,7 @@ package org.dromara.sync.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.MapstructUtils;
@@ -97,6 +98,7 @@ import java.util.stream.Collectors;
  * creating Kafka topics - and does all of it before its transaction opens
  * ({@link #planDatabaseItems}); the transaction only writes the rows that plan produced.
  */
+@Slf4j
 @RequiredArgsConstructor
 @Service
 public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
@@ -698,6 +700,8 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
                     itemStatus.setErrorMessage("SeaTunnel 状态暂不可达（第 " + unreachable.streak() + "/" + EngineJobRunner.STATUS_FAILURE_TOLERANCE
                         + " 次）：" + SyncText.truncateForColumn(StringUtils.defaultIfBlank(unreachable.error(), "")));
                     statuses.add(item.getStatus());
+                } else if (poll instanceof EngineJobRunner.Poll.Forgotten) {
+                    statuses.add(recoverForgottenItem(group, item, target, kafkaGroup, itemStatus));
                 } else {
                     // Given up on (Lost) or its recovery state is gone (Boundary): the table is parked.
                     String error = poll instanceof EngineJobRunner.Poll.Lost lost ? lost.error() : ((EngineJobRunner.Poll.Boundary) poll).error();
@@ -784,6 +788,50 @@ public class SyncTaskGroupServiceImpl implements ISyncTaskGroupService {
             itemStatus.setErrorMessage("已读取引擎状态，但未能保存（下一轮重试）：" + SyncText.safeMessage(ex, "未知错误"));
             return known;
         }
+    }
+
+    /**
+     * The engine has no record of this table's job: it restarted, and keeps none of its jobs across a
+     * restart. Mirrors the single-table task: a RUNNING table goes on from its newest checkpoint under
+     * the same job id (a Kafka bridge keeps its raw-topic position, so the last checkpoint interval
+     * may be published once more), one that cannot - no checkpoint on disk, changed configuration,
+     * a refused submit - is isolated FAILED, where 恢复该表 / 重新初始化该表 take it, while the
+     * other tables go on. A PAUSING table becomes PAUSED; any other status stays. Returns the status
+     * to aggregate.
+     */
+    private String recoverForgottenItem(SyncTaskGroup group, SyncTaskGroupItem item, DataSource target, boolean kafkaGroup,
+                                        SyncTaskGroupItemStatus itemStatus) {
+        String jobId = item.getEngineJobId();
+        String forgotten = "引擎中已没有作业 " + jobId + "（引擎重启过）";
+        if (SyncStatus.PAUSING.equals(item.getStatus())) {
+            if (kafkaGroup) runner.dropBridge(item.getItemId());
+            item.setStatus(SyncStatus.PAUSED);
+            item.setLastError(forgotten + "，暂停时的 savepoint 可能未完成，恢复时从最近的 checkpoint 继续");
+            itemMapper.updateById(item);
+        } else if (SyncStatus.RUNNING.equals(item.getStatus())) {
+            try {
+                DataSource source = requireSource(group);
+                var generated = SyncTaskGroupConfigGenerator.generateItem(group, item, source, target, properties, sourceColumns(source));
+                String refusal = runner.resumeRefusal(generated, item.getEngineConfigHash(), jobId);
+                if (refusal != null) {
+                    if (kafkaGroup) runner.dropBridge(item.getItemId());
+                    isolateItem(item, forgotten + "：" + refusal + "（使用「重新初始化该表」）");
+                } else {
+                    runner.resume(GroupItemOperations.job(group, item, source, target), generated, jobId);
+                    item.setLastError("");
+                    itemMapper.updateById(item);
+                    log.warn("Sync group {} table {} resumed from its checkpoint: the engine no longer knew job {} (engine restarted)",
+                        group.getGroupId(), item.getSourceTable(), jobId);
+                }
+            } catch (RuntimeException ex) {
+                if (kafkaGroup) runner.dropBridge(item.getItemId());
+                isolateItem(item, forgotten + "，从 checkpoint 自动恢复失败：" + SyncText.safeMessage(ex, "未知错误"));
+            }
+        }
+        itemStatus.setEngineStatus(SyncStatus.RUNNING.equals(item.getStatus()) ? "RUNNING" : EngineJobStates.UNKNOWN_JOB);
+        itemStatus.setStatus(item.getStatus());
+        itemStatus.setErrorMessage(StringUtils.isBlank(item.getLastError()) ? null : item.getLastError());
+        return item.getStatus();
     }
 
     /** Reconcile persisted group state with SeaTunnel after a platform restart. */

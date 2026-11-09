@@ -714,18 +714,46 @@ DELETE + INSERT、未选字段不发布、保存点暂停恢复后补发，列�
 - 只重启后端不中断作业；
 - 备份 / 恢复正常；HTTPS（自签名证书）正常。
 
-**发现的限制：引擎重启后作业不能从原进度继续。**
-- 现象：引擎重启（服务器重启、改引擎配置、升级、恢复备份都会重启引擎）后，运行中的任务转为 FAILED。「恢复」被拒（`EngineJobRunner.resumeRefusal`：`/jobs/checkpoints/{id}` 返回空），任务转为 REINITIALIZE_REQUIRED。先暂停（`SAVEPOINT_DONE`）再重启也一样。
-- 原因：Zeta 未开启 IMap 持久化，重启后忘记全部作业；checkpoint 文件其实仍在数据目录中。
-- 按 SeaTunnel 文档为 `engine*` 配置 `FileMapStoreFactory` 落盘后，2.3.13 单节点启动时在初始化 `engine_checkpoint_monitor` 时抛 NullPointerException，引擎无法就绪（已回退）。
-- 手册已按实际行为改写：维护前中止任务、维护后启动；意外重启后重新初始化（任务组逐表）。这两条路径都实测通过。
+**验证中发现：引擎重启后作业不能从原进度继续**。下节已修复。
+
+### 引擎重启后从 checkpoint 接着同步（2026-11-09）
+
+**问题**：引擎重启后，任务不能从原进度继续。服务器重启、改引擎配置、升级、恢复备份都会重启引擎，于是全部任务都要重新全量。
+- 运行中的任务转为 FAILED；
+- 「恢复」被拒，任务转为 REINITIALIZE_REQUIRED；先暂停再重启也一样。
+
+**根因**：
+- Zeta 只在内存里保存作业，以及 `/jobs/checkpoints` 用到的 checkpoint 概览。重启后 job-info 只返回作业号，平台把它当成 FAILED。
+- 恢复检查只认引擎接口，所以拒绝恢复。
+- 但 checkpoint 文件仍在数据目录中：引擎只在作业以 FINISHED / CANCELED 结束时删除它们。用原作业号带 `isStartWithSavePoint` 重新提交，引擎会从最新的那份继续。
+
+**没有采用 IMap 落盘**（SeaTunnel 文档给出的做法），原因有两个：
+- 2.3.13 的 `CheckpointMonitorService` 在节点启动完成前就 `getMap("engine_checkpoint_monitor")`，EAGER 加载时空指针，引擎起不来（单独给它配 LAZY 可以绕过）；
+- 文件型 IMap 的 WAL 只追加、从不压缩，每次启动还要全部读入重放。checkpoint 编号、指标、checkpoint 概览每 5 秒写一次，长期运行下磁盘和启动时间会无限增长。
+
+**修复**（平台侧）：
+- `EngineCheckpointFiles` 只读引擎 checkpoint 目录（`sync.engine.checkpoint-dir`；生产包把 `${DATA_DIR}/seatunnel/checkpoint` 只读挂进后端；开发环境默认指向本地引擎栈的目录）。
+- `EngineJobRunner.resumeRefusal` 在引擎接口查不到 checkpoint 时，以磁盘上该作业的 checkpoint 文件为证据。两处都没有仍然拒绝：带 savepoint 提交而没有 checkpoint 时，引擎会静默从头开始。
+- job-info 没有状态时，轮询结果为 `Poll.Forgotten`：
+  - 单表任务和任务组表项：RUNNING 的以原作业号从 checkpoint 自动重新提交；
+  - 没有 checkpoint 的：任务转需重新初始化，表项隔离；
+  - PAUSING 的转 PAUSED；
+  - 其他状态不变（原来会被误标为 FAILED）。
+- 新增 12 个单测，共 302 个。
+
+**实测**（Windows 上用生产包全新安装，Kafka 单表任务 + 两表任务组）：
+- 不暂停直接 `docker restart` 引擎：31 秒内全部自动恢复，作业号不变，没有重新全量；重启前、中、后写入的变更各恰好一次。
+- 先暂停再重启引擎：任务保持已暂停，「恢复」从 savepoint 继续，暂停期间的变更恰好一次；同时运行中的组表自动恢复。
+- 修改 ENGINE_HEAP、重建引擎容器：42 秒内自动恢复。
+- 整套容器同时重启（模拟服务器重启）：后端起来后 21 秒内恢复。
+- 引擎停机 90 秒以上：任务与组先转 FAILED（不假装运行），引擎恢复后手动「恢复」从 checkpoint 继续。
+
+Kafka 目标按至少一次处理：从 checkpoint 继续时，最后一个 checkpoint 周期（5 秒）内的变更可能重复发布。以上测试中没有出现重复。手册已按此改写。
 
 ### 仍开放的待办（2026-11-08）
 
 生产就绪评估中与环境无关、尚未处理的（A 档余项与 B 档）：
-- **引擎重启后不能从原进度继续**（见上节）。任何引擎重启都意味着全部任务重新全量，可选方向：
-  - 查清 2.3.13 IMap 落盘的 NullPointerException；
-  - 或让平台在引擎不认识该作业时，确认数据目录中有 checkpoint 后带 savepoint 重新提交（需要引擎侧可查询的依据，不能从未知位点恢复）；
+- 引擎重启后被丢弃的旧作业（重新初始化时引擎已不认识它）的 checkpoint 目录不会被引擎删除，会留在数据目录中，需要时手工清理；
 - GoldenDB CDC 变更回归（需要写权限）；
 - 压测与资源基线；
 - Kafka 认证（SASL/SSL）与多 broker 地址；

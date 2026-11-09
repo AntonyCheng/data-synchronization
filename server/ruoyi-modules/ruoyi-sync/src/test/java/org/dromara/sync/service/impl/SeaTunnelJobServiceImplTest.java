@@ -9,6 +9,7 @@ import org.dromara.sync.domain.vo.DataSourceColumnVo;
 import org.dromara.sync.domain.vo.DataSourceMetadataVo;
 import org.dromara.sync.domain.vo.SeaTunnelJobStatus;
 import org.dromara.sync.domain.vo.SyncTaskValidationResult;
+import org.dromara.sync.engine.EngineCheckpointFiles;
 import org.dromara.sync.engine.EngineJobRunner;
 import org.dromara.sync.engine.SeaTunnelJobConfigGenerator;
 import org.dromara.sync.engine.SeaTunnelRestClient;
@@ -25,9 +26,13 @@ import org.dromara.sync.support.SyncText;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.InOrder;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.function.Supplier;
@@ -42,6 +47,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -514,6 +520,110 @@ class SeaTunnelJobServiceImplTest {
     }
 
     // ------------------------------------------------------------------ fixtures
+
+    // ------------------------------------------------------------------ engine restart
+
+    /**
+     * The engine keeps no job across a restart while the job's checkpoints stay on disk. A RUNNING
+     * task goes on from them under the same job id; its bridge, still running, keeps its raw-topic
+     * position and is neither restarted nor reset.
+     */
+    @Test
+    void aRunningTaskWhoseJobTheEngineForgotGoesOnFromItsCheckpoint(@TempDir Path dir) throws IOException {
+        SyncTask task = persisted(running(KAFKA_ID));
+        task.setEngineConfigHash(fingerprint(task, kafka));
+        checkpointOnDisk(dir, "job-1");
+        engineForgot();
+        when(bridge.isRunning(TASK_ID)).thenReturn(true);
+
+        SeaTunnelJobStatus status = seeing(dir).refreshStatus(TASK_ID);
+
+        assertEquals("RUNNING", status.getStatus());
+        assertEquals("RUNNING", task.getStatus());
+        assertEquals("job-1", task.getEngineJobId());
+        assertEquals("", task.getLastError());
+        verify(restClient).submit(eq("ds-task-42"), anyString(), eq("job-1"), eq(true));
+        verify(bridge, never()).stop(TASK_ID);
+        verify(bridge, never()).start(any(), any(), any(), anyBoolean());
+    }
+
+    /** Resubmitting without a checkpoint would silently start over: the task is parked for a reinitialize instead. */
+    @Test
+    void aForgottenJobWithoutACheckpointOnDiskIsParkedForReinitialize(@TempDir Path dir) {
+        SyncTask task = persisted(running(KAFKA_ID));
+        task.setEngineConfigHash(fingerprint(task, kafka));
+        engineForgot();
+
+        SeaTunnelJobStatus status = seeing(dir).refreshStatus(TASK_ID);
+
+        assertEquals("REINITIALIZE_REQUIRED", status.getStatus());
+        assertEquals("REINITIALIZE_REQUIRED", task.getStatus());
+        assertTrue(task.getLastError().contains("引擎重启过"), task.getLastError());
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+        verify(bridge).stop(TASK_ID);
+    }
+
+    /** A paused task's savepoint is on disk too: it stays PAUSED through the restart and resumes from it. */
+    @Test
+    void aPausedTaskOutlivesAnEngineRestartAndResumesFromItsSavepoint(@TempDir Path dir) throws IOException {
+        SyncTask task = persisted(task("PAUSED", POSTGRES_ID));
+        task.setEngineConfigHash(fingerprint(task, postgres));
+        checkpointOnDisk(dir, "job-1");
+        engineForgot();
+        SeaTunnelJobServiceImpl restarted = seeing(dir);
+
+        assertEquals("PAUSED", restarted.refreshStatus(TASK_ID).getStatus());
+        assertEquals("PAUSED", task.getStatus());
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+
+        restarted.resume(TASK_ID);
+
+        verify(restClient).submit(eq("ds-task-42"), anyString(), eq("job-1"), eq(true));
+        assertEquals("RUNNING", task.getStatus());
+    }
+
+    @Test
+    void aTaskPausingWhenTheEngineRestartedEndsUpPaused(@TempDir Path dir) {
+        SyncTask task = persisted(task("PAUSING", POSTGRES_ID));
+        engineForgot();
+
+        assertEquals("PAUSED", seeing(dir).refreshStatus(TASK_ID).getStatus());
+        assertEquals("PAUSED", task.getStatus());
+        verify(restClient, never()).submit(anyString(), anyString(), any(), anyBoolean());
+    }
+
+    /** An automatic resume the engine refuses leaves the task FAILED - a manual resume retries it - and without a bridge. */
+    @Test
+    void aRefusedAutomaticResumeFailsTheTask(@TempDir Path dir) throws IOException {
+        SyncTask task = persisted(running(KAFKA_ID));
+        task.setEngineConfigHash(fingerprint(task, kafka));
+        checkpointOnDisk(dir, "job-1");
+        engineForgot();
+        when(bridge.isRunning(TASK_ID)).thenReturn(true);
+        when(restClient.submit(anyString(), anyString(), eq("job-1"), eq(true))).thenThrow(new ServiceException("SeaTunnel 接口不可用：refused"));
+
+        assertEquals("FAILED", seeing(dir).refreshStatus(TASK_ID).getStatus());
+        assertEquals("FAILED", task.getStatus());
+        assertTrue(task.getLastError().contains("自动恢复失败"), task.getLastError());
+        verify(bridge, atLeastOnce()).stop(TASK_ID);
+    }
+
+    /** The same service, its runner seeing the engine's checkpoint storage under {@code dir}. */
+    private SeaTunnelJobServiceImpl seeing(Path dir) {
+        return new SeaTunnelJobServiceImpl(taskMapper, dataSourceMapper, dataSourceService, metadataService, properties,
+            syncTaskService, new ResourceProtectionPolicy(properties), locks, metrics,
+            new EngineJobRunner(restClient, bridge, new EngineCheckpointFiles(dir)));
+    }
+
+    /** job-info answers with the bare job id and the checkpoint overview is empty: the engine restarted. */
+    private void engineForgot() {
+        when(restClient.status("job-1")).thenReturn(new SeaTunnelRestClient.JobSnapshot("job-1", null, null, null, null));
+        when(restClient.checkpoints("job-1")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+    }
+
+    private static void checkpointOnDisk(Path dir, String jobId) throws IOException {
+        Files.writeString(Files.createDirectories(dir.resolve(jobId)).resolve("1794180593644-606-1-41.ser"), "state");
+    }
 
     private SyncTask persisted(SyncTask task) {
         when(taskMapper.selectById(TASK_ID)).thenReturn(task);

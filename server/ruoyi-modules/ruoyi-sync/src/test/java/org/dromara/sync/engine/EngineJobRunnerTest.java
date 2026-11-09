@@ -6,8 +6,12 @@ import org.dromara.sync.domain.SyncTask;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.InOrder;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -148,7 +152,33 @@ class EngineJobRunnerTest {
         assertTrue(EngineJobStates.isRecoveryBoundaryError(refusal), refusal);
     }
 
+    /**
+     * The engine keeps its checkpoint overview in memory only: after a restart it is empty even for
+     * a job paused a minute earlier, while the checkpoint files the resume restores from are still on
+     * disk. Those are the evidence then - and without them the resume is still refused.
+     */
+    @Test
+    void afterAnEngineRestartTheCheckpointFilesOnDiskAreTheEvidence(@TempDir Path dir) throws IOException {
+        EngineJobRunner seeing = new EngineJobRunner(restClient, bridge, new EngineCheckpointFiles(dir));
+        when(restClient.checkpoints("job-1")).thenReturn(SeaTunnelRestClient.CheckpointSnapshot.empty());
+        assertTrue(seeing.resumeRefusal(generated, generated.fingerprint(), "job-1").contains("checkpoint/savepoint"));
+
+        Files.writeString(Files.createDirectories(dir.resolve("job-1")).resolve("1794180593644-606-1-41.ser"), "state");
+        assertNull(seeing.resumeRefusal(generated, generated.fingerprint(), "job-1"));
+        // A changed configuration still cannot use them.
+        assertTrue(seeing.resumeRefusal(generated, "stale", "job-1").contains("配置已变化"));
+    }
+
     // ------------------------------------------------------------------ poll
+
+    /** job-info answers with the bare job id for a job it has no record of - the engine restarted since. */
+    @Test
+    void aJobTheEngineHasNoRecordOfIsForgottenNotFailed() {
+        when(restClient.status("job-1")).thenReturn(new SeaTunnelRestClient.JobSnapshot("job-1", null, null, null, null));
+
+        assertInstanceOf(EngineJobRunner.Poll.Forgotten.class, runner.poll(OWNER, "job-1"));
+        verify(restClient, never()).checkpoints(anyString());
+    }
 
     @Test
     void aJobIsGivenUpOnlyAfterTheToleranceAndAnAnswerResetsTheCount() {

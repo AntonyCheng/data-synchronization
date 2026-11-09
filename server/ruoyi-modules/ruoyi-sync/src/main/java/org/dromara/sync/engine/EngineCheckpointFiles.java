@@ -1,0 +1,82 @@
+package org.dromara.sync.engine;
+
+import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.core.utils.StringUtils;
+import org.dromara.sync.config.SeaTunnelProperties;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+/**
+ * The engine's checkpoint files, read straight from its storage directory
+ * ({@code sync.engine.checkpoint-dir}).
+ *
+ * <p>Zeta keeps its jobs - and the checkpoint overview the REST API answers from - only in memory,
+ * so after an engine restart it no longer knows any job, while the checkpoints it wrote stay on
+ * disk: it deletes a job's checkpoints only when the job ends FINISHED or CANCELED. A submit
+ * with the old job id and {@code isStartWithSavePoint} restores from the newest of them; with none
+ * there, the engine silently starts the job from scratch. So the files are the evidence a resume
+ * needs once the engine has forgotten the job, and without them it must be refused.
+ *
+ * <p>Layout (the HDFS / local-file checkpoint storage): {@code <dir>/<jobId>/<timestamp>-<random>-<pipelineId>-<checkpointId>.ser},
+ * next to Hadoop's hidden {@code .crc} side files.
+ */
+@Component
+public class EngineCheckpointFiles {
+
+    /** Engine job ids are numbers; anything that could leave the storage directory is never looked up. */
+    private static final Pattern JOB_ID = Pattern.compile("[0-9A-Za-z_-]{1,64}");
+    private static final Pattern CHECKPOINT_FILE = Pattern.compile("\\d+-\\d+-\\d+-(\\d+)\\.ser");
+
+    /** {@code null}: the storage is not visible to this process. */
+    private final Path dir;
+
+    @Autowired
+    public EngineCheckpointFiles(SeaTunnelProperties properties) {
+        this(StringUtils.isBlank(properties.getCheckpointDir()) ? null : Path.of(properties.getCheckpointDir().trim()));
+    }
+
+    public EngineCheckpointFiles(Path dir) {
+        this.dir = dir;
+    }
+
+    /** No storage visible: every lookup finds nothing. */
+    public static EngineCheckpointFiles none() {
+        return new EngineCheckpointFiles((Path) null);
+    }
+
+    /**
+     * The newest checkpoint id stored for {@code jobId}, or {@code null} when there is none - or the
+     * storage is not configured, not mounted or not readable, which is not evidence of a checkpoint
+     * either. A read error is thrown: that is no answer about the checkpoint.
+     */
+    public Long latestCheckpointId(String jobId) {
+        if (dir == null || StringUtils.isBlank(jobId) || !JOB_ID.matcher(jobId).matches()) return null;
+        Path jobDir = dir.resolve(jobId);
+        if (!Files.isDirectory(jobDir)) return null;
+        try (Stream<Path> files = Files.list(jobDir)) {
+            return files.filter(EngineCheckpointFiles::isNonEmptyFile)
+                .map(file -> CHECKPOINT_FILE.matcher(file.getFileName().toString()))
+                .filter(Matcher::matches)
+                .map(match -> Long.parseLong(match.group(1)))
+                .max(Long::compare)
+                .orElse(null);
+        } catch (IOException ex) {
+            throw new ServiceException("读取引擎 checkpoint 目录失败：" + jobDir + "（" + ex.getMessage() + "）");
+        }
+    }
+
+    private static boolean isNonEmptyFile(Path file) {
+        try {
+            return Files.isRegularFile(file) && Files.size(file) > 0;
+        } catch (IOException ex) {
+            return false;
+        }
+    }
+}

@@ -31,6 +31,16 @@ public class SeaTunnelProperties {
     /** Checkpoint interval written into generated jobs. */
     private int checkpointIntervalMs = 5000;
 
+    /**
+     * The engine's checkpoint storage directory as this process sees it - the engine's
+     * {@code checkpoint.storage} namespace (one sub-directory per job id), mounted read-only into
+     * the backend by the production deployment. The engine keeps no job state across a restart
+     * while these files stay, so they are what a resume restores from once the engine no longer
+     * remembers the job ({@code EngineCheckpointFiles}). Blank or not readable: such a resume is
+     * refused as before - never resumed from an unknown position.
+     */
+    private String checkpointDir = "";
+
     /** Maximum source snapshot throughput for generated jobs. */
     private int readLimitRowsPerSecond = 1000;
 
