@@ -123,7 +123,7 @@ GoldenDB 说明：
 | 项目 | 要求 |
 |---|---|
 | 版本 | Kafka 2.8 及以上（已验证 3.8） |
-| 连接方式 | 当前版本只支持无认证的 PLAINTEXT 连接，数据源中填写一个 broker 的「主机:端口」作为引导地址（客户端会从它获取全部 broker）；引导 broker 不可用时无法连接，可填写指向多个 broker 的域名或负载均衡地址 |
+| 连接方式 | 支持无认证（PLAINTEXT）、SASL（PLAIN、SCRAM-SHA-256、SCRAM-SHA-512）、SASL_SSL 与 SSL（可双向认证），证书以 PEM 文本填写在数据源中，不需要挂载文件；暂不支持 Kerberos（GSSAPI）。数据源中可填写多个 broker 地址（逗号分隔）作为引导地址，任一可用即可连接 |
 | 自动建 topic | 必须设置 auto.create.topics.enable=false。开启时，刚删除的 topic 可能被平台的发布客户端在刷新元数据时按默认配置重新建出 |
 | raw topic | 平台为每个 Kafka 任务（任务组的每张表）自动创建私有 raw topic：1 个分区，max.message.bytes 等于单条上限（默认 16 MiB）；任务删除后由平台自动清理。若开启了 ACL，平台使用的连接需要 topic 的 Create、Describe、DescribeConfigs、AlterConfigs、Read、Write 与 consumer group（ds-task-*）的 Read 权限 |
 | 目标 topic | 生产环境建议由 Kafka 管理员按规范预先创建（副本数 ≥ 3，分区数按下游消费能力），在任务向导中选择「已有 topic」。向导里新建的 topic 固定为 1 分区 1 副本，仅适合测试 |

@@ -54,6 +54,29 @@ public class DataSourceBo implements Serializable {
     @Size(max = 64, message = "服务器时区不能超过{max}个字符")
     private String serverTimeZone;
 
+    /** Kafka only: PLAINTEXT (or blank), SASL_PLAINTEXT, SASL_SSL, SSL. */
+    @Size(max = 20, message = "Kafka 安全协议不能超过{max}个字符")
+    private String kafkaSecurityProtocol;
+
+    /** Kafka SASL only: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512. */
+    @Size(max = 20, message = "SASL 机制不能超过{max}个字符")
+    private String kafkaSaslMechanism;
+
+    /** Kafka SSL only: CA certificate(s), PEM. */
+    @Size(max = 32768, message = "CA 证书不能超过{max}个字符")
+    private String kafkaSslCaCert;
+
+    /** Kafka SSL only: client certificate chain, PEM. */
+    @Size(max = 32768, message = "客户端证书不能超过{max}个字符")
+    private String kafkaSslClientCert;
+
+    /** Kafka SSL only: client private key, unencrypted PKCS#8 PEM; blank on edit keeps the stored one. */
+    @Size(max = 16384, message = "客户端私钥不能超过{max}个字符")
+    private String kafkaSslClientKey;
+
+    /** Kafka SSL only: "0" turns the broker host-name check off. */
+    private String kafkaSslVerifyHostname;
+
     private String status;
     private String remark;
 }

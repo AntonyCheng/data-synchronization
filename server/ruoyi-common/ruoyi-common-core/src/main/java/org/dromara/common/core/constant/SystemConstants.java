@@ -83,9 +83,9 @@ public interface SystemConstants {
     Long DEFAULT_DEPT_ID = 1761000000000000100L;
 
     /**
-     * 排除敏感属性字段
+     * 排除敏感属性字段（请求日志与操作日志都不记录）。kafkaSslClientKey 是 Kafka 数据源的客户端私钥。
      */
-    String[] EXCLUDE_PROPERTIES = {"password", "oldPassword", "newPassword", "confirmPassword"};
+    String[] EXCLUDE_PROPERTIES = {"password", "oldPassword", "newPassword", "confirmPassword", "kafkaSslClientKey"};
 
 
 }

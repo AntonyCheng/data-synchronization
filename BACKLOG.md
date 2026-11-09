@@ -780,8 +780,23 @@ Kafka 目标按至少一次处理：从 checkpoint 继续时，最后一个 chec
 
 **二、与生产环境无关，可以直接做**
 
-2. Kafka 认证（SASL/SSL）与多个 broker 地址（原 B7）：目前只支持无认证、单个 `host:port`。
-   - 涉及数据源表单与存储、引擎 sink 配置、桥接的 consumer / producer / AdminClient、连接测试。
+2. ~~Kafka 认证（SASL/SSL）与多个 broker 地址（原 B7）~~ **已完成（2026-11-09），Kerberos（GSSAPI）除外**：
+   - 认证方式：
+     - Kafka 数据源支持 SASL_PLAINTEXT / SASL_SSL（PLAIN、SCRAM-SHA-256、SCRAM-SHA-512，凭证用数据源的用户名和口令）；
+     - 支持 SSL：CA 证书、可选的双向认证客户端证书与私钥、主机名校验开关；
+     - 证书和私钥以 PEM 文本存在数据源上（migration 026），私钥加密保存、任何接口都不返回；
+     - 「主机地址」可填多个 broker（逗号分隔）。
+   - 实现：
+     - 统一由 `kafka.KafkaSecurity` 生成客户端属性，`KafkaConnection`（broker + 安全参数）供 AdminClient、桥接 consumer / producer 使用；
+     - 引擎 Kafka sink 的 `kafka.config` 带同样的属性；无认证数据源生成的配置与以前逐字节相同；
+     - 认证属性不进配置指纹，引擎配置预览中的 JAAS 与私钥显示为 `******`；
+     - 安全协议、机制、证书和主机名校验属于连接参数，运行中不能修改；口令和私钥可随时轮换。
+   - 实测（Windows，生产包全新安装，另起带 SASL / SSL 监听的 Kafka 3.8）：
+     - 无认证、SASL PLAIN、SCRAM-SHA-256、SASL_SSL + SCRAM-SHA-512（broker 列表第一项不可解析）、SSL 双向认证，五种数据源连接测试都通过；
+     - 这五种数据源各跑一个 CDC 任务，全量与增量事件都送达，raw topic 建在加密集群上；
+     - 错误口令、缺 CA、缺客户端证书、PKCS#1 私钥都给出明确的失败原因。
+   - 实测中发现并修复：客户端私钥会被请求日志（`[PLUS]开始请求`）和操作日志（`sys_oper_log`）原样记录。已加入 `SystemConstants.EXCLUDE_PROPERTIES`。
+
 3. topic 副本数可配置（原 B8）：raw topic、整库组自动建的目标 topic、向导新建的 topic 都固定 1 副本。
    - raw topic 必须保持 1 个分区（保序），副本数应跟随集群默认或可配置；向导里的分区数和副本数也应可选。
 4. 端到端对账与告警（原 B9）：Kafka 目标没有任何对账；关系型目标只有手动行数核对。

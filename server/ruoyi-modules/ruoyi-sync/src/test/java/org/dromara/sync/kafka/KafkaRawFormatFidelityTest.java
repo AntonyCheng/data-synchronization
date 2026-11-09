@@ -183,7 +183,7 @@ class KafkaRawFormatFidelityTest {
     private List<String[]> publish(List<String> raw, String sourceTable, String keys, String zone, int expectedMessages)
         throws InterruptedException {
         KafkaEventProducer producer = mock(KafkaEventProducer.class);
-        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong()))
+        when(producer.publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong()))
             .thenReturn(KafkaEventProducer.PublishOutcome.success(List.of()));
         bridge = new KafkaTaskBridgeService(new KafkaEventNormalizer(mapper), producer, mapper, new KafkaBridgeProperties(),
             new SeaTunnelProperties(), mock(KafkaBridgeStateStore.class)) {
@@ -192,7 +192,7 @@ class KafkaRawFormatFidelityTest {
             }
 
             @Override
-            long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+            long targetTopicMaxMessageBytes(KafkaConnection connection, String topic) {
                 return -1;
             }
 

@@ -64,18 +64,19 @@ public class KafkaEventProducer {
     private final SyncTaskMapper syncTaskMapper;
     private final KafkaEventSerializer serializer;
     private final SeaTunnelProperties properties;
-    private final ConcurrentMap<String, Producer<String, String>> producers = new ConcurrentHashMap<>();
+    /** One producer per cluster connection: the same brokers with other credentials are another connection. */
+    private final ConcurrentMap<KafkaConnection, Producer<String, String>> producers = new ConcurrentHashMap<>();
 
     /**
      * Publish normalized events for a platform task and persist delivery metrics of what got
      * through onto its row. {@code topicMaxMessageBytes} is the output topic's limit, {@code <= 0}
      * when unknown.
      */
-    public PublishOutcome publishForTask(Long taskId, String bootstrapServers, String topic,
+    public PublishOutcome publishForTask(Long taskId, KafkaConnection connection, String topic,
                                          List<KafkaEventNormalizer.NormalizedEvent> events,
                                          KafkaOutputFormat format, long topicMaxMessageBytes) {
         if (syncTaskMapper.selectById(taskId) == null) throw new ServiceException("同步任务不存在");
-        PublishOutcome outcome = publish(bootstrapServers, topic, events, format, topicMaxMessageBytes);
+        PublishOutcome outcome = publish(connection, topic, events, format, topicMaxMessageBytes);
         if (!outcome.published().isEmpty()) {
             try {
                 persistMetrics(taskId, events.subList(0, outcome.published().size()), outcome.published());
@@ -121,10 +122,12 @@ public class KafkaEventProducer {
      * Sends issued after a failed one may still have landed (they are pipelined), so the caller
      * publishes them again - at least once, as everywhere on this path.
      */
-    public PublishOutcome publish(String bootstrapServers, String topic,
+    public PublishOutcome publish(KafkaConnection connection, String topic,
                                   List<KafkaEventNormalizer.NormalizedEvent> events,
                                   KafkaOutputFormat format, long topicMaxMessageBytes) {
-        if (bootstrapServers == null || bootstrapServers.isBlank()) throw new ServiceException("Kafka broker 地址不能为空");
+        if (connection == null || connection.bootstrapServers() == null || connection.bootstrapServers().isBlank()) {
+            throw new ServiceException("Kafka broker 地址不能为空");
+        }
         if (topic == null || topic.isBlank()) throw new ServiceException("Kafka topic 不能为空");
         if (events == null || events.isEmpty()) return PublishOutcome.success(List.of());
         long limit = recordLimit(topicMaxMessageBytes);
@@ -149,7 +152,7 @@ public class KafkaEventProducer {
             keys.add(key);
             values.add(value);
         }
-        Producer<String, String> producer = producerFor(bootstrapServers);
+        Producer<String, String> producer = producerFor(connection);
         // Issue every send first (the producer pipelines them - idempotence keeps per-partition
         // ordering across the in-flight requests), then wait for acks in order. Blocking on get()
         // one send at a time would serialize on network round-trips.
@@ -158,7 +161,7 @@ public class KafkaEventProducer {
             try {
                 futures.add(producer.send(new ProducerRecord<>(topic, keys.get(index), values.get(index))));
             } catch (RuntimeException ex) {
-                evictIfFatal(bootstrapServers, producer, ex);
+                evictIfFatal(connection, producer, ex);
                 refusal = describe(ex);
                 keys.subList(index, keys.size()).clear();
                 break;
@@ -173,7 +176,7 @@ public class KafkaEventProducer {
                 Thread.currentThread().interrupt();
                 return new PublishOutcome(List.copyOf(results), index, "发布被中断");
             } catch (Exception ex) {
-                evictIfFatal(bootstrapServers, producer, ex);
+                evictIfFatal(connection, producer, ex);
                 return new PublishOutcome(List.copyOf(results), index, describe(ex));
             }
         }
@@ -214,14 +217,14 @@ public class KafkaEventProducer {
      * A shared producer that hit a fatal error refuses every later send - for every owner on that
      * cluster - until it is replaced, so it is dropped here and the next publish opens a new one.
      */
-    private void evictIfFatal(String bootstrapServers, Producer<String, String> producer, Throwable ex) {
+    private void evictIfFatal(KafkaConnection connection, Producer<String, String> producer, Throwable ex) {
         Throwable cause = ex instanceof ExecutionException && ex.getCause() != null ? ex.getCause() : ex;
         boolean fatal = cause instanceof AuthenticationException || cause instanceof ClusterAuthorizationException
             || cause instanceof UnsupportedVersionException || cause instanceof ProducerFencedException
             || cause instanceof InvalidProducerEpochException || cause instanceof IllegalStateException
             || cause instanceof KafkaException && String.valueOf(cause.getMessage()).contains("previous transactional or idempotent request has failed");
-        if (!fatal || !producers.remove(bootstrapServers, producer)) return;
-        log.warn("Kafka producer for {} replaced after a fatal error: {}", bootstrapServers, describe(cause));
+        if (!fatal || !producers.remove(connection, producer)) return;
+        log.warn("Kafka producer for {} replaced after a fatal error: {}", connection, describe(cause));
         try {
             producer.close(Duration.ZERO);
         } catch (RuntimeException ignored) {
@@ -229,14 +232,13 @@ public class KafkaEventProducer {
         }
     }
 
-    private Producer<String, String> producerFor(String bootstrapServers) {
-        return producers.computeIfAbsent(bootstrapServers, this::openProducer);
+    private Producer<String, String> producerFor(KafkaConnection connection) {
+        return producers.computeIfAbsent(connection, this::openProducer);
     }
 
     /** Package-private for tests. */
-    Producer<String, String> openProducer(String bootstrapServers) {
-        Properties config = new Properties();
-        config.put("bootstrap.servers", bootstrapServers);
+    Producer<String, String> openProducer(KafkaConnection connection) {
+        Properties config = connection.clientProperties();
         config.put("acks", "all");
         config.put("enable.idempotence", "true");
         config.put("retries", Integer.toString(Integer.MAX_VALUE));

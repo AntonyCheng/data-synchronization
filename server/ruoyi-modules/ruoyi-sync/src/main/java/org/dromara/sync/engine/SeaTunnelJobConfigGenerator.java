@@ -7,6 +7,8 @@ import org.dromara.sync.constant.DataSourceType;
 import org.dromara.sync.constant.SyncMode;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.SyncTask;
+import org.dromara.sync.kafka.KafkaAdminClients;
+import org.dromara.sync.kafka.KafkaSecurity;
 import org.dromara.sync.kafka.KafkaTaskBridgeService;
 import org.dromara.sync.support.JdbcUrls;
 import org.dromara.sync.support.SourceTimeZones;
@@ -56,7 +58,15 @@ public final class SeaTunnelJobConfigGenerator {
      * raising it must not strand the savepoint of a job that failed on a large row - and configs from
      * before the entry existed keep their fingerprints.
      */
-    private static final Pattern UNFINGERPRINTED_KAFKA_OPTIONS = Pattern.compile(", max\\.request\\.size = \"\\d+\"");
+    private static final Pattern UNFINGERPRINTED_KAFKA_OPTIONS = Pattern.compile(", max\\.request\\.size = \"\\d+\""
+        + "|, (?:security\\.protocol|sasl\\.[a-z.]+|ssl\\.[a-z.]+) = \"(?:[^\"\\\\]|\\\\.)*\"");
+
+    /**
+     * The Kafka sink entries that carry a secret ({@code KafkaSecurity}): the SASL JAAS config holds the
+     * password, {@code ssl.keystore.key} the client key. Redacted like a JDBC password.
+     */
+    private static final Pattern KAFKA_SECRET_OPTIONS = Pattern.compile(
+        "((?:sasl\\.jaas\\.config|ssl\\.keystore\\.key) = )\"(?:[^\"\\\\]|\\\\.)*\"");
 
     /**
      * Debezium's {@code datatype.propagate.source.type} for Kafka CDC jobs: regular expressions over
@@ -229,10 +239,10 @@ public final class SeaTunnelJobConfigGenerator {
             .append("    }\n")
             .append("  }\n}\n\nsink {\n  Kafka {\n")
             .append("    topic = ").append(quote(KafkaTaskBridgeService.rawTopic(task))).append('\n')
-            .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
+            .append("    bootstrap.servers = ").append(quote(engineBootstrapServers(target, properties))).append('\n')
             .append("    format = \"COMPATIBLE_DEBEZIUM_JSON\"\n")
             .append("    semantics = \"AT_LEAST_ONCE\"\n")
-            .append(kafkaProducerConfig(properties))
+            .append(kafkaProducerConfig(properties, target))
             .append("  }\n}\n");
         return builder.toString();
     }
@@ -244,10 +254,10 @@ public final class SeaTunnelJobConfigGenerator {
         appendJdbcFullSource(builder, source, sourceTable, selected, properties);
         builder.append("  }\n}\n\nsink {\n  Kafka {\n")
             .append("    topic = ").append(quote(KafkaTaskBridgeService.rawTopic(task))).append('\n')
-            .append("    bootstrap.servers = ").append(quote(properties.resolveEngineEndpoint(target.getHost(), target.getPort()))).append('\n')
+            .append("    bootstrap.servers = ").append(quote(engineBootstrapServers(target, properties))).append('\n')
             .append("    format = \"JSON\"\n")
             .append("    semantics = \"AT_LEAST_ONCE\"\n")
-            .append(kafkaProducerConfig(properties))
+            .append(kafkaProducerConfig(properties, target))
             .append("  }\n}\n");
         return builder.toString();
     }
@@ -259,9 +269,20 @@ public final class SeaTunnelJobConfigGenerator {
      * checkpoints moved past the row); the patched connector fails the job instead (see
      * {@code deploy/local-stack/seatunnel/patch/README.md}).
      */
-    private static String kafkaProducerConfig(SeaTunnelProperties properties) {
-        return "    kafka.config = { acks = \"all\", enable.idempotence = \"true\", max.request.size = \""
-            + Math.max(1024 * 1024, properties.getKafkaMaxRecordBytes()) + "\" }\n";
+    private static String kafkaProducerConfig(SeaTunnelProperties properties, DataSource target) {
+        StringBuilder config = new StringBuilder("    kafka.config = { acks = \"all\", enable.idempotence = \"true\", max.request.size = \"")
+            .append(Math.max(1024 * 1024, properties.getKafkaMaxRecordBytes())).append('"');
+        // Authentication ({@code KafkaSecurity}): nothing for a PLAINTEXT cluster, so its config is what it always was.
+        KafkaSecurity.clientProperties(target).forEach((key, value) -> config.append(", ").append(key).append(" = ").append(quote(value)));
+        return config.append(" }\n").toString();
+    }
+
+    /**
+     * The target's brokers as the engine reaches them ({@code connection-endpoint-overrides} applied to each).
+     * A single broker gives the {@code host:port} it always did.
+     */
+    private static String engineBootstrapServers(DataSource target, SeaTunnelProperties properties) {
+        return String.join(",", KafkaAdminClients.brokers(target, properties::resolveEngineEndpoint));
     }
 
     private static String buildFullConfig(SyncTask task, DataSource source, DataSource target,
@@ -657,12 +678,14 @@ public final class SeaTunnelJobConfigGenerator {
     }
 
     private static String quote(String value) {
-        String safe = value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        // Line breaks only occur in PEM certificates (Kafka SSL); no other value carries one.
+        String safe = value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
         return '"' + safe + '"';
     }
 
     private static String redact(String config) {
-        return config.replaceAll("(?m)(password\\s*=\\s*)\\\"[^\\\"]*\\\"", "$1\"******\"");
+        String redacted = KAFKA_SECRET_OPTIONS.matcher(config).replaceAll("$1\"******\"");
+        return redacted.replaceAll("(?m)(password\\s*=\\s*)\\\"[^\\\"]*\\\"", "$1\"******\"");
     }
 
     private record IndexedColumn(short position, String name) {

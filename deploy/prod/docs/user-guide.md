@@ -50,10 +50,22 @@
 |---|---|
 | 名称 | 便于识别的名称，例如「GoldenDB-订单库」「Kafka-生产集群」 |
 | 类型 | MySQL（含 GoldenDB）、PostgreSQL、Kafka |
-| 主机地址、端口 | 源库或 broker 的地址。Kafka 填一个 broker 的地址作为引导地址 |
+| 主机地址、端口 | 源库的地址。Kafka 为「Broker 地址」：可填多个 broker，用逗号分隔，每个写成 主机 或 主机:端口，没写端口的使用「端口」字段 |
 | 数据库名称 | MySQL / PostgreSQL 的库名；单表任务默认从这个库选表。Kafka 不需要 |
-| 用户名、密码 | 连接账号。密码加密保存，编辑时留空表示不修改。Kafka 当前使用无认证连接，用户名可填任意值（如 kafka），密码留空 |
+| 用户名、密码 | 连接账号。密码加密保存，编辑时留空表示不修改。Kafka 只在 SASL 认证时需要（见下表） |
 | 服务器时区 | 仅源库需要：源库所在时区，默认 Asia/Shanghai。用于换算 TIMESTAMP 与增量起始时间 |
+
+Kafka 数据源的认证方式按 Kafka 管理员提供的信息填写：
+
+| 字段 | 说明 |
+|---|---|
+| 安全协议 | 无认证（PLAINTEXT）；SASL（SASL_PLAINTEXT）；SASL + SSL（SASL_SSL）；SSL（可双向认证）。与 broker 监听器的配置一致 |
+| SASL 机制 | SASL 时选择 PLAIN、SCRAM-SHA-256 或 SCRAM-SHA-512，并填写用户名和密码 |
+| CA 证书 | SSL 时填写签发 broker 证书的 CA（PEM 文本，以 -----BEGIN CERTIFICATE----- 开头）；broker 使用公共 CA 签发的证书时可留空 |
+| 客户端证书、客户端私钥 | broker 要求双向认证（客户端证书认证）时填写，PEM 文本；私钥须为未加密的 PKCS#8 格式（以 -----BEGIN PRIVATE KEY----- 开头），RSA / EC 格式可用 openssl pkcs8 -topk8 -nocrypt 转换。私钥加密保存，保存后不再显示，编辑时留空表示不修改 |
+| 校验 broker 主机名 | 默认校验 broker 证书与访问地址是否一致；证书中没有该地址（例如按 IP 访问）时才选「不校验」 |
+
+认证信息只用于连接，不影响已保存任务的同步进度：给集群开启认证或更换密码后，已暂停的任务照常恢复。
 
 ![新增数据源](images/datasource-form.jpg)
 

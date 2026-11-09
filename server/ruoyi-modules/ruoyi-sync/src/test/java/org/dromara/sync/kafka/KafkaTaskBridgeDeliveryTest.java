@@ -76,7 +76,7 @@ class KafkaTaskBridgeDeliveryTest {
     void aFailedEventHoldsTheRawTopicThereAndIsRetriedWithoutRepublishingWhatWentOut() {
         rawTopic(3, 0);
         AtomicInteger calls = new AtomicInteger();
-        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong())).thenAnswer(invocation -> {
+        when(producer.publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong())).thenAnswer(invocation -> {
             List<KafkaEventNormalizer.NormalizedEvent> events = invocation.getArgument(3);
             publishes.add(events.stream().map(event -> event.key().path("id").asLong()).toList());
             if (calls.incrementAndGet() == 1) {
@@ -102,7 +102,7 @@ class KafkaTaskBridgeDeliveryTest {
     void anUnreadableRawRecordStopsTheBridgeRightBeforeIt() {
         rawTopic(3, 0);
         values.set(1, "{not json");
-        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong())).thenAnswer(invocation -> {
+        when(producer.publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong())).thenAnswer(invocation -> {
             List<KafkaEventNormalizer.NormalizedEvent> events = invocation.getArgument(3);
             publishes.add(events.stream().map(event -> event.key().path("id").asLong()).toList());
             return KafkaEventProducer.PublishOutcome.success(List.of());
@@ -128,7 +128,7 @@ class KafkaTaskBridgeDeliveryTest {
         verify(stateStore, timeout(5000)).reportBlocked(eq(KafkaRawTopic.OWNER_TASK), eq(TASK_ID), argThat(reason ->
             KafkaTaskBridgeService.isRawTopicGap(reason) && reason.contains("offset 2") && reason.contains("offset 5")
                 && reason.contains("其间 3 条变更已被 Kafka 保留策略删除")), any(), isNull());
-        verify(producer, after(300).never()).publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong());
+        verify(producer, after(300).never()).publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong());
         assertEquals(List.of(), commits);
     }
 
@@ -182,7 +182,7 @@ class KafkaTaskBridgeDeliveryTest {
 
         verify(stateStore, timeout(5000)).reportBlocked(eq(KafkaRawTopic.OWNER_TASK), eq(TASK_ID), argThat(reason ->
             KafkaTaskBridgeService.isRawTopicGap(reason) && reason.contains("前 3 条记录已被保留策略删除")), any(), isNull());
-        verify(producer, after(300).never()).publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong());
+        verify(producer, after(300).never()).publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong());
     }
 
     @Test
@@ -210,7 +210,7 @@ class KafkaTaskBridgeDeliveryTest {
     }
 
     private void recordPublishes() {
-        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong())).thenAnswer(invocation -> {
+        when(producer.publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong())).thenAnswer(invocation -> {
             List<KafkaEventNormalizer.NormalizedEvent> events = invocation.getArgument(3);
             publishes.add(events.stream().map(event -> event.key().path("id").asLong()).toList());
             return KafkaEventProducer.PublishOutcome.success(List.of());
@@ -233,7 +233,7 @@ class KafkaTaskBridgeDeliveryTest {
             }
 
             @Override
-            long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+            long targetTopicMaxMessageBytes(KafkaConnection connection, String topic) {
                 return -1;
             }
 

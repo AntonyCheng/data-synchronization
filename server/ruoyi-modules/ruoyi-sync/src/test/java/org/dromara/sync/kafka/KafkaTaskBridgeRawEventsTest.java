@@ -137,7 +137,7 @@ class KafkaTaskBridgeRawEventsTest {
     /** Runs a real worker over {@code rawValues} and returns everything it handed the producer. */
     @SuppressWarnings("unchecked")
     private List<KafkaEventNormalizer.NormalizedEvent> bridgeAndCollect(List<String> rawValues, int expectedPublishes) {
-        when(producer.publishForTask(anyLong(), anyString(), anyString(), anyList(), any(), anyLong()))
+        when(producer.publishForTask(anyLong(), any(), anyString(), anyList(), any(), anyLong()))
             .thenReturn(KafkaEventProducer.PublishOutcome.success(List.of()));
         bridge = new KafkaTaskBridgeService(new KafkaEventNormalizer(mapper), producer, mapper, new KafkaBridgeProperties(),
             new SeaTunnelProperties(), mock(KafkaBridgeStateStore.class)) {
@@ -146,7 +146,7 @@ class KafkaTaskBridgeRawEventsTest {
             }
 
             @Override
-            long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+            long targetTopicMaxMessageBytes(KafkaConnection connection, String topic) {
                 return -1;
             }
 
@@ -159,7 +159,7 @@ class KafkaTaskBridgeRawEventsTest {
 
         ArgumentCaptor<List<KafkaEventNormalizer.NormalizedEvent>> published = ArgumentCaptor.forClass(List.class);
         verify(producer, timeout(5000).times(expectedPublishes)).publishForTask(
-            eq(TASK_ID), anyString(), eq("customer-events"), published.capture(), eq(KafkaOutputFormat.ENVELOPE), anyLong());
+            eq(TASK_ID), any(), eq("customer-events"), published.capture(), eq(KafkaOutputFormat.ENVELOPE), anyLong());
         return published.getAllValues().stream().flatMap(List::stream).toList();
     }
 

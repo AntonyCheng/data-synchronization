@@ -83,6 +83,64 @@ class KafkaTaskRuntimeConfigTest {
         assertTrue(config.config().contains("bootstrap.servers = \"kafka-in-engine:9092\""));
     }
 
+    /** A cluster without authentication: the engine producer config every existing Kafka task was fingerprinted with. */
+    @Test
+    void aPlaintextClusterKeepsTheProducerConfigItAlwaysHad() {
+        SeaTunnelJobConfigGenerator.GeneratedConfig config =
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), kafka(), new SeaTunnelProperties(), COLUMNS);
+        assertTrue(config.config().contains(
+            "    kafka.config = { acks = \"all\", enable.idempotence = \"true\", max.request.size = \"16777216\" }\n"), config.config());
+    }
+
+    /**
+     * SASL / SSL go into the engine's producer config on the same line, the secrets redacted from the
+     * API-facing copy and the whole security setup kept out of the fingerprint: turning authentication
+     * on for a cluster, or rotating its password, never strands a savepoint.
+     */
+    @Test
+    void securityReachesTheEngineProducerRedactedAndOutsideTheFingerprint() {
+        SeaTunnelProperties properties = new SeaTunnelProperties();
+        SeaTunnelJobConfigGenerator.GeneratedConfig plain =
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), kafka(), properties, COLUMNS);
+        DataSource secured = kafka();
+        secured.setKafkaSecurityProtocol("SASL_SSL");
+        secured.setKafkaSaslMechanism("SCRAM-SHA-256");
+        secured.setUsername("sync");
+        secured.setPassword("s3cr\"t");
+        secured.setKafkaSslCaCert("-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----");
+        secured.setKafkaSslVerifyHostname("0");
+
+        SeaTunnelJobConfigGenerator.GeneratedConfig secure =
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), secured, properties, COLUMNS);
+
+        String producerLine = secure.config().lines().filter(line -> line.contains("kafka.config")).findFirst().orElseThrow();
+        assertTrue(producerLine.endsWith(" }"), producerLine);
+        assertTrue(producerLine.contains(", security.protocol = \"SASL_SSL\", sasl.mechanism = \"SCRAM-SHA-256\""), producerLine);
+        assertTrue(producerLine.contains("ScramLoginModule required username=\\\"sync\\\" password=\\\"s3cr\\\\\\\"t\\\";\""), producerLine);
+        assertTrue(producerLine.contains("ssl.truststore.certificates = \"-----BEGIN CERTIFICATE-----\\nAAA\\n-----END CERTIFICATE-----\""), producerLine);
+        assertTrue(producerLine.contains("ssl.endpoint.identification.algorithm = \"\""), producerLine);
+
+        assertFalse(secure.redactedConfig().contains("s3cr"), secure.redactedConfig());
+        assertTrue(secure.redactedConfig().contains("sasl.jaas.config = \"******\""));
+        assertEquals(plain.fingerprint(), secure.fingerprint());
+        secured.setPassword("rotated");
+        assertEquals(plain.fingerprint(),
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), secured, properties, COLUMNS).fingerprint());
+    }
+
+    @Test
+    void everyBrokerOfAListIsMappedToTheEngineNetwork() {
+        SeaTunnelProperties properties = new SeaTunnelProperties();
+        properties.setConnectionEndpointOverrides(Map.of("k1:9092", "kafka-a:9092"));
+        DataSource cluster = kafka();
+        cluster.setHost("k1, k2:9093");
+
+        SeaTunnelJobConfigGenerator.GeneratedConfig config =
+            SeaTunnelJobConfigGenerator.generate(task("FULL_CDC"), mysql(), cluster, properties, COLUMNS);
+
+        assertTrue(config.config().contains("bootstrap.servers = \"kafka-a:9092,k2:9093\""), config.config());
+    }
+
     private static SyncTask task(String syncMode) {
         SyncTask task = new SyncTask();
         task.setTaskId(42L);

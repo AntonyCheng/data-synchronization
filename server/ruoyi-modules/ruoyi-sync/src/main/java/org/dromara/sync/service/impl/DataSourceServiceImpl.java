@@ -18,6 +18,7 @@ import org.dromara.sync.domain.vo.DataSourceCredentialMigrationResult;
 import org.dromara.sync.domain.vo.DataSourceOptionVo;
 import org.dromara.sync.domain.vo.DataSourceVo;
 import org.dromara.sync.kafka.KafkaAdminClients;
+import org.dromara.sync.kafka.KafkaSecurity;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.dromara.sync.mapper.SyncTaskGroupMapper;
 import org.dromara.sync.mapper.SyncTaskMapper;
@@ -97,6 +98,10 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (StringUtils.isBlank(entity.getPassword())) {
             entity.setPassword(current.getPassword());
         }
+        // Likewise a blank Kafka client key, while a client certificate is still configured.
+        if (StringUtils.isBlank(entity.getKafkaSslClientKey()) && StringUtils.isNotBlank(entity.getKafkaSslClientCert())) {
+            entity.setKafkaSslClientKey(current.getKafkaSslClientKey());
+        }
         // An omitted time zone keeps the stored one; an empty string clears it (compatibility mode).
         if (entity.getServerTimeZone() == null) {
             entity.setServerTimeZone(current.getServerTimeZone());
@@ -110,8 +115,9 @@ public class DataSourceServiceImpl implements IDataSourceService {
      * Endpoint / identity fields. A running SeaTunnel job keeps the connection it was submitted
      * with, so silently repointing the data source underneath it would leave the platform
      * describing a job that no longer exists. The server time zone is part of the submitted CDC
-     * config too. Name, remark, status and - deliberately - the password (credential rotation)
-     * may change at any time; the next start picks them up.
+     * config too, and so is a Kafka cluster's security setup (protocol, mechanism, certificates).
+     * Name, remark, status and - deliberately - the password and the Kafka client key (credential
+     * rotation) may change at any time; the next start picks them up.
      */
     static boolean connectionChanged(DataSource current, DataSource updated) {
         return !Objects.equals(current.getSourceType(), updated.getSourceType())
@@ -121,7 +127,12 @@ public class DataSourceServiceImpl implements IDataSourceService {
             || !Objects.equals(StringUtils.defaultIfBlank(current.getSchemaName(), ""), StringUtils.defaultIfBlank(updated.getSchemaName(), ""))
             || !Objects.equals(StringUtils.defaultIfBlank(current.getUsername(), ""), StringUtils.defaultIfBlank(updated.getUsername(), ""))
             || !Objects.equals(StringUtils.defaultIfBlank(current.getSslEnabled(), "0"), StringUtils.defaultIfBlank(updated.getSslEnabled(), "0"))
-            || !Objects.equals(SourceTimeZones.effective(current), SourceTimeZones.effective(updated));
+            || !Objects.equals(SourceTimeZones.effective(current), SourceTimeZones.effective(updated))
+            || !Objects.equals(KafkaSecurity.protocol(current), KafkaSecurity.protocol(updated))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getKafkaSaslMechanism(), ""), StringUtils.defaultIfBlank(updated.getKafkaSaslMechanism(), ""))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getKafkaSslCaCert(), ""), StringUtils.defaultIfBlank(updated.getKafkaSslCaCert(), ""))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getKafkaSslClientCert(), ""), StringUtils.defaultIfBlank(updated.getKafkaSslClientCert(), ""))
+            || !Objects.equals(StringUtils.defaultIfBlank(current.getKafkaSslVerifyHostname(), "1"), StringUtils.defaultIfBlank(updated.getKafkaSslVerifyHostname(), "1"));
     }
 
     private void ensureNotInUse(Long sourceId) {
@@ -129,7 +140,7 @@ public class DataSourceServiceImpl implements IDataSourceService {
         long groups = syncTaskGroupMapper.countActiveByDataSource(sourceId);
         if (tasks > 0 || groups > 0) {
             throw new ServiceException("数据源正被 " + tasks + " 个运行中的同步任务、" + groups
-                + " 个任务组使用，运行期间不能修改连接参数（类型/主机/端口/库名/schema/用户名/SSL/服务器时区）；请先停止或暂停这些任务，名称、备注和密码可直接修改");
+                + " 个任务组使用，运行期间不能修改连接参数（类型/主机/端口/库名/schema/用户名/SSL/服务器时区/Kafka 安全设置）；请先停止或暂停这些任务，名称、备注、密码和 Kafka 客户端私钥可直接修改");
         }
     }
 
@@ -233,6 +244,13 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (StringUtils.isNotBlank(request.getSslEnabled())) target.setSslEnabled(request.getSslEnabled());
         // Blank is a real value here (compatibility mode), so only an omitted zone keeps the stored one.
         if (request.getServerTimeZone() != null) target.setServerTimeZone(request.getServerTimeZone());
+        // Kafka security: certificates may be cleared (blank), a blank client key keeps the stored one.
+        if (StringUtils.isNotBlank(request.getKafkaSecurityProtocol())) target.setKafkaSecurityProtocol(request.getKafkaSecurityProtocol());
+        if (StringUtils.isNotBlank(request.getKafkaSaslMechanism())) target.setKafkaSaslMechanism(request.getKafkaSaslMechanism());
+        if (request.getKafkaSslCaCert() != null) target.setKafkaSslCaCert(request.getKafkaSslCaCert());
+        if (request.getKafkaSslClientCert() != null) target.setKafkaSslClientCert(request.getKafkaSslClientCert());
+        if (StringUtils.isNotBlank(request.getKafkaSslClientKey())) target.setKafkaSslClientKey(request.getKafkaSslClientKey());
+        if (request.getKafkaSslVerifyHostname() != null) target.setKafkaSslVerifyHostname(request.getKafkaSslVerifyHostname());
     }
 
     /** Package-private for tests. */
@@ -256,6 +274,16 @@ public class DataSourceServiceImpl implements IDataSourceService {
             if (entity.getDatabaseName() == null) entity.setDatabaseName("");
             if (entity.getUsername() == null) entity.setUsername("");
             if (entity.getPassword() == null) entity.setPassword("");
+            // Refuses a malformed broker list now rather than on the first client.
+            KafkaAdminClients.bootstrapServers(entity);
+            KafkaSecurity.normalize(entity);
+        } else {
+            entity.setKafkaSecurityProtocol(null);
+            entity.setKafkaSaslMechanism(null);
+            entity.setKafkaSslCaCert(null);
+            entity.setKafkaSslClientCert(null);
+            entity.setKafkaSslClientKey(null);
+            entity.setKafkaSslVerifyHostname(null);
         }
         if (StringUtils.isBlank(entity.getSslEnabled())) entity.setSslEnabled("0");
         if (StringUtils.isBlank(entity.getStatus())) entity.setStatus("0");

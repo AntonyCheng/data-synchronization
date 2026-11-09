@@ -38,6 +38,6 @@ class KafkaEventProducerMetricsTest {
         SyncTaskMapper mapper = mock(SyncTaskMapper.class);
         when(mapper.selectById(99L)).thenReturn(null);
         KafkaEventProducer producer = new KafkaEventProducer(mapper, new KafkaEventSerializer(JsonMapper.builder().build()), new SeaTunnelProperties());
-        assertThrows(ServiceException.class, () -> producer.publishForTask(99L, "localhost:9092", "topic", List.of(), KafkaOutputFormat.ENVELOPE, -1L));
+        assertThrows(ServiceException.class, () -> producer.publishForTask(99L, KafkaConnection.plaintext("localhost:9092"), "topic", List.of(), KafkaOutputFormat.ENVELOPE, -1L));
     }
 }

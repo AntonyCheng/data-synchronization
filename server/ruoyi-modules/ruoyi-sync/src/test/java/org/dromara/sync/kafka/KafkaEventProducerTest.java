@@ -36,7 +36,7 @@ class KafkaEventProducerTest {
     void anEventTheTopicWouldRefuseIsNotSentAndNeitherIsAnythingAfterIt() {
         KafkaEventProducer producer = producer(true);
 
-        KafkaEventProducer.PublishOutcome outcome = producer.publish("kafka:9092", "t",
+        KafkaEventProducer.PublishOutcome outcome = producer.publish(KafkaConnection.plaintext("kafka:9092"), "t",
             List.of(event(1, "a"), event(2, "x".repeat(2000)), event(3, "c")), KafkaOutputFormat.ENVELOPE, 1500);
 
         assertTrue(outcome.failed());
@@ -56,7 +56,7 @@ class KafkaEventProducerTest {
         assertEquals(2L * 1024 * 1024, producer.recordLimit(-1));
         assertEquals(2L * 1024 * 1024, producer.recordLimit(64L * 1024 * 1024));
         assertEquals(1000L, producer.recordLimit(1000));
-        KafkaEventProducer.PublishOutcome outcome = producer.publish("kafka:9092", "t",
+        KafkaEventProducer.PublishOutcome outcome = producer.publish(KafkaConnection.plaintext("kafka:9092"), "t",
             List.of(event(1, "x".repeat(3 * 1024 * 1024))), KafkaOutputFormat.ENVELOPE, -1);
         assertTrue(outcome.failure().contains("sync.engine.kafka-max-record-bytes"), outcome.failure());
         assertTrue(opened.getFirst().history().isEmpty());
@@ -66,7 +66,7 @@ class KafkaEventProducerTest {
     void aSendTheBrokerFailsEndsTheOutcomeThere() throws Exception {
         KafkaEventProducer producer = producer(false);
         CompletableFuture<KafkaEventProducer.PublishOutcome> outcome = CompletableFuture.supplyAsync(() -> producer.publish(
-            "kafka:9092", "t", List.of(event(1, "a"), event(2, "b"), event(3, "c")), KafkaOutputFormat.ENVELOPE, -1));
+            KafkaConnection.plaintext("kafka:9092"), "t", List.of(event(1, "a"), event(2, "b"), event(3, "c")), KafkaOutputFormat.ENVELOPE, -1));
         MockProducer<String, String> broker = awaitProducer();
         awaitSends(broker, 3);
 
@@ -85,21 +85,21 @@ class KafkaEventProducerTest {
     void aFatalErrorReplacesTheSharedProducer() throws Exception {
         KafkaEventProducer producer = producer(false);
         CompletableFuture<KafkaEventProducer.PublishOutcome> outcome = CompletableFuture.supplyAsync(() -> producer.publish(
-            "kafka:9092", "t", List.of(event(1, "a")), KafkaOutputFormat.ENVELOPE, -1));
+            KafkaConnection.plaintext("kafka:9092"), "t", List.of(event(1, "a")), KafkaOutputFormat.ENVELOPE, -1));
         MockProducer<String, String> broker = awaitProducer();
         awaitSends(broker, 1);
         assertTrue(broker.errorNext(new ClusterAuthorizationException("Cluster authorization failed.")));
         assertTrue(outcome.get(5, TimeUnit.SECONDS).failed());
         assertTrue(broker.closed(), "the broken producer is closed");
 
-        CompletableFuture.runAsync(() -> producer.publish("kafka:9092", "t", List.of(event(2, "b")), KafkaOutputFormat.ENVELOPE, -1));
+        CompletableFuture.runAsync(() -> producer.publish(KafkaConnection.plaintext("kafka:9092"), "t", List.of(event(2, "b")), KafkaOutputFormat.ENVELOPE, -1));
         for (int i = 0; i < 500 && opened.size() < 2; i++) Thread.sleep(10);
         assertEquals(2, opened.size(), "the next publish opens a new one");
     }
 
     @Test
     void anEmptyPublishSucceedsWithoutABroker() {
-        KafkaEventProducer.PublishOutcome outcome = producer(true).publish("kafka:9092", "t", List.of(), KafkaOutputFormat.ENVELOPE, -1);
+        KafkaEventProducer.PublishOutcome outcome = producer(true).publish(KafkaConnection.plaintext("kafka:9092"), "t", List.of(), KafkaOutputFormat.ENVELOPE, -1);
         assertFalse(outcome.failed());
         assertTrue(opened.isEmpty());
     }
@@ -111,7 +111,7 @@ class KafkaEventProducerTest {
     private KafkaEventProducer producer(boolean autoComplete, SeaTunnelProperties properties) {
         return new KafkaEventProducer(mock(SyncTaskMapper.class), new KafkaEventSerializer(mapper), properties) {
             @Override
-            Producer<String, String> openProducer(String bootstrapServers) {
+            Producer<String, String> openProducer(KafkaConnection connection) {
                 MockProducer<String, String> broker = new MockProducer<>(autoComplete, new StringSerializer(), new StringSerializer());
                 opened.add(broker);
                 return broker;

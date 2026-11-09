@@ -7,7 +7,7 @@
 | GET | `/data-source/list` | 分页查询数据源 |
 | GET | `/data-source/{id}` | 查询数据源详情（不返回密码） |
 | POST | `/data-source` | 新增数据源 |
-| PUT | `/data-source` | 修改数据源；密码为空时保留原值，`serverTimeZone` 省略时保留原值、传空串时清空 |
+| PUT | `/data-source` | 修改数据源；密码为空时保留原值，`serverTimeZone` 省略时保留原值、传空串时清空；`kafkaSslClientKey` 为空且仍有客户端证书时保留原私钥 |
 | DELETE | `/data-source/{id}` | 删除数据源 |
 | POST | `/data-source/{id}/test` | 测试 JDBC 连接；可带请求体覆盖连接字段（空密码保留原值）；MySQL 另返回 `timeZone` |
 | POST | `/data-source/test` | 测试尚未保存的数据源（新增表单）；请求体为完整数据源字段，权限同上 |
@@ -65,6 +65,22 @@
 整库组发现表时会检查同步键及目标表兼容性。无主键且没有全列非空唯一键的表会写入失败表项但不创建引擎作业；整库启动会跳过这些已隔离表，成功表继续运行，组级状态返回 `DEGRADED`。源端、目标端或 CDC 前置检查失败仍会阻断整个整库组启动。`PUT /group` 编辑整库组时，若源数据源、源库和目标数据源均未变化，则保留已有表项（`itemId`、目标 schema、指标历史不变），只补充新增表，并重新校验运行前就被拒的 `FAILED` 表项（通过则回到 `PENDING`）；任一端点变化则按新端点重建全部表项。源库不可达时保存被拒绝且不写入任何数据。详见 [multi-table.md](multi-table.md#整库任务组的保存先规划后落库)。
 
 MVP 请求约束：`sourceType=MYSQL` 只能作为源端，目标端支持 `POSTGRESQL`、`MYSQL`、`KAFKA`；单表与任务组的 `syncMode` 均为 `FULL`、`INCREMENTAL` 或 `FULL_CDC`（默认 `FULL_CDC`）；`ddlPolicy` 默认 `FAIL`。`INCREMENTAL` 从提交作业后的最新 binlog 位点开始，不补齐此前历史，目标端必须已有可信基线；关系型 `FULL` 不执行 CDC，完成后进入 `FINISHED`；Kafka 纯 `FULL` 使用有界 JDBC 快照事件。Kafka topic 可在创建向导中选择已有 topic 或主动创建新 topic，平台创建默认 1 分区/1 副本且不覆盖已有 topic。任务表单使用数据源配置的默认数据库，数据库/表探查用于创建前确认和元数据提示；整库任务由表项模型承载。连接测试返回 `success`、`message`、`latencyMs`，MySQL 数据源另返回 `timeZone`（结构见下文“源端服务器时区”）；任务校验返回 `source`、`target`、`cdcPrecheck`、`targetCompatibility` 和综合 `valid`。
+
+## Kafka 数据源的认证与 broker 列表
+
+Kafka 数据源的 `host` 可列出多个 broker（逗号分隔，每个为 `host` 或 `host:port`，无端口的取 `port`），平台与引擎都把它们全部作为 `bootstrap.servers`；`sync.engine.connection-endpoint-overrides` 逐个 broker 生效。单个主机生成的地址与以前逐字节相同。
+
+认证字段（`ds_data_source`，migration 026）：
+
+| 字段 | 取值 |
+|---|---|
+| `kafkaSecurityProtocol` | `PLAINTEXT`（或空）、`SASL_PLAINTEXT`、`SASL_SSL`、`SSL` |
+| `kafkaSaslMechanism` | SASL 时必填：`PLAIN`、`SCRAM-SHA-256`、`SCRAM-SHA-512`；凭证为数据源的 `username` / `password` |
+| `kafkaSslCaCert` | SSL 时可选：CA 证书 PEM；空为 JVM 默认信任库 |
+| `kafkaSslClientCert` / `kafkaSslClientKey` | SSL 双向认证时成对填写：证书链 PEM 与未加密 PKCS#8 私钥 PEM。私钥按密码同样的方式加密保存，任何查询接口都不返回 |
+| `kafkaSslVerifyHostname` | SSL 时 `1`（默认，校验 broker 主机名）或 `0` |
+
+保存与连接测试时校验完整性（SASL 缺机制或凭证、证书不是 PEM、证书与私钥不成对、私钥不是 PKCS#8 都会被拒绝），协议用不到的字段被清空。这些字段转成 Kafka 客户端属性（`security.protocol`、`sasl.mechanism`、`sasl.jaas.config`、`ssl.truststore.*`、`ssl.keystore.*`、`ssl.endpoint.identification.algorithm`），由 AdminClient、桥接 consumer / producer 与引擎 Kafka sink 的 `kafka.config` 共同使用。引擎配置预览中的 JAAS 配置与私钥显示为 `******`；认证属性不进配置指纹，开启认证或轮换凭证都不会让已暂停的任务需要重新初始化。安全协议、机制、证书与主机名校验属于连接参数，引用该数据源的任务运行中时不能修改；密码与客户端私钥可随时轮换，下次启动生效。
 
 ## 源端服务器时区
 

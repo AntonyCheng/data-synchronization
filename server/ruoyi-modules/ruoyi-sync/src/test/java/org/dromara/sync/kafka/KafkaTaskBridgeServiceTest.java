@@ -208,7 +208,7 @@ class KafkaTaskBridgeServiceTest {
             JsonMapper.builder().build(), properties, new SeaTunnelProperties(), stateStore) {
 
             @Override
-            long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+            long targetTopicMaxMessageBytes(KafkaConnection connection, String topic) {
                 return -1;
             }
 

@@ -39,6 +39,19 @@ public class DataSource extends BaseEntity {
      * see {@code SourceTimeZones}.
      */
     private String serverTimeZone;
+    /** Kafka only: SASL_PLAINTEXT, SASL_SSL or SSL; blank = PLAINTEXT. See {@code KafkaSecurity}. */
+    private String kafkaSecurityProtocol;
+    /** Kafka SASL only: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512; it authenticates with the username and password. */
+    private String kafkaSaslMechanism;
+    /** Kafka SSL only: the CA certificate(s) the brokers are checked against (PEM); blank = the JVM's default trust store. */
+    private String kafkaSslCaCert;
+    /** Kafka SSL only: the client certificate chain (PEM) for brokers that require client authentication. */
+    private String kafkaSslClientCert;
+    /** Kafka SSL only: the client certificate's private key (unencrypted PKCS#8 PEM). Stored encrypted like the password, never returned. */
+    @EncryptField(algorithm = AlgorithmType.AES)
+    private String kafkaSslClientKey;
+    /** Kafka SSL only: "0" turns the broker host-name check off; "1" (default) keeps it. */
+    private String kafkaSslVerifyHostname;
     private String status;
     private String remark;
 }

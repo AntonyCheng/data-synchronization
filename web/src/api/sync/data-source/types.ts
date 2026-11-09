@@ -16,9 +16,23 @@ export interface DataSourceForm {
    * `Asia/Shanghai`). Blank = compatibility mode (Asia/Shanghai). Omitted on edit = keep.
    */
   serverTimeZone?: string;
+  /** Kafka only: how the platform authenticates to the brokers. Blank = PLAINTEXT. */
+  kafkaSecurityProtocol?: KafkaSecurityProtocol;
+  /** Kafka SASL only; it authenticates with `username` / `password`. */
+  kafkaSaslMechanism?: 'PLAIN' | 'SCRAM-SHA-256' | 'SCRAM-SHA-512';
+  /** Kafka SSL only: CA certificate(s) the brokers are checked against, PEM. Blank = the JVM's default trust store. */
+  kafkaSslCaCert?: string;
+  /** Kafka SSL only: client certificate chain (PEM) when the brokers require client authentication. */
+  kafkaSslClientCert?: string;
+  /** Kafka SSL only, write-only: the client key (unencrypted PKCS#8 PEM). Never returned; blank on edit keeps the stored one. */
+  kafkaSslClientKey?: string;
+  /** Kafka SSL only: '0' turns the broker host-name check off. */
+  kafkaSslVerifyHostname?: '0' | '1';
   status?: string;
   remark?: string;
 }
+
+export type KafkaSecurityProtocol = 'PLAINTEXT' | 'SASL_PLAINTEXT' | 'SASL_SSL' | 'SSL';
 
 export interface DataSourceQuery extends PageQuery {
   sourceName?: string;
@@ -26,7 +40,7 @@ export interface DataSourceQuery extends PageQuery {
   status?: string;
 }
 
-export interface DataSourceVO extends Omit<DataSourceForm, 'password'> {
+export interface DataSourceVO extends Omit<DataSourceForm, 'password' | 'kafkaSslClientKey'> {
   sourceId: string | number;
   createTime?: string;
   updateTime?: string;

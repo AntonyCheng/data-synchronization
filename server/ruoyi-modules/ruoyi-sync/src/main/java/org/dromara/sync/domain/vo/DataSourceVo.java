@@ -29,6 +29,12 @@ public class DataSourceVo implements Serializable {
     private String sslEnabled;
     /** MySQL only; blank = compatibility mode (Asia/Shanghai). */
     private String serverTimeZone;
+    /** Kafka only; blank = PLAINTEXT. The client private key is never returned. */
+    private String kafkaSecurityProtocol;
+    private String kafkaSaslMechanism;
+    private String kafkaSslCaCert;
+    private String kafkaSslClientCert;
+    private String kafkaSslVerifyHostname;
     private String status;
     private String remark;
     private LocalDateTime createTime;

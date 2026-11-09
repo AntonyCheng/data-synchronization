@@ -97,6 +97,64 @@ class DataSourceServiceImplTest {
         assertThrows(ServiceException.class, () -> DataSourceServiceImpl.normalizeAndValidate(mysql, true), "a relational source still needs its database");
     }
 
+    /** A Kafka cluster's security setup is a connection parameter; its password and client key are credentials. */
+    @Test
+    void kafkaSecurityCountsAsAConnectionChangeButNotItsCredentials() {
+        DataSource current = kafkaCluster();
+        DataSource rotated = kafkaCluster();
+        rotated.setPassword("rotated");
+        rotated.setKafkaSslClientKey("-----BEGIN PRIVATE KEY-----\nother\n-----END PRIVATE KEY-----");
+        assertFalse(DataSourceServiceImpl.connectionChanged(current, rotated));
+
+        DataSource plaintext = kafkaCluster();
+        plaintext.setKafkaSecurityProtocol(null);
+        assertTrue(DataSourceServiceImpl.connectionChanged(current, plaintext));
+        DataSource scram = kafkaCluster();
+        scram.setKafkaSaslMechanism("SCRAM-SHA-512");
+        assertTrue(DataSourceServiceImpl.connectionChanged(current, scram));
+        DataSource otherCa = kafkaCluster();
+        otherCa.setKafkaSslCaCert("-----BEGIN CERTIFICATE-----\nother\n-----END CERTIFICATE-----");
+        assertTrue(DataSourceServiceImpl.connectionChanged(current, otherCa));
+        DataSource noHostCheck = kafkaCluster();
+        noHostCheck.setKafkaSslVerifyHostname("0");
+        assertTrue(DataSourceServiceImpl.connectionChanged(current, noHostCheck));
+    }
+
+    /** Saving validates the broker list and the security setup; a relational source keeps no Kafka fields. */
+    @Test
+    void kafkaFieldsAreValidatedForKafkaAndDroppedForOtherTypes() {
+        DataSource cluster = kafkaCluster();
+        DataSourceServiceImpl.normalizeAndValidate(cluster, true);
+        assertEquals("SASL_SSL", cluster.getKafkaSecurityProtocol());
+
+        DataSource badBroker = kafkaCluster();
+        badBroker.setHost("k1:abc");
+        assertThrows(ServiceException.class, () -> DataSourceServiceImpl.normalizeAndValidate(badBroker, true));
+
+        DataSource mysql = dataSource();
+        mysql.setKafkaSecurityProtocol("SASL_SSL");
+        mysql.setKafkaSslCaCert("-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----");
+        DataSourceServiceImpl.normalizeAndValidate(mysql, true);
+        assertNull(mysql.getKafkaSecurityProtocol());
+        assertNull(mysql.getKafkaSslCaCert());
+    }
+
+    private static DataSource kafkaCluster() {
+        DataSource cluster = new DataSource();
+        cluster.setSourceId(2L);
+        cluster.setSourceName("kafka");
+        cluster.setSourceType("KAFKA");
+        cluster.setHost("k1, k2:9093");
+        cluster.setPort(9092);
+        cluster.setUsername("sync");
+        cluster.setPassword("secret");
+        cluster.setKafkaSecurityProtocol("SASL_SSL");
+        cluster.setKafkaSaslMechanism("SCRAM-SHA-256");
+        cluster.setKafkaSslCaCert("-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----");
+        cluster.setKafkaSslVerifyHostname("1");
+        return cluster;
+    }
+
     private static DataSource dataSource() {
         DataSource dataSource = new DataSource();
         dataSource.setSourceId(1L);

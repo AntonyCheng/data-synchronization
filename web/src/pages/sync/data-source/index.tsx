@@ -6,6 +6,7 @@ import {
   ProFormDependency,
   ProFormSelect,
   ProFormText,
+  ProFormTextArea,
   ProTable,
   type ActionType,
   type ProColumns
@@ -13,7 +14,13 @@ import {
 import { useBoolean } from 'ahooks';
 import { Alert, AutoComplete, Button, Form, message, Modal, Popconfirm, Tag } from 'antd';
 import { useRef, useState } from 'react';
-import type { ConnectionTestResult, DataSourceForm, DataSourceQuery, DataSourceVO } from '@/api/sync/data-source/types';
+import type {
+  ConnectionTestResult,
+  DataSourceForm,
+  DataSourceQuery,
+  DataSourceVO,
+  KafkaSecurityProtocol
+} from '@/api/sync/data-source/types';
 import {
   addDataSource,
   deleteDataSource,
@@ -31,7 +38,26 @@ import { useUserStore } from '@/stores/userStore';
 import { hasPermi } from '@/utils/permission';
 import { toPageQuery, toTableData } from '@/utils/ruoyi';
 
-const defaultForm: DataSourceForm = { sourceType: 'MYSQL', port: 3306, sslEnabled: '0', status: '0' };
+const defaultForm: DataSourceForm = {
+  sourceType: 'MYSQL',
+  port: 3306,
+  sslEnabled: '0',
+  status: '0',
+  kafkaSecurityProtocol: 'PLAINTEXT',
+  kafkaSslVerifyHostname: '1'
+};
+
+const DEFAULT_PORTS = { MYSQL: 3306, POSTGRESQL: 5432, KAFKA: 9092 };
+
+const KAFKA_PROTOCOLS: { label: string; value: KafkaSecurityProtocol }[] = [
+  { label: '无认证（PLAINTEXT）', value: 'PLAINTEXT' },
+  { label: 'SASL（SASL_PLAINTEXT）', value: 'SASL_PLAINTEXT' },
+  { label: 'SASL + SSL（SASL_SSL）', value: 'SASL_SSL' },
+  { label: 'SSL（SSL，可双向认证）', value: 'SSL' }
+];
+const usesSasl = (protocol?: string) => protocol === 'SASL_PLAINTEXT' || protocol === 'SASL_SSL';
+const usesSsl = (protocol?: string) => protocol === 'SSL' || protocol === 'SASL_SSL';
+const PEM_TEXTAREA = { autoSize: { minRows: 3, maxRows: 8 }, style: { fontFamily: 'monospace', fontSize: 12 } };
 
 /** Blank server time zone: what the engine is told for a MySQL source (the pre-configurable value). */
 const COMPATIBLE_TIME_ZONE = 'Asia/Shanghai';
@@ -104,7 +130,13 @@ export default function SyncDataSourcePage() {
   const openEdit = async (row: DataSourceVO) => {
     const res = await getDataSource(row.sourceId);
     form.resetFields();
-    form.setFieldsValue({ ...res.data, password: undefined });
+    form.setFieldsValue({
+      ...res.data,
+      password: undefined,
+      kafkaSslClientKey: undefined,
+      kafkaSecurityProtocol: res.data.kafkaSecurityProtocol || 'PLAINTEXT',
+      kafkaSslVerifyHostname: res.data.kafkaSslVerifyHostname || '1'
+    });
     setFormTest(undefined);
     setModalTitle('修改数据源');
     openModal();
@@ -129,7 +161,15 @@ export default function SyncDataSourcePage() {
   /** Tests what is in the form (a blank password on edit keeps the stored one) and reads the source's time zone. */
   const testForm = () =>
     withFormTesting(async () => {
-      await form.validateFields(['sourceType', 'host', 'port', 'databaseName', 'username', 'serverTimeZone']);
+      await form.validateFields([
+        'sourceType',
+        'host',
+        'port',
+        'databaseName',
+        'username',
+        'serverTimeZone',
+        'kafkaSaslMechanism'
+      ]);
       const values = toPayload(form.getFieldsValue(true) as DataSourceForm);
       const result = values.sourceId
         ? await testDataSource(values.sourceId, values)
@@ -179,6 +219,17 @@ export default function SyncDataSourcePage() {
     { title: '端口', dataIndex: 'port', width: 90, search: false },
     { title: '数据库', dataIndex: 'databaseName' },
     { title: '用户名', dataIndex: 'username', search: false },
+    {
+      title: '认证',
+      dataIndex: 'kafkaSecurityProtocol',
+      width: 170,
+      search: false,
+      render: (_, row) => {
+        if (row.sourceType !== 'KAFKA') return '-';
+        const protocol = row.kafkaSecurityProtocol || 'PLAINTEXT';
+        return usesSasl(protocol) ? `${protocol} / ${row.kafkaSaslMechanism ?? ''}` : protocol;
+      }
+    },
     {
       title: '服务器时区',
       dataIndex: 'serverTimeZone',
@@ -261,8 +312,26 @@ export default function SyncDataSourcePage() {
         modalProps={{ destroyOnHidden: true, onCancel: closeModal }}
         onOpenChange={open => !open && closeModal()}
         onValuesChange={changed => {
+          // A port still at some type's default follows the type (Kafka 9092, not MySQL's 3306).
+          if (changed.sourceType && Object.values(DEFAULT_PORTS).includes(form.getFieldValue('port'))) {
+            form.setFieldValue('port', DEFAULT_PORTS[changed.sourceType as keyof typeof DEFAULT_PORTS]);
+          }
           // A test result describes the endpoint it ran against; drop it once that changes.
-          const endpointFields = ['sourceType', 'host', 'port', 'databaseName', 'username', 'password', 'sslEnabled'];
+          const endpointFields = [
+            'sourceType',
+            'host',
+            'port',
+            'databaseName',
+            'username',
+            'password',
+            'sslEnabled',
+            'kafkaSecurityProtocol',
+            'kafkaSaslMechanism',
+            'kafkaSslCaCert',
+            'kafkaSslClientCert',
+            'kafkaSslClientKey',
+            'kafkaSslVerifyHostname'
+          ];
           if (Object.keys(changed).some(key => endpointFields.includes(key))) setFormTest(undefined);
         }}
         onFinish={submitForm}
@@ -279,7 +348,21 @@ export default function SyncDataSourcePage() {
           ]}
           rules={[{ required: true, message: '请选择数据源类型' }]}
         />
-        <ProFormText name="host" label="主机地址" rules={[{ required: true, message: '请输入主机地址' }]} />
+        <ProFormDependency name={['sourceType']}>
+          {({ sourceType }) =>
+            sourceType === 'KAFKA' ? (
+              <ProFormText
+                name="host"
+                label="Broker 地址"
+                placeholder="kafka-1.example.com, kafka-2.example.com:9093"
+                extra="多个 broker 用逗号分隔，可写成 主机:端口；没写端口的使用下面的端口"
+                rules={[{ required: true, message: '请输入 broker 地址' }]}
+              />
+            ) : (
+              <ProFormText name="host" label="主机地址" rules={[{ required: true, message: '请输入主机地址' }]} />
+            )
+          }
+        </ProFormDependency>
         <ProFormDigit
           name="port"
           label="端口"
@@ -287,34 +370,123 @@ export default function SyncDataSourcePage() {
           max={65535}
           rules={[{ required: true, message: '请输入端口' }]}
         />
-        <ProFormDependency name={['sourceType']}>
-          {({ sourceType }) => (
-            <ProFormText
-              name="databaseName"
-              label={sourceType === 'KAFKA' ? '数据库名称（Kafka 不需要）' : '数据库名称'}
-              rules={sourceType === 'KAFKA' ? [] : [{ required: true, message: '请输入数据库名称' }]}
-            />
-          )}
+        <ProFormDependency name={['sourceType', 'kafkaSecurityProtocol', 'sourceId']}>
+          {({ sourceType, kafkaSecurityProtocol, sourceId }) => {
+            if (sourceType !== 'KAFKA') {
+              return (
+                <>
+                  <ProFormText
+                    name="databaseName"
+                    label="数据库名称"
+                    rules={[{ required: true, message: '请输入数据库名称' }]}
+                  />
+                  <ProFormText name="schemaName" label="Schema" />
+                  <ProFormText name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]} />
+                  <ProFormText.Password
+                    name="password"
+                    label="密码"
+                    placeholder={sourceId ? '留空表示保持原密码' : '请输入密码'}
+                  />
+                  <ProFormSelect
+                    name="sslEnabled"
+                    label="SSL"
+                    options={[
+                      { label: '关闭', value: '0' },
+                      { label: '开启', value: '1' }
+                    ]}
+                  />
+                </>
+              );
+            }
+            const sasl = usesSasl(kafkaSecurityProtocol);
+            const ssl = usesSsl(kafkaSecurityProtocol);
+            return (
+              <>
+                <ProFormSelect
+                  name="kafkaSecurityProtocol"
+                  label="安全协议"
+                  options={KAFKA_PROTOCOLS}
+                  allowClear={false}
+                  extra="与 Kafka 管理员确认：broker 监听器要求的认证方式"
+                />
+                {sasl && (
+                  <>
+                    <ProFormSelect
+                      name="kafkaSaslMechanism"
+                      label="SASL 机制"
+                      options={['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512'].map(value => ({ label: value, value }))}
+                      rules={[{ required: true, message: '请选择 SASL 机制' }]}
+                    />
+                    <ProFormText
+                      name="username"
+                      label="用户名"
+                      rules={[{ required: true, message: '请输入 SASL 用户名' }]}
+                    />
+                    <ProFormText.Password
+                      name="password"
+                      label="密码"
+                      placeholder={sourceId ? '留空表示保持原密码' : '请输入 SASL 密码'}
+                      rules={sourceId ? [] : [{ required: true, message: '请输入 SASL 密码' }]}
+                    />
+                  </>
+                )}
+                {ssl && (
+                  <>
+                    <ProFormTextArea
+                      name="kafkaSslCaCert"
+                      label="CA 证书（PEM）"
+                      placeholder="-----BEGIN CERTIFICATE-----"
+                      extra="签发 broker 证书的 CA；留空则只信任 JVM 内置的公共 CA"
+                      fieldProps={PEM_TEXTAREA}
+                    />
+                    <ProFormTextArea
+                      name="kafkaSslClientCert"
+                      label="客户端证书（PEM，broker 要求双向认证时填写）"
+                      placeholder="-----BEGIN CERTIFICATE-----"
+                      fieldProps={PEM_TEXTAREA}
+                    />
+                    <ProFormTextArea
+                      name="kafkaSslClientKey"
+                      label="客户端私钥（未加密的 PKCS#8 PEM，与客户端证书一起填写）"
+                      placeholder={sourceId ? '留空表示保持原私钥' : '-----BEGIN PRIVATE KEY-----'}
+                      extra="加密保存，不会再显示；RSA/EC 格式可用 openssl pkcs8 -topk8 -nocrypt 转换"
+                      fieldProps={PEM_TEXTAREA}
+                    />
+                    <ProFormSelect
+                      name="kafkaSslVerifyHostname"
+                      label="校验 broker 主机名"
+                      allowClear={false}
+                      options={[
+                        { label: '校验（推荐）', value: '1' },
+                        { label: '不校验（证书与访问地址不一致时）', value: '0' }
+                      ]}
+                    />
+                  </>
+                )}
+                {canTest && (
+                  <Form.Item>
+                    <Button
+                      icon={<SafetyCertificateOutlined />}
+                      loading={formTesting}
+                      onClick={() => void testForm().catch(() => undefined)}
+                    >
+                      测试连接
+                    </Button>
+                  </Form.Item>
+                )}
+                {formTest && (
+                  <Alert
+                    type={formTest.success ? 'success' : 'error'}
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    title={formTest.success ? `连接成功（${formTest.latencyMs} ms）` : '连接失败'}
+                    description={formTest.success ? undefined : formTest.message}
+                  />
+                )}
+              </>
+            );
+          }}
         </ProFormDependency>
-        <ProFormText name="schemaName" label="Schema" />
-        <ProFormText name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]} />
-        <ProFormDependency name={['sourceId']}>
-          {({ sourceId }) => (
-            <ProFormText.Password
-              name="password"
-              label="密码"
-              placeholder={sourceId ? '留空表示保持原密码' : '请输入密码'}
-            />
-          )}
-        </ProFormDependency>
-        <ProFormSelect
-          name="sslEnabled"
-          label="SSL"
-          options={[
-            { label: '关闭', value: '0' },
-            { label: '开启', value: '1' }
-          ]}
-        />
         <ProFormDependency name={['sourceType', 'serverTimeZone']}>
           {({ sourceType, serverTimeZone }) => {
             if (sourceType !== 'MYSQL') return null;

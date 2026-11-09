@@ -220,7 +220,7 @@ public class KafkaTaskBridgeService {
             workers.compute(ownerId, (taskId, existing) -> {
                 if (existing != null && existing.isRunning()) return existing;
                 if (existing != null) existing.close();
-                Worker worker = new Worker(taskId, ownerType, target.getSourceId(), KafkaAdminClients.bootstrapServers(target),
+                Worker worker = new Worker(taskId, ownerType, target.getSourceId(), KafkaConnection.of(target),
                     rawTopic(task), task.getTargetTable(), task.getSourceTable(), sourceDatabase, sourceZone, keyFields,
                     sourceColumns, persistTaskMetrics, outputFormat);
                 worker.future = executor.submit(worker);
@@ -372,9 +372,8 @@ public class KafkaTaskBridgeService {
      * registry are adopted the next time their owner's bridge starts. Package-private for tests.
      */
     void ensureTopics(SyncTask task, DataSource target, String ownerType) {
-        String bootstrapServers = KafkaAdminClients.bootstrapServers(target);
         String rawTopic = rawTopic(task);
-        try (AdminClient admin = openAdmin(bootstrapServers)) {
+        try (AdminClient admin = openAdmin(KafkaConnection.of(target))) {
             Set<String> knownTopics = admin.listTopics().names().get(10, TimeUnit.SECONDS);
             if (!knownTopics.contains(task.getTargetTable())) {
                 throw new ServiceException("Kafka 目标 topic 不存在或当前凭证无查看权限：" + task.getTargetTable());
@@ -483,9 +482,9 @@ public class KafkaTaskBridgeService {
     }
 
     /** The output topic's {@code max.message.bytes}, or -1 when it cannot be read. Package-private for tests. */
-    long targetTopicMaxMessageBytes(String bootstrapServers, String topic) {
+    long targetTopicMaxMessageBytes(KafkaConnection connection, String topic) {
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
-        try (AdminClient admin = openAdmin(bootstrapServers)) {
+        try (AdminClient admin = openAdmin(connection)) {
             Config config = admin.describeConfigs(List.of(resource)).all().get(10, TimeUnit.SECONDS).get(resource);
             ConfigEntry entry = config == null ? null : config.get(TopicConfig.MAX_MESSAGE_BYTES_CONFIG);
             return entry == null || StringUtils.isBlank(entry.value()) ? -1 : Long.parseLong(entry.value().trim());
@@ -512,8 +511,8 @@ public class KafkaTaskBridgeService {
     }
 
     /** Package-private for tests. */
-    AdminClient openAdmin(String bootstrapServers) {
-        return AdminClient.create(KafkaAdminClients.adminProperties(bootstrapServers));
+    AdminClient openAdmin(KafkaConnection connection) {
+        return AdminClient.create(KafkaAdminClients.adminProperties(connection));
     }
 
     /** The consumer a worker reads its raw topic with; package-private for tests. */
@@ -537,7 +536,7 @@ public class KafkaTaskBridgeService {
         private final Long taskId;
         private final String ownerType;
         private final Long targetSourceId;
-        private final String bootstrapServers;
+        private final KafkaConnection connection;
         private final String rawTopic;
         private final TopicPartition rawPartition;
         private final String targetTopic;
@@ -570,7 +569,7 @@ public class KafkaTaskBridgeService {
         /** Something was committed in the current consumer session: the retry wait starts over. */
         private boolean progressed;
 
-        private Worker(Long taskId, String ownerType, Long targetSourceId, String bootstrapServers, String rawTopic,
+        private Worker(Long taskId, String ownerType, Long targetSourceId, KafkaConnection connection, String rawTopic,
                        String targetTopic, String sourceTable,
                        String sourceDatabase,
                        ZoneId sourceZone,
@@ -581,7 +580,7 @@ public class KafkaTaskBridgeService {
             this.taskId = taskId;
             this.ownerType = ownerType;
             this.targetSourceId = targetSourceId;
-            this.bootstrapServers = bootstrapServers;
+            this.connection = connection;
             this.rawTopic = rawTopic;
             this.rawPartition = new TopicPartition(rawTopic, 0);
             this.targetTopic = targetTopic;
@@ -629,9 +628,8 @@ public class KafkaTaskBridgeService {
 
         /** One consumer session: null once the worker is closed, else why publishing stopped. */
         private String consume() {
-            long topicLimit = targetTopicMaxMessageBytes(bootstrapServers, targetTopic);
-            Properties config = new Properties();
-            config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+            long topicLimit = targetTopicMaxMessageBytes(connection, targetTopic);
+            Properties config = connection.clientProperties();
             config.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup(taskId));
             config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
             // Never a silent jump: without a valid committed offset the worker positions itself (position()).
@@ -802,8 +800,8 @@ public class KafkaTaskBridgeService {
             }
             List<KafkaEventNormalizer.NormalizedEvent> events = normalized.stream().map(KafkaEventNormalizer.Indexed::event).toList();
             KafkaEventProducer.PublishOutcome outcome = persistTaskMetrics
-                ? producer.publishForTask(taskId, bootstrapServers, targetTopic, events, outputFormat, topicLimit)
-                : producer.publish(bootstrapServers, targetTopic, events, outputFormat, topicLimit);
+                ? producer.publishForTask(taskId, connection, targetTopic, events, outputFormat, topicLimit)
+                : producer.publish(connection, targetTopic, events, outputFormat, topicLimit);
             if (!outcome.failed()) return null;
             Entry failedAt = entries.get(normalized.get(outcome.failedIndex()).input());
             commit(opened, failedAt.offset());

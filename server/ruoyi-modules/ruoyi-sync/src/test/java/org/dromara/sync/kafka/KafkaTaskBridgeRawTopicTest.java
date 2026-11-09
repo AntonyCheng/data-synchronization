@@ -150,7 +150,7 @@ class KafkaTaskBridgeRawTopicTest {
             new KafkaBridgeStateStore(rawTopicMapper, mock(SyncTaskMapper.class), mock(SyncTaskGroupItemMapper.class))) {
 
             @Override
-            AdminClient openAdmin(String bootstrapServers) {
+            AdminClient openAdmin(KafkaConnection connection) {
                 return admin;
             }
 
