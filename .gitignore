@@ -40,7 +40,7 @@ server/logs/
 platform/runtime/
 /.dev-runtime/
 
-# Local engine stack data and offline package build output
+# Local engine stack data and production package build output
 deploy/local-stack/runtime/
 deploy/release/
 

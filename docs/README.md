@@ -51,6 +51,6 @@
 
 ## 相关资源
 
-- 本地引擎栈（SeaTunnel 镜像构建、Compose）、离线交付模板：仓库根目录 `deploy/`。
+- 本地引擎栈（SeaTunnel 镜像构建、Compose）、生产部署包：仓库根目录 `deploy/`。
 - 平台开发阶段的元数据库 MySQL 和 Redis：`platform/`。
 - 启动方式见仓库根 `CLAUDE.md`：Windows 上用 `dev.ps1`，从 Linux 开发机用 `win.sh`。

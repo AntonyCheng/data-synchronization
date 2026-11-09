@@ -166,5 +166,5 @@ REDIS_PASSWORD=ruoyi123
 - 元数据库 schema：`ry_vue.sql` + `ry_sync.sql` + 全部 `ry_sync_migration_*.sql`
 - 编排脚本：`dev.ps1`、`server/script/bin/*.ps1`、`deploy/migrate-platform-schema.ps1`、`deploy/local-stack/seatunnel/fetch-vendor.ps1`
 - 引擎栈 compose、SeaTunnel `Dockerfile` / `entrypoint.sh` / `config/seatunnel.yaml` / `vendor/checksums.sha1` / `patch/`（GoldenDB 与 Kafka 连接器补丁源码 + 自检）、源/目标库 init SQL
-- 离线交付模板：`deploy/offline/`、`deploy/build-offline-package.ps1`
+- 生产部署包：`deploy/prod/`、`deploy/build-prod-package.ps1`
 - Redis 配置：`server/script/docker/redis/conf/redis.conf`

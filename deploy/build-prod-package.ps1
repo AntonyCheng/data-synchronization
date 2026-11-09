@@ -25,7 +25,7 @@ x86_64 host with Docker needs, with no registry access (see deploy\prod\README.m
 param(
     [string]$Version = '1.0.0',
     [string]$WebDir = 'web',
-    [string]$BackendRuntimeImage = 'data-sync-mvp/backend:latest',
+    [string]$BackendRuntimeImage = 'data-sync/backend-base:liberica-21.0.12',
     [string]$EngineSourceImage = 'data-sync-poc/seatunnel:2.3.13-before-kafka-patch',
     [string]$CaddyImage = 'caddy:2.8.4-alpine',
     [string]$MysqlImage = 'mysql:8.0',

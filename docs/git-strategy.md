@@ -8,7 +8,7 @@
 
 - `server/` 和 `web/` 的源码、配置模板、数据库脚本、锁文件及项目级编码规范。
 - `platform/` 的 Compose、初始化脚本、`.env.example` 和说明文档。
-- `deploy/` 的本地引擎栈 Compose、SeaTunnel 镜像构建文件、元数据库迁移脚本和离线交付模板。
+- `deploy/` 的本地引擎栈 Compose、SeaTunnel 镜像构建文件、元数据库迁移脚本和生产部署包（`deploy/prod/`）。
 - `docs/` 的架构和设计参考文档。
 - 根目录 `.gitignore`、`dev.ps1`、`win.sh` 以及项目级 README、CI 和开发脚本。
 
@@ -16,9 +16,9 @@
 
 - `server/**/target/`、`web/node_modules/`、`web/dist/`、Umi 缓存等构建产物。
 - `platform/runtime/`、`deploy/local-stack/runtime/` 中的 MySQL/Redis/SeaTunnel 数据卷、checkpoint、binlog 和证书；仓库根 `.dev-runtime/` 中的开发态日志、socket 目录和 `dev-state.json`。
-- `deploy/release/` 下由 `build-offline-package.ps1` 生成的离线交付产物（fat jar、镜像 tar、数据库快照）。
+- `deploy/release/` 下由 `build-prod-package.ps1` 生成的生产部署包（目录、镜像、安装包 tar）。
 - `server/logs/` 和其他运行日志。当前日志中包含 JWT 令牌，不能进入版本库。
-- `platform/.env`、`deploy/offline/.env`、`web/.env.development`、`web/.env.production` 等本地环境文件。它们包含密码、客户端配置或 RSA 私钥，只提交对应的 `.env.example` 模板（前端模板为 `web/.env.example`）。
+- `platform/.env`、`web/.env.development`、`web/.env.production` 等本地环境文件。它们包含密码、客户端配置或 RSA 私钥，只提交对应的 `.env.example` 模板（前端模板为 `web/.env.example`）。
 - 上游脚手架配置中的默认 RSA 私钥和本地密码不能原样进入公共首提交。提交 `server/ruoyi-admin/src/main/resources/application.yml` 前，必须把密钥改为本地环境变量/未跟踪配置，并验证后端仍能启动。
 - IDE 本地状态和机器相关配置；上游提供的 `.claude/`、`.codex/` 编码规范保留，`.run/` 和 `.gitee/` 等 IDE/托管平台专用目录排除。
 

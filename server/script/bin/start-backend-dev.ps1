@@ -4,7 +4,7 @@ Starts the RuoYi backend locally as a packaged fat jar (production-like path).
 
 .DESCRIPTION
 Builds ruoyi-admin.jar from the current reactor sources and runs it. This is the
-release / offline-package verification path and is intentionally close to how the
+release verification path and is intentionally close to how the
 backend runs in delivery.
 
 For the fast day-to-day development loop use run-backend-dev.ps1 (mvn spring-boot:run,

@@ -20,7 +20,7 @@ scheduling, and the SeaTunnel REST adapter.
 | `server/` | RuoYi-Vue-Plus 6.0.0 backend (Spring Boot 4.1, Java 21, Maven multi-module). Upstream scaffold — **only `ruoyi-modules/ruoyi-sync` is this project's code.** |
 | `web/` | plus-ui-react 6.0.0 frontend (React 19, Umi Max, Ant Design 6 + ProComponents, pnpm). |
 | `platform/` | Docker Compose for dev-stage metadata MySQL (`dbs-mysql`, host `13306`, db `ry-vue`) and Redis (`dbs-redis`, host `16379`). |
-| `deploy/` | Local engine stack (Compose project `data-sync-poc`, `ds-poc-*` containers: source MySQL, PostgreSQL/MySQL/Kafka targets, SeaTunnel) under `local-stack/`, the metadata migration script, the production deployment package (`prod/`: compose, scripts, image Dockerfiles, Word manual sources; built by `build-prod-package.ps1`), and the older MVP offline template (`offline/`). Never touches `platform/`. |
+| `deploy/` | Local engine stack (Compose project `data-sync-poc`, `ds-poc-*` containers: source MySQL, PostgreSQL/MySQL/Kafka targets, SeaTunnel) under `local-stack/`, the metadata migration script, the production deployment package (`prod/`: compose, scripts, image Dockerfiles, Word manual sources; built by `build-prod-package.ps1`). Never touches `platform/`. |
 | `docs/` | Flat architecture + design reference. Start at `docs/README.md`. |
 
 All product API routes live under `/sync`; backend package is `org.dromara.sync`.
@@ -65,7 +65,7 @@ with its own `pnpm install --offline` made by the elevated session does (`.dev-r
 absolute paths break it); the production package build uses it. The frontend dev server for the user is
 started in a terminal on Windows (`.\dev.ps1 up` skips what already runs); frontend lint runs on Linux. Linux→Windows runs at ~8 KB/s: sync git
 deltas only, build artifacts on Windows. The Windows host is shared with other projects: touch only
-`dbs-*` / `ds-poc-*` / `data-sync-mvp-offline-*` containers, never `docker system prune`, and mind
+`dbs-*` / `ds-poc-*` containers (plus a production-package test install, Compose project `data-sync-prodtest`), never `docker system prune`, and mind
 C: (~16 GB free).
 
 ## Essential commands
@@ -108,7 +108,7 @@ backend on **:18081**.
 
 ```powershell
 server\script\bin\run-backend-dev.ps1 [-Fast] [-Background] [-SkipBuild]  # reactor install (no fat jar) + spring-boot:run — what dev.ps1 uses
-server\script\bin\start-backend-dev.ps1 [-Background]         # fat-jar path — release / offline-package verification
+server\script\bin\start-backend-dev.ps1 [-Background]         # fat-jar path — release verification
 mvn -pl ruoyi-admin -am package -DskipTests                   # build the full ruoyi-admin.jar (maven.test.skip=true in root pom)
 ```
 
@@ -290,7 +290,7 @@ Spring/MyBatis-Plus or React/Antd habits.
   `dev.ps1`, `run-backend-dev.ps1`, `start-backend-dev.ps1`).
 - Never commit `.env` files, RSA keys, `server/logs/`, `**/target/`, `node_modules/`,
   Docker volumes (`platform/runtime/`, `deploy/local-stack/runtime/`), the repo-root
-  `.dev-runtime/`, or `deploy/release/` (offline package build output).
+  `.dev-runtime/`, or `deploy/release/` (production package build output).
   Commit only `.env.example` templates. See `docs/git-strategy.md`.
 - Commit message style in history is Conventional-Commits-ish with a scope for repo-wide
   changes: `poc:`, `release:`, `docs(repo):`, `chore(repo):`. Commits are made on the Linux dev

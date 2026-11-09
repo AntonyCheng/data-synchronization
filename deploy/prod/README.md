@@ -19,7 +19,7 @@
 
 镜像都由构建机上已有的镜像生成，构建时不拉取：
 
-- `data-sync/backend`：取 `data-sync-mvp/backend:latest`（server/ruoyi-admin/Dockerfile 在 Liberica OpenJDK 21 上构建）的运行时，去掉旧 jar 压成单层，放入 `-Pprod` 打包的 jar 与生成 admin 口令哈希用的 Hutool + BCryptHash.java。
+- `data-sync/backend`：取 `data-sync/backend-base:liberica-21.0.12`（server/ruoyi-admin/Dockerfile 在 Liberica OpenJDK 21 上构建的后端镜像，原名 `data-sync-mvp/backend:latest`）的运行时，去掉旧 jar 压成单层，放入 `-Pprod` 打包的 jar 与生成 admin 口令哈希用的 Hutool + BCryptHash.java。构建机上没有这个镜像时，要在能访问镜像仓库的 Windows 交互终端里重建：先在 `server/` 下 `mvn -pl ruoyi-admin -am package -DskipTests`，再 `docker build -t data-sync/backend-base:liberica-21.0.12 server/ruoyi-admin`。
 - `data-sync/seatunnel`：取 `data-sync-poc/seatunnel:2.3.13-before-kafka-patch`（deploy/local-stack/seatunnel/Dockerfile 的构建结果），按 `images/seatunnel/prune.sh` 只保留平台作业用到的连接器（MySQL-CDC、Jdbc、Kafka 及排障用的 console/fake/assert）后压成单层，再覆盖两个补丁 jar（vendor/patched）。打包脚本核对镜像中补丁 jar 的 SHA-1 与 vendor/patched 一致。
 - `data-sync/web`：caddy:2.8.4-alpine + 前端构建产物。
 

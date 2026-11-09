@@ -1,7 +1,7 @@
 # 开发模式：Linux 开发机 + Windows 验证机
 
 自 2026-11 起，代码在 **Linux 开发机**上编辑、提交、编译和跑单测；凡是需要"跑起来"的工作——`dev.ps1` 整套栈、
-SeaTunnel 引擎栈、e2e 套件、浏览器验收、离线包构建与部署——都在 **Windows 验证机**上进行。Linux 经 SSH 驱动
+SeaTunnel 引擎栈、e2e 套件、浏览器验收、生产包构建与部署——都在 **Windows 验证机**上进行。Linux 经 SSH 驱动
 Windows，仓库根目录的 `win.sh` 封装了全部操作（与 Windows 侧的 `dev.ps1` 对称）。
 
 ## 1. 分工
@@ -10,7 +10,7 @@ Windows，仓库根目录的 `win.sh` 封装了全部操作（与 Windows 侧的
 |---|---|---|
 | 位置 | `/home/tayyab/projects/data-synchronization`，Claude Code 在这里运行 | `10.9.0.6`（`DESKTOP-1BJC202`，SSH 别名 `lxz-win`），`C:\projects\data-synchronization` |
 | 资源 | 2 vCPU / 3.8 GB 内存，资源紧张 | 8 核 / 16 GB；**C 盘仅剩约 16 GB** |
-| 负责 | 改代码、git 提交、后端编译 + `@Tag("dev")` 单测、前端 `pnpm lint`（oxlint + `tsc`） | `dev.ps1`（含 `-Poc` 引擎栈）、e2e、浏览器验收、离线包构建与部署 |
+| 负责 | 改代码、git 提交、后端编译 + `@Tag("dev")` 单测、前端 `pnpm lint`（oxlint + `tsc`） | `dev.ps1`（含 `-Poc` 引擎栈）、e2e、浏览器验收、生产包构建与部署 |
 | 不做 | 不起后端 / 前端 dev server / 容器，不跑 e2e | 不直接改代码——工作区只是 Linux 的镜像 |
 | 工具链 | Ubuntu 24.04、OpenJDK 21（apt `openjdk-21-jdk-headless`）、`server/mvnw`（Maven 3.9.12）、Node 22 + pnpm 10.34.5（corepack）、git、ssh | Windows 11 + PowerShell 5.1、JDK 21（`JAVA_HOME=C:\dependence\jdk-21.0.10`）、Maven 3.8.6、nvm Node 22.20.0 + pnpm 10.34.5、Docker Desktop、Git for Windows |
 
@@ -146,9 +146,9 @@ corepack 只在 `web/` 里按 `packageManager` 选用 pnpm 10.34.5，在仓库�
 ## 9. 共用主机的约束
 
 - 这台 Windows 还承载用户其他项目的容器、镜像和卷。只操作本项目的
-  `dbs-*`、`ds-poc-*`（离线包验证另有 `data-sync-mvp-offline-*`）；**不要 `docker system prune`，不删别人的镜像或卷**。
+  `dbs-*`、`ds-poc-*`（生产包验收另有测试实例 `data-sync-prodtest-*`）；**不要 `docker system prune`，不删别人的镜像或卷**。
 - 磁盘紧张：C 盘约 16 GB 空闲，Docker 数据盘（`docker_data.vhdx`）约 74 GB。构建镜像（SeaTunnel 镜像 7.4 GB）或
-  离线包前先 `./win.sh ps 'docker system df'`；需要清理时先问用户。
+  生产包前先 `./win.sh ps 'docker system df'`；需要清理时先问用户。
 - Windows 上可能有用户自己的会话和工具在运行，不要结束不属于本项目的进程。
 
 ## 10. 排障

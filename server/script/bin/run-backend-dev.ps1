@@ -14,7 +14,7 @@ Two steps:
      freshly installed local repo. `optimizedLaunch` (plugin default) adds
      -XX:TieredStopAtLevel=1 for a faster boot.
 
-start-backend-dev.ps1 remains the fat-jar / offline-package verification path.
+start-backend-dev.ps1 remains the fat-jar / release verification path.
 
 .PARAMETER Fast
 Also activate the dev-fast profile (workflow / LiteFlow off, lazy-init on) for a faster boot.
