@@ -1,13 +1,16 @@
 package org.dromara.sync.service.impl;
 
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.sync.domain.DataSource;
 import org.dromara.sync.domain.vo.ConnectionTestResult;
 import org.dromara.sync.mapper.DataSourceMapper;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -68,6 +71,30 @@ class DataSourceServiceImplTest {
         assertFalse(result.isSuccess());
         assertTrue(result.getMessage().contains("缩写"), result.getMessage());
         assertNull(result.getTimeZone());
+    }
+
+    /** ds_data_source keeps database_name / username / password NOT NULL; a Kafka cluster may have none of them. */
+    @Test
+    void aKafkaClusterWithoutDatabaseOrCredentialsIsStoredWithEmptyStrings() {
+        DataSource kafka = new DataSource();
+        kafka.setSourceName("kafka");
+        kafka.setSourceType("KAFKA");
+        kafka.setHost("kafka.example");
+        kafka.setPort(9092);
+        DataSourceServiceImpl.normalizeAndValidate(kafka, true);
+        assertEquals("", kafka.getDatabaseName());
+        assertEquals("", kafka.getUsername());
+        assertEquals("", kafka.getPassword());
+
+        DataSource named = dataSource();
+        named.setSourceType("KAFKA");
+        DataSourceServiceImpl.normalizeAndValidate(named, true);
+        assertEquals("root", named.getUsername(), "given values are kept");
+        assertEquals("secret", named.getPassword());
+
+        DataSource mysql = dataSource();
+        mysql.setDatabaseName(null);
+        assertThrows(ServiceException.class, () -> DataSourceServiceImpl.normalizeAndValidate(mysql, true), "a relational source still needs its database");
     }
 
     private static DataSource dataSource() {

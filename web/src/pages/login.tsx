@@ -25,9 +25,11 @@ function getRememberedLogin() {
   if (typeof window === 'undefined') return { rememberMe: false };
   const rememberMe = localStorage.getItem('rememberMe') === 'true';
   const username = localStorage.getItem('username') || undefined;
+  // The scaffold's demo account is prefilled only by the dev server, never in a production build.
+  const demo = process.env.NODE_ENV === 'development';
   return {
-    username: rememberMe ? username : 'admin',
-    password: rememberMe ? undefined : 'admin123',
+    username: rememberMe ? username : demo ? 'admin' : undefined,
+    password: rememberMe || !demo ? undefined : 'admin123',
     rememberMe
   };
 }

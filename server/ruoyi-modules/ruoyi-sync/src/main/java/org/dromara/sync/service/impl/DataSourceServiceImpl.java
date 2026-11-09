@@ -235,7 +235,8 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (request.getServerTimeZone() != null) target.setServerTimeZone(request.getServerTimeZone());
     }
 
-    private void normalizeAndValidate(DataSource entity, boolean passwordRequired) {
+    /** Package-private for tests. */
+    static void normalizeAndValidate(DataSource entity, boolean passwordRequired) {
         if (entity == null) {
             throw new ServiceException("数据源参数不能为空");
         }
@@ -247,6 +248,14 @@ public class DataSourceServiceImpl implements IDataSourceService {
         if (StringUtils.isBlank(entity.getHost()) || entity.getPort() == null || (!kafka && (StringUtils.isBlank(entity.getDatabaseName())
             || StringUtils.isBlank(entity.getUsername()) || (passwordRequired && StringUtils.isBlank(entity.getPassword()))))) {
             throw new ServiceException("数据源连接参数不完整");
+        }
+        if (kafka) {
+            // A Kafka cluster has no database and may need no credentials, but ds_data_source keeps these
+            // columns NOT NULL without a default: an omitted value would fail the insert under the strict
+            // sql_mode MySQL 8 runs with.
+            if (entity.getDatabaseName() == null) entity.setDatabaseName("");
+            if (entity.getUsername() == null) entity.setUsername("");
+            if (entity.getPassword() == null) entity.setPassword("");
         }
         if (StringUtils.isBlank(entity.getSslEnabled())) entity.setSslEnabled("0");
         if (StringUtils.isBlank(entity.getStatus())) entity.setStatus("0");
