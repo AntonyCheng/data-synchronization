@@ -688,16 +688,49 @@ DELETE + INSERT、未选字段不发布、保存点暂停恢复后补发，列�
 - 向导建 topic 固定 1 分区 1 副本；
 - 每次登录都会往消息中心插一条"欢迎登录 RuoYi-Vue-Plus"，把告警淹没。
 
+### 生产 Docker 部署包（2026-11-09）
+
+`deploy/prod/` + `deploy/build-prod-package.ps1`：单机 Docker Compose，Linux x86_64，安装包自带全部镜像（构建与部署都不访问镜像仓库），附 Word 版部署手册与操作手册（截图为真实页面）。内容见 `deploy/prod/README.md`。
+
+- 交付包加固（原待办）已在包内完成：
+  - 后端使用 `-Pprod` 构建；
+  - 元数据库用平台账号 datasync，不用 root；
+  - admin 初始口令必须在 `.env` 中填写，安装时写入 BCrypt 哈希；
+  - 打包时核对引擎镜像里两个补丁 jar 的 SHA-1；
+  - 每次打包都重新构建，manifest 记录提交号。
+- 包内提供备份、恢复、升级、卸载脚本。
+- 平台内部服务使用 `datasync-*` 网络别名：引擎和后端接入宿主机上已有的网络时，也不会连到同名的 mysql、redis。
+- 全新安装验证中发现并修复两个问题：
+  - 页面新建 Kafka 数据源报"未知异常"：`database_name`、`username`、`password` 为 NOT NULL，平台改为写入空串；
+  - 生产版登录页预填演示账号 admin / admin123：改为只在开发环境预填。
+
+**验证**（Windows 构建机打包，在 Docker Desktop 上用安装包全新安装，源库与 Kafka 用本地引擎栈）：
+- 安装、自检、卸载 `--purge-data` 均正常；
+- 页面全流程正常：登录、新增 MySQL / Kafka 数据源、建任务、启动；
+- 30 KB 行触发发布暂停，调大上限后 20 秒内自动续传；1.5 MB 行正常送达；
+- 删除未发布的 raw 记录后报告越界、任务转为需重新初始化，重新初始化后恢复正常；
+- 两表任务组正常；FULL 模式同步到 PostgreSQL 和 MySQL 均正常；
+- 修改 `ENGINE_HEAP` 后 JVM 实际堆随之变化；
+- 只重启后端不中断作业；
+- 备份 / 恢复正常；HTTPS（自签名证书）正常。
+
+**发现的限制：引擎重启后作业不能从原进度继续。**
+- 现象：引擎重启（服务器重启、改引擎配置、升级、恢复备份都会重启引擎）后，运行中的任务转为 FAILED。「恢复」被拒（`EngineJobRunner.resumeRefusal`：`/jobs/checkpoints/{id}` 返回空），任务转为 REINITIALIZE_REQUIRED。先暂停（`SAVEPOINT_DONE`）再重启也一样。
+- 原因：Zeta 未开启 IMap 持久化，重启后忘记全部作业；checkpoint 文件其实仍在数据目录中。
+- 按 SeaTunnel 文档为 `engine*` 配置 `FileMapStoreFactory` 落盘后，2.3.13 单节点启动时在初始化 `engine_checkpoint_monitor` 时抛 NullPointerException，引擎无法就绪（已回退）。
+- 手册已按实际行为改写：维护前中止任务、维护后启动；意外重启后重新初始化（任务组逐表）。这两条路径都实测通过。
+
 ### 仍开放的待办（2026-11-08）
 
 生产就绪评估中与环境无关、尚未处理的（A 档余项与 B 档）：
-- 交付包加固：生产 profile、非 root 数据库账号、强制修改默认密码、打包时校验引擎镜像带补丁连接器、每次打包重新构建并记录提交；
+- **引擎重启后不能从原进度继续**（见上节）。任何引擎重启都意味着全部任务重新全量，可选方向：
+  - 查清 2.3.13 IMap 落盘的 NullPointerException；
+  - 或让平台在引擎不认识该作业时，确认数据目录中有 checkpoint 后带 savepoint 重新提交（需要引擎侧可查询的依据，不能从未知位点恢复）；
 - GoldenDB CDC 变更回归（需要写权限）；
 - 压测与资源基线；
 - Kafka 认证（SASL/SSL）与多 broker 地址；
 - topic 副本数可配置（raw topic 与整库组目标 topic 现固定 1 副本）；
-- 端到端对账；
-- 元数据库与 checkpoint 的备份 / 恢复。
+- 端到端对账。
 
 需要生产环境信息才能定的：高可用、GoldenDB 分布式与主备切换、binlog 连接数评估。
 

@@ -1,0 +1,11 @@
+# HTTPS 叠加配置：.env 中 ENABLE_HTTPS=true 时由脚本自动叠加。
+# 证书放在 certs/server.crt 与 certs/server.key（PEM），80 端口只做跳转。
+services:
+  web:
+    environment:
+      WEB_HTTPS_PORT: ${WEB_HTTPS_PORT:-443}
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./caddy/Caddyfile.https:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro

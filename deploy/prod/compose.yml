@@ -1,0 +1,189 @@
+# 数据同步平台 - 生产部署（单机 Docker Compose）
+#
+# 由 scripts/*.sh 驱动，不要直接改这里的口令：所有可变项都在 .env 里（见 .env.example）。
+# 只有 web 对外发布端口；MySQL、Redis、引擎和后端只在本项目的容器网络内可达。
+# 服务之间用 datasync-* 别名互相访问（不用服务名 mysql / redis / seatunnel / backend）：现场在
+# compose.override.yml 里把容器接入其他网络时，那边同名的服务不会被误连。
+# 部署说明见 docs/部署手册.docx。
+
+name: ${COMPOSE_PROJECT_NAME:-data-sync}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "5"
+
+services:
+  # 随包元数据库（COMPOSE_PROFILES=bundled-db）。改用已有 MySQL 时清空 COMPOSE_PROFILES，
+  # 并把 DB_HOST / DB_PORT 指向它，见部署手册「使用已有 MySQL」。
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    pull_policy: never
+    profiles: ["bundled-db"]
+    restart: unless-stopped
+    logging: *logging
+    networks:
+      default:
+        aliases: [datasync-mysql]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 未设置}
+      # 官方镜像首次初始化时创建库和平台专用账号（只对这个库有全部权限，不是 root）。
+      MYSQL_DATABASE: ${DB_NAME:-ry-vue}
+      MYSQL_USER: ${DB_USER:-datasync}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 未设置}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --explicit_defaults_for_timestamp=true
+      - --lower_case_table_names=1
+      - --max_connections=500
+    volumes:
+      - ${DATA_DIR:-./data}/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *logging
+    networks:
+      default:
+        aliases: [datasync-redis]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 未设置}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - ${DATA_DIR:-./data}/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # 一次性：空库时导入初始数据，然后按顺序执行全部（幂等的）结构迁移。安装和升级都会先跑它。
+  migrate:
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    pull_policy: never
+    restart: "no"
+    logging: *logging
+    depends_on:
+      mysql:
+        condition: service_healthy
+        required: false
+    environment:
+      DB_HOST: ${DB_HOST:-datasync-mysql}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_NAME: ${DB_NAME:-ry-vue}
+      DB_USER: ${DB_USER:-datasync}
+      DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./database:/opt/datasync/database:ro
+    entrypoint: ["sh", "/opt/datasync/database/migrate.sh"]
+
+  # SeaTunnel 2.3.13（Zeta 引擎），带 GoldenDB Table_map 与 Kafka 投递两个补丁连接器。
+  seatunnel:
+    image: data-sync/seatunnel:${DS_VERSION:?DS_VERSION 未设置}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *logging
+    networks:
+      default:
+        aliases: [datasync-engine]
+    # 引擎时区保持 UTC（已验证的配置）：时间值不依赖它，见 docs/type-mapping-mysql-postgresql.md。
+    environment:
+      TZ: UTC
+      ENGINE_HEAP: ${ENGINE_HEAP:-4g}
+    volumes:
+      - ./seatunnel/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml:ro
+      - ${DATA_DIR:-./data}/seatunnel/checkpoint:/opt/seatunnel/checkpoint
+      - ${DATA_DIR:-./data}/seatunnel/logs:/opt/seatunnel/logs
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/overview >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  backend:
+    image: data-sync/backend:${DS_VERSION:?DS_VERSION 未设置}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *logging
+    networks:
+      default:
+        aliases: [datasync-backend]
+    depends_on:
+      mysql:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seatunnel:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SPRING_PROFILES_ACTIVE: prod
+      JAVA_OPTS: "-Xms${BACKEND_HEAP:-2g} -Xmx${BACKEND_HEAP:-2g} -Duser.timezone=${TZ:-Asia/Shanghai}"
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_URL: "jdbc:mysql://${DB_HOST:-datasync-mysql}:${DB_PORT:-3306}/${DB_NAME:-ry-vue}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=${TZ:-Asia/Shanghai}&autoReconnect=true&rewriteBatchedStatements=true&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true"
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_USERNAME: ${DB_USER:-datasync}
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_PASSWORD: ${DB_PASSWORD}
+      SPRING_DATA_REDIS_HOST: datasync-redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SEATUNNEL_ENDPOINT: http://datasync-engine:8080
+      # 数据源口令加密存储；主密钥丢失则已保存的数据源口令无法解密，务必单独备份。
+      SYNC_CREDENTIAL_ENCRYPTION_ENABLED: "true"
+      SYNC_CREDENTIAL_ENCRYPTION_PASSWORD: ${CREDENTIAL_KEY:?CREDENTIAL_KEY 未设置}
+      SYNC_ENGINE_KAFKA_MAX_RECORD_BYTES: ${KAFKA_MAX_RECORD_BYTES:-16777216}
+      LOGGING_LEVEL_ORG_DROMARA: ${LOG_LEVEL:-info}
+      # 平台不使用 Snail AI；关掉它的 OpenAPI 客户端，免得启动时去连不存在的 8900 端口。
+      SNAILAI_OPENAPI_ENABLED: "false"
+    volumes:
+      - ${DATA_DIR:-./data}/backend/logs:/ruoyi/server/logs
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  web:
+    image: data-sync/web:${DS_VERSION:?DS_VERSION 未设置}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_HTTP_PORT:-80}:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DATA_DIR:-./data}/caddy:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30

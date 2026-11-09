@@ -1,0 +1,40 @@
+# Web 入口（HTTPS）。证书：certs/server.crt + certs/server.key（PEM）。80 端口跳转到 HTTPS。
+{
+	admin off
+	auto_https off
+}
+
+(app) {
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=31536000"
+	}
+	handle_path /prod-api/* {
+		reverse_proxy datasync-backend:8080 {
+			flush_interval -1
+		}
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+:80 {
+	handle /healthz {
+		respond "ok" 200
+	}
+	handle {
+		redir https://{host}:{$WEB_HTTPS_PORT:443}{uri} permanent
+	}
+}
+
+:443 {
+	tls /certs/server.crt /certs/server.key
+	import app
+}

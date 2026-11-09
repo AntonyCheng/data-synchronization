@@ -9,3 +9,7 @@
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+# Production package sources end up on Linux hosts: keep them LF on every checkout.
+deploy/prod/caddy/* text eol=lf
+deploy/prod/env.example text eol=lf
+deploy/prod/web.env.production text eol=lf

@@ -1,0 +1,23 @@
+# SeaTunnel Zeta 引擎配置（单节点）。checkpoint 写在容器的 /opt/seatunnel/checkpoint，
+# 即宿主机 ${DATA_DIR}/seatunnel/checkpoint：任务的暂停 / 恢复依赖它（引擎重启后作业状态不保留，见部署手册 4.2）。
+# http.port 只在容器网络内使用（后端通过 http://datasync-engine:8080 调用），不要对外发布。
+seatunnel:
+  engine:
+    backup-count: 0
+    print-execution-info-interval: 10
+    slot-service:
+      dynamic-slot: true
+    checkpoint:
+      interval: 5000
+      timeout: 60000
+      storage:
+        type: hdfs
+        max-retained: 10
+        plugin-config:
+          namespace: file:///opt/seatunnel/checkpoint/
+          storage.type: hdfs
+          fs.defaultFS: file:///
+    http:
+      enable-http: true
+      port: 8080
+      enable-dynamic-port: false

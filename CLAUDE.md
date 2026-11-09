@@ -20,7 +20,7 @@ scheduling, and the SeaTunnel REST adapter.
 | `server/` | RuoYi-Vue-Plus 6.0.0 backend (Spring Boot 4.1, Java 21, Maven multi-module). Upstream scaffold — **only `ruoyi-modules/ruoyi-sync` is this project's code.** |
 | `web/` | plus-ui-react 6.0.0 frontend (React 19, Umi Max, Ant Design 6 + ProComponents, pnpm). |
 | `platform/` | Docker Compose for dev-stage metadata MySQL (`dbs-mysql`, host `13306`, db `ry-vue`) and Redis (`dbs-redis`, host `16379`). |
-| `deploy/` | Local engine stack (Compose project `data-sync-poc`, `ds-poc-*` containers: source MySQL, PostgreSQL/MySQL/Kafka targets, SeaTunnel) under `local-stack/`, the metadata migration script, and the offline delivery template/packaging scripts. Never touches `platform/`. |
+| `deploy/` | Local engine stack (Compose project `data-sync-poc`, `ds-poc-*` containers: source MySQL, PostgreSQL/MySQL/Kafka targets, SeaTunnel) under `local-stack/`, the metadata migration script, the production deployment package (`prod/`: compose, scripts, image Dockerfiles, Word manual sources; built by `build-prod-package.ps1`), and the older MVP offline template (`offline/`). Never touches `platform/`. |
 | `docs/` | Flat architecture + design reference. Start at `docs/README.md`. |
 
 All product API routes live under `/sync`; backend package is `org.dromara.sync`.
@@ -59,9 +59,11 @@ cannot reach the Windows credential store, so a `docker pull` or an image build 
 fails there — the engine image is used as built, and is rebuilt only in an interactive session on Windows.
 What it cannot handle: an SSH session of this admin account is elevated (High integrity), and Windows 11
 refuses to let an elevated process cross junctions / symlinks a normal process created ("untrusted mount
-point") — pnpm's `node_modules` is all junctions, so **no Node tooling runs remotely**. The frontend dev
-server is started by the user in a terminal on Windows (`.\dev.ps1 up` skips what already runs); frontend
-lint runs on Linux. Linux→Windows runs at ~8 KB/s: sync git
+point") — pnpm's `node_modules` is all junctions, so **`web/` cannot run Node tooling remotely**. A copy
+with its own `pnpm install --offline` made by the elevated session does (`.dev-runtime\web-remote`: refresh its
+`src` with `robocopy web\src ... /MIR /XD .umi .umi-production` - a plain mirror copies `web\src\.umi`, whose
+absolute paths break it); the production package build uses it. The frontend dev server for the user is
+started in a terminal on Windows (`.\dev.ps1 up` skips what already runs); frontend lint runs on Linux. Linux→Windows runs at ~8 KB/s: sync git
 deltas only, build artifacts on Windows. The Windows host is shared with other projects: touch only
 `dbs-*` / `ds-poc-*` / `data-sync-mvp-offline-*` containers, never `docker system prune`, and mind
 C: (~16 GB free).
@@ -158,6 +160,15 @@ docker compose --project-name data-sync-platform --file platform/docker-compose.
 # ry_sync.sql is the first-init seed; ry_sync_migration_*.sql apply in filename order, idempotent:
 deploy\migrate-platform-schema.ps1
 ```
+
+### Production package (Windows build host)
+
+`deploy\build-prod-package.ps1 -Version 1.0.0 [-WebDir .dev-runtime\web-remote]` builds the single-host Docker
+deployment for Linux x86_64 into `deploy\release\data-sync-<ver>\` + `.tar`: images `data-sync/backend|seatunnel|web`
+built from images already on the host (no registry access; the engine image is slimmed to the connectors the
+jobs use and must carry the vendor/patched jars), compose + `.env.example`, `scripts/` (install / verify / dc /
+backup / restore / upgrade / uninstall), the metadata seed + migrations, and the Word manuals generated from
+`deploy/prod/docs/*.md`. See `deploy/prod/README.md`.
 
 ### Local engine stack (isolated, from repo root)
 

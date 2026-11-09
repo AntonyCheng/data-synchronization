@@ -1,0 +1,33 @@
+# Web 入口（HTTP）。前端静态文件在镜像的 /srv，/prod-api/ 转发给后端。
+{
+	admin off
+	auto_https off
+}
+
+(app) {
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+	handle_path /prod-api/* {
+		# 消息中心使用 SSE 长连接，立即刷新响应。
+		reverse_proxy datasync-backend:8080 {
+			flush_interval -1
+		}
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+:80 {
+	handle /healthz {
+		respond "ok" 200
+	}
+	import app
+}
